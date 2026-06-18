@@ -41,11 +41,12 @@ function signOf(r){ return r.recordType === "refund" ? -1 : 1; }
 
 // Сколько заготовок списать со склада:
 // - refund: 0 (заготовка уже списана при продаже)
-// - sale: qty + defect (все изготовленные — годные + брак)
-// - sale с qty=0 и defect>0: defect (только брак)
+// - sale для "Прочие услуги": 0 (это услуги, не заготовки)
+// - sale для обычных категорий: qty + defect (все изготовленные — годные + брак)
 // - sale с qty=0 и defect=0: 0 (пустая запись)
 function stockDelta(r){
   if(r.recordType === "refund") return 0;
+  if(r.category === "Прочие услуги") return 0;
   return (r.qty || 0) + (r.defect || 0);
 }
 
@@ -1114,6 +1115,8 @@ export default function App(){
   }
 
   function renderStockCategory(cat, stockObj, isWS){
+    // «Прочие услуги» — не показываем в складах (это услуги, не заготовки)
+    if(cat === "Прочие услуги") return null;
     const ms = markers[cat]||[];
     const search = stockSearch.toLowerCase();
     const filtered = search ? ms.filter(m=>m.toLowerCase().includes(search)) : ms;
@@ -1136,15 +1139,14 @@ export default function App(){
         </div>
         {expanded&&(
           <div style={{borderTop:`1px solid ${C.border}`}}>
-            <div style={{display:"grid",gridTemplateColumns:`1fr 80px${isWS?" 70px":""}`,gap:6,
+            <div style={{display:"grid",gridTemplateColumns:"1fr 100px",gap:6,
               padding:"6px 14px",fontSize:11,color:C.textDim,borderBottom:`1px solid ${C.border}`,background:"#13161f"}}>
               <span>Маркировка</span><span style={{textAlign:"center"}}>Кол-во</span>
-              {isWS&&<span style={{textAlign:"center"}}>Порог</span>}
             </div>
             {filtered.map(m=>{
               const q=stockObj[m]||0,cfg=stockCfg[m]||{};
               return (
-                <div key={m} style={{display:"grid",gridTemplateColumns:`1fr 80px${isWS?" 70px":""}`,gap:6,
+                <div key={m} style={{display:"grid",gridTemplateColumns:"1fr 100px",gap:6,
                   padding:"7px 14px",borderBottom:`1px solid ${C.border}22`,alignItems:"center",
                   background:q===0?"#16111a":q>0&&cfg.threshold>0&&q<=cfg.threshold?"#1f1a0e":"transparent"}}>
                   <span style={{fontSize:13,color:q===0?C.textDim:C.text}}>{m}</span>
@@ -1154,10 +1156,6 @@ export default function App(){
                     else{setStockMain(ns);await sSet("stock:main",ns);}
                   }} style={{...s.input,width:"100%",textAlign:"center",padding:"5px 6px",fontSize:13,
                     color:q===0?C.danger:cfg.threshold>0&&q<=cfg.threshold?C.warn:C.success}}/>
-                  {isWS&&<NumInput value={cfg.threshold||0} placeholder="—" onChange={async nv=>{
-                    const nc={...stockCfg,[m]:{...(stockCfg[m]||{}),threshold:nv}};
-                    setStockCfg(nc);await sSet("stock:cfg",nc);
-                  }} style={{...s.input,width:"100%",textAlign:"center",padding:"5px 6px",fontSize:12}}/>}
                 </div>
               );
             })}
@@ -1381,17 +1379,19 @@ export default function App(){
               <label style={s.label}>Маркировка</label>
               <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:8}}>
                 {(safeMarkers[category]||[]).map(m=>{
-                  const wq = wsStock[m]||0;
+                  const isService = category === "Прочие услуги";
+                  const wq = isService ? 0 : (wsStock[m]||0);
                   const cfg = safeStockCfg[m]||{};
-                  const low = cfg.threshold>0 && wq<=cfg.threshold;
-                  const empty = wq===0;
+                  const low = !isService && cfg.threshold>0 && wq<=cfg.threshold;
+                  const empty = !isService && wq===0;
+                  const showStockWarning = !isService;
                   return (
                     <button key={m} onClick={()=>setMarker(m)} style={{
                       fontSize:12,padding:"5px 10px",borderRadius:7,cursor:"pointer",
                       background:marker===m?C.accentDim:C.bgInput,
-                      border:`1px solid ${marker===m?C.accent:empty?C.danger+"88":low?C.warn+"88":C.border}`,
-                      color:marker===m?C.accent:empty?C.danger:low?C.warn:C.text,
-                    }}>{m}{wq>0&&<span style={{fontSize:10,opacity:.7,marginLeft:4}}>{wq}</span>}</button>
+                      border:`1px solid ${marker===m?C.accent:(showStockWarning&&empty)?C.danger+"88":low?C.warn+"88":C.border}`,
+                      color:marker===m?C.accent:(showStockWarning&&empty)?C.danger:low?C.warn:C.text,
+                    }}>{m}{!isService&&wq>0&&<span style={{fontSize:10,opacity:.7,marginLeft:4}}>{wq}</span>}</button>
                   );
                 })}
               </div>
@@ -1417,7 +1417,7 @@ export default function App(){
                 reader.readAsDataURL(f);
               }}/>
             </div>
-            {marker&&(
+            {marker && category !== "Прочие услуги" && (
               <div style={{...s.card,padding:"8px 12px",marginBottom:12,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                 <span style={{fontSize:12,color:C.textSub}}>Остаток в {workshop}</span>
                 <StockBadge qty={wsStock[marker.trim()]||0} threshold={(stockCfg[marker.trim()]||{}).threshold||0}/>
@@ -1548,7 +1548,7 @@ export default function App(){
                 <div style={{fontSize:13,color:C.textSub,marginBottom:10}}>Остатки · <b style={{color:wsColor}}>{workshop}</b></div>
                 <input value={stockSearch} onChange={e=>setStockSearch(e.target.value)} placeholder="Поиск по маркировке..." style={{...s.input,marginBottom:12}}/>
                 {sortedCategories(safeMarkers).map(cat=>renderStockCategory(cat,wsStock,true))}
-                <div style={{fontSize:11,color:C.textDim,marginTop:4}}>«Порог» — при каком остатке показывать ⚠</div>
+                <div style={{fontSize:11,color:C.textDim,marginTop:4}}>«Прочие услуги» в складе не отображаются</div>
               </div>
             )}
             {stockTab==="main"&&(
