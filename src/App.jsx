@@ -453,6 +453,247 @@ export class ErrorBoundary extends Component {
   }
 }
 
+// ── Месяц в годовой статистике — разворачивается по дням ──
+function YearMonthCard({ monthKey, monthData, monthName, workshop, onEditRecord, allRecords }){
+  const [expanded, setExpanded] = useState(false);
+  const mn = monthName;
+  const avgPerDay = monthData.days.size > 0 ? monthData.amount / monthData.days.size : 0;
+
+  // Подсчёт по дням внутри месяца
+  const byDay = {};
+  monthData.recList.forEach(r=>{
+    const dk = dateOf(r.timestamp);
+    if(!byDay[dk]) byDay[dk] = { qty:0, amount:0, defect:0, records:[] };
+    const s = signOf(r);
+    byDay[dk].qty += r.qty * s;
+    byDay[dk].amount += r.amount * s;
+    byDay[dk].defect += r.defect;
+    byDay[dk].records.push(r);
+  });
+
+  return (
+    <div style={{...s.card,padding:0,overflow:"hidden",marginBottom:8}}>
+      <div onClick={()=>setExpanded(v=>!v)}
+        style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"12px 14px",cursor:"pointer"}}>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <span style={{fontWeight:700,fontSize:14}}>{MONTH_NAMES[mn]}</span>
+          {monthData.defect>0 && <span style={{...s.tag(C.warn),fontSize:10}}>брак {monthData.defect}</span>}
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <div style={{textAlign:"right"}}>
+            <div style={{color:monthData.amount>=0?C.accent:C.refund,fontWeight:700,fontSize:14}}>{fmt(monthData.amount)} р</div>
+            <div style={{fontSize:11,color:C.textSub}}>{fmt(monthData.qty)} шт · {monthData.days.size} дн.</div>
+          </div>
+          <span style={{color:C.textDim,fontSize:14}}>{expanded?"▲":"▼"}</span>
+        </div>
+      </div>
+      {!expanded && (
+        <div style={{display:"flex",gap:16,padding:"0 14px 10px",fontSize:11,color:C.textDim,flexWrap:"wrap"}}>
+          <span>Среднее: {fmt(avgPerDay)} р/день</span>
+          {workshop==="SMART" && <span style={{color:C.success}}>Доход: {fmt(monthData.amount*INCOME_PCT)} р</span>}
+        </div>
+      )}
+      {expanded && (
+        <div style={{borderTop:`1px solid ${C.border}`,padding:"10px 14px"}}>
+          {/* Сводка по месяцу */}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:12,fontSize:12}}>
+            <div style={{background:C.bgInput,padding:"8px",borderRadius:6}}>
+              <div style={{color:C.textSub,fontSize:10}}>Сумма</div>
+              <div style={{color:monthData.amount>=0?C.accent:C.refund,fontWeight:700}}>{fmt(monthData.amount)} р</div>
+            </div>
+            <div style={{background:C.bgInput,padding:"8px",borderRadius:6}}>
+              <div style={{color:C.textSub,fontSize:10}}>Ключей</div>
+              <div style={{fontWeight:700}}>{fmt(monthData.qty)} шт</div>
+            </div>
+            <div style={{background:C.bgInput,padding:"8px",borderRadius:6}}>
+              <div style={{color:C.textSub,fontSize:10}}>Раб. дней</div>
+              <div style={{fontWeight:700}}>{monthData.days.size}</div>
+            </div>
+          </div>
+
+          {/* По дням */}
+          <div style={{fontSize:11,fontWeight:700,color:C.textDim,marginBottom:6,textTransform:"uppercase"}}>По дням</div>
+          {Object.entries(byDay).sort((a,b)=>b[0].localeCompare(a[0])).map(([dk,d])=>{
+            const parts = dk.split("-");
+            const label = `${parts[2]}.${parts[1]}.${parts[0]}`;
+            return (
+              <DayRow key={dk} dateLabel={label} dayData={d} workshop={workshop}
+                onEditRecord={onEditRecord} allRecords={allRecords}/>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── День внутри месяца (со сворачиваемыми записями) ──
+function DayRow({ dateLabel, dayData, workshop, onEditRecord, allRecords }){
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div style={{marginBottom:6,border:`1px solid ${C.border}22`,borderRadius:6,overflow:"hidden"}}>
+      <div onClick={()=>setExpanded(v=>!v)}
+        style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 12px",cursor:"pointer",background:C.bgInput}}>
+        <span style={{color:C.textSub,fontSize:12}}>{dateLabel}</span>
+        <div style={{display:"flex",gap:10,alignItems:"center",fontSize:12}}>
+          <span style={{color:dayData.amount>=0?C.accent:C.refund,fontWeight:600}}>{fmt(dayData.amount)} р</span>
+          <span style={{color:C.textDim}}>{dayData.qty} шт{dayData.defect>0?` · брак ${dayData.defect}`:""}</span>
+          <span style={{color:C.textDim,fontSize:10}}>{expanded?"▲":"▼"}</span>
+        </div>
+      </div>
+      {expanded && (
+        <div style={{padding:"6px 12px 10px"}}>
+          {dayData.records.map((r,i)=>{
+            const globalIdx = allRecords.findIndex(rr=>rr===r);
+            const isRefund = r.recordType === "refund";
+            const isOnlyDefect = !isRefund && r.qty === 0 && r.defect > 0;
+            return (
+              <div key={i} onClick={()=>onEditRecord({record:r,globalIdx})}
+                style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+                  padding:"5px 0",cursor:"pointer",borderBottom:`1px solid ${C.border}22`}}>
+                <div style={{display:"flex",alignItems:"center",gap:6,fontSize:12}}>
+                  <span style={{color:isRefund?C.refund:isOnlyDefect?C.warn:C.success}}>
+                    {isRefund?"↩":isOnlyDefect?"⚠":"↑"}
+                  </span>
+                  <span style={{color:C.text}}>{r.marker}</span>
+                  {isRefund && <span style={{...s.tag(C.refund),fontSize:9,padding:"1px 5px"}}>возврат</span>}
+                  {isOnlyDefect && <span style={{...s.tag(C.warn),fontSize:9,padding:"1px 5px"}}>брак</span>}
+                </div>
+                <div style={{display:"flex",gap:6,fontSize:11,color:C.textSub}}>
+                  <span>{isRefund?"−":""}{r.qty} шт{r.defect>0?`/${r.defect}`:""}</span>
+                  <span style={{color:isRefund?C.refund:C.accent}}>{fmt(r.amount)} р</span>
+                  <span style={{color:C.accent}}>✎</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Топ-15 популярных маркировок за год (для текущей мастерской) ──
+function TopMarkersBlock({ records, workshop, wsStock, stockCfg, onPick, selected }){
+  const [expanded, setExpanded] = useState(true);
+  const now = new Date();
+  const yearAgo = new Date(now.getFullYear() - (now.getMonth() < 11 ? 0 : 1), now.getMonth(), now.getDate()).getTime();
+  // Считаем количество проданных ключей (qty) за последний год, только sale
+  const counts = {};
+  records.forEach(r=>{
+    if(r.workshop !== workshop) return;
+    if(r.recordType === "refund") return;
+    if(r.timestamp < yearAgo) return;
+    counts[r.marker] = (counts[r.marker] || 0) + (r.qty || 0);
+  });
+  const top = Object.entries(counts)
+    .sort((a,b)=>b[1]-a[1])
+    .slice(0, 15)
+    .filter(([m,c])=>c > 0);
+
+  if(top.length === 0){
+    return (
+      <div style={{...s.card,marginBottom:12,padding:"10px 14px",borderColor:C.accent+"33"}}>
+        <div style={{fontSize:11,color:C.textDim,lineHeight:1.5}}>
+          ⭐ Топ-15 появится после первых продаж (статистика за год)
+        </div>
+      </div>
+    );
+  }
+  const maxCount = top[0][1];
+
+  return (
+    <div style={{...s.card,marginBottom:12,padding:0,overflow:"hidden",borderColor:C.accent+"44"}}>
+      <div onClick={()=>setExpanded(v=>!v)}
+        style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 12px",cursor:"pointer",
+          background:C.accentDim}}>
+        <div style={{display:"flex",alignItems:"center",gap:6}}>
+          <span style={{color:C.accent,fontSize:14}}>⭐</span>
+          <span style={{fontWeight:700,fontSize:12,color:C.accent}}>ТОП-{top.length} за год</span>
+        </div>
+        <span style={{color:C.textDim,fontSize:11}}>{expanded?"▲":"▼"}</span>
+      </div>
+      {expanded && (
+        <div style={{padding:"8px 12px",display:"flex",flexWrap:"wrap",gap:5}}>
+          {top.map(([m,c],i)=>{
+            const wq = wsStock[m]||0;
+            const cfg = stockCfg[m]||{};
+            const low = cfg.threshold > 0 && wq <= cfg.threshold;
+            const empty = wq === 0;
+            const isSelected = selected === m;
+            return (
+              <button key={m} onClick={()=>onPick(m)} title={`${c} ключей за год`}
+                style={{
+                  fontSize:12, padding:"5px 10px", borderRadius:7, cursor:"pointer",
+                  background: isSelected ? C.accent : (empty ? C.dangerDim : low ? C.warnDim : C.bgInput),
+                  border: `1px solid ${isSelected ? C.accent : (empty ? C.danger+"88" : low ? C.warn+"88" : C.border)}`,
+                  color: isSelected ? "#fff" : (empty ? C.danger : low ? C.warn : C.text),
+                  display:"flex", alignItems:"center", gap:4,
+                }}>
+                <span style={{fontSize:10,opacity:.7}}>{i+1}.</span>
+                <span>{m}</span>
+                {wq > 0 && <span style={{fontSize:10,opacity:.7}}>{wq}</span>}
+                <span style={{fontSize:9,opacity:.5}}>({c})</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Модалка переименования маркировки ──
+function RenameMarkerModal({ cat, oldName, onRename, onClose }){
+  const [newName, setNewName] = useState(oldName);
+  const [msg, setMsg] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  async function submit(){
+    setLoading(true);
+    setMsg(null);
+    const result = await onRename(cat, oldName, newName);
+    setLoading(false);
+    if(result.ok){
+      setMsg({ok:true, text:result.text});
+      setTimeout(()=>{onClose();}, 1000);
+    } else {
+      setMsg({ok:false, text:result.text});
+    }
+  }
+
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.75)",zIndex:100,display:"flex",alignItems:"flex-end",justifyContent:"center"}}
+      onClick={e=>{if(e.target===e.currentTarget)onClose();}}>
+      <div style={{background:C.bgCard,borderRadius:"16px 16px 0 0",border:`1px solid ${C.border}`,padding:20,
+        width:"100%",maxWidth:600,maxHeight:"90vh",overflowY:"auto"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+          <span style={{fontWeight:700,fontSize:16}}>Переименовать маркировку</span>
+          <button onClick={onClose} style={{...s.btn(),padding:"4px 10px",fontSize:12}}>✕</button>
+        </div>
+        <div style={{...s.card,padding:"8px 12px",marginBottom:14,background:C.bgInput}}>
+          <div style={{fontSize:11,color:C.textSub}}>Категория</div>
+          <div style={{fontSize:13,fontWeight:600}}>{cat}</div>
+          <div style={{fontSize:11,color:C.textSub,marginTop:6}}>Текущее название</div>
+          <div style={{fontSize:13,fontWeight:600,color:C.accent}}>{oldName}</div>
+        </div>
+        <label style={s.label}>Новое название</label>
+        <input value={newName} onChange={e=>setNewName(e.target.value)}
+          onKeyDown={e=>{if(e.key==="Enter"&&!loading)submit();}}
+          style={{...s.input,marginBottom:16}} autoFocus/>
+        {msg&&<div style={{fontSize:12,marginBottom:10,color:msg.ok?C.success:C.danger}}>{msg.text}</div>}
+        <button onClick={submit} disabled={loading}
+          style={{...s.btn("accent"),width:"100%",padding:"10px 0",opacity:loading?.6:1}}>
+          {loading ? "Сохранение..." : "Переименовать"}
+        </button>
+        <div style={{fontSize:11,color:C.textDim,marginTop:10,lineHeight:1.5}}>
+          ⚠ Изменения применятся ко всем существующим записям, ценам, остаткам склада, порогам и фото.
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Модалка смены пароля ──
 function PasswordModal({ workshop, onChange, onClose }){
   const [oldPwd, setOldPwd] = useState("");
@@ -564,6 +805,9 @@ export default function App(){
 
   // редактирование
   const [editRec, setEditRec] = useState(null);
+
+  // переименование маркировки
+  const [renameModal, setRenameModal] = useState(null); // {cat, oldName}
 
   // ── загрузка при старте ──
   useEffect(()=>{
@@ -772,6 +1016,103 @@ export default function App(){
     setMarkers(next); await sSet("custom:markers", next);
   }
 
+  // ── переименование маркировки (синхронизируется во ВСЕХ местах) ──
+  async function renameMarker(cat, oldName, newName){
+    newName = (newName||"").trim();
+    if(!newName){ return {ok:false, text:"Введите новое название"}; }
+    if(newName === oldName){ return {ok:false, text:"Название не изменилось"}; }
+    // Проверка на дубликат во ВСЕХ категориях
+    const allNames = Object.values(markers).flat();
+    if(allNames.includes(newName)){
+      return {ok:false, text:`«${newName}» уже существует`};
+    }
+
+    // 1. markers (категории)
+    const nextMarkers = {...markers, [cat]: markers[cat].map(x=>x===oldName?newName:x)};
+    setMarkers(nextMarkers);
+    await sSet("custom:markers", nextMarkers);
+
+    // 2. records (записи)
+    let recChanged = false;
+    const nextRecords = records.map(r=>{
+      if(r.marker === oldName){
+        recChanged = true;
+        return {...r, marker: newName};
+      }
+      return r;
+    });
+    if(recChanged){
+      setRecords(nextRecords);
+      await sSet("records", nextRecords);
+    }
+
+    // 3. prices (цены)
+    if(prices[oldName] !== undefined){
+      const nextPrices = {...prices};
+      nextPrices[newName] = nextPrices[oldName];
+      delete nextPrices[oldName];
+      setPrices(nextPrices);
+      await sSet("prices", nextPrices);
+    }
+
+    // 4. stock:main (общий склад)
+    if(stockMain[oldName] !== undefined){
+      const nextStockMain = {...stockMain};
+      nextStockMain[newName] = nextStockMain[oldName];
+      delete nextStockMain[oldName];
+      setStockMain(nextStockMain);
+      await sSet("stock:main", nextStockMain);
+    }
+
+    // 5. stock:ws:SMART и stock:ws:Бегемот
+    for(const ws of WORKSHOPS){
+      if(stockWS[ws] && stockWS[ws][oldName] !== undefined){
+        const nextWs = {...stockWS[ws]};
+        nextWs[newName] = nextWs[oldName];
+        delete nextWs[oldName];
+        setStockWS(p=>({...p, [ws]: nextWs}));
+        await sSet(`stock:ws:${ws}`, nextWs);
+      }
+    }
+
+    // 6. stock:cfg (пороги)
+    if(stockCfg[oldName] !== undefined){
+      const nextCfg = {...stockCfg};
+      nextCfg[newName] = nextCfg[oldName];
+      delete nextCfg[oldName];
+      setStockCfg(nextCfg);
+      await sSet("stock:cfg", nextCfg);
+    }
+
+    // 7. photo (фото заготовки) — асинхронно, не блокируем UI
+    sGet(`photo:${oldName}`).then(async photo => {
+      if(photo){
+        await sSet(`photo:${newName}`, photo);
+        // удаляем старое фото
+        try { await supabaseDelete(`photo:${oldName}`); } catch {}
+        // обновляем кэш
+        setPhotoCache(p=>{
+          const next = {...p};
+          next[newName] = photo;
+          delete next[oldName];
+          return next;
+        });
+      }
+    });
+
+    return {ok:true, text:`«${oldName}» → «${newName}»`};
+  }
+
+  // Хелпер для удаления ключа из Supabase (для фото)
+  async function supabaseDelete(key){
+    try {
+      const { supabase } = await import("./supabase.js");
+      await supabase.from("kv_store").delete().eq("key", key);
+    } catch(e) {
+      console.warn(`[supabaseDelete] "${key}" failed:`, e);
+    }
+  }
+
   function renderStockCategory(cat, stockObj, isWS){
     const ms = markers[cat]||[];
     const search = stockSearch.toLowerCase();
@@ -901,7 +1242,16 @@ export default function App(){
       const totalDef = data.reduce((s,r)=>s+r.defect,0);
       const totalAmt = data.reduce((s,r)=>s+r.amount*signOf(r),0);
       const byMonth = {};
-      data.forEach(r=>{ const mk=monthOf(r.timestamp); if(!byMonth[mk]) byMonth[mk]={qty:0,amount:0,defect:0,days:new Set()}; const s=signOf(r); byMonth[mk].qty+=r.qty*s; byMonth[mk].amount+=r.amount*s; byMonth[mk].defect+=r.defect; byMonth[mk].days.add(dateOf(r.timestamp)); });
+      data.forEach(r=>{
+        const mk = monthOf(r.timestamp);
+        if(!byMonth[mk]) byMonth[mk] = { qty:0, amount:0, defect:0, days:new Set(), recList:[] };
+        const s = signOf(r);
+        byMonth[mk].qty += r.qty * s;
+        byMonth[mk].amount += r.amount * s;
+        byMonth[mk].defect += r.defect;
+        byMonth[mk].days.add(dateOf(r.timestamp));
+        byMonth[mk].recList.push(r);
+      });
       return (
         <div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
@@ -911,23 +1261,12 @@ export default function App(){
             <StatCard label="% брака" value={totalQty>0?(totalDef/Math.abs(totalQty)*100).toFixed(1)+"%":"0%"} color={totalDef>0?C.warn:undefined}/>
             {workshop==="SMART"&&<StatCard label="Доход 40%" value={fmt(totalAmt*INCOME_PCT)+" р"} color={C.success}/>}
           </div>
-          <div style={{fontSize:13,fontWeight:700,color:C.textSub,marginBottom:8}}>ПО МЕСЯЦАМ</div>
-          {Object.entries(byMonth).sort((a,b)=>a[0].localeCompare(b[0])).map(([mk,d])=>{
+          <div style={{fontSize:13,fontWeight:700,color:C.textSub,marginBottom:8}}>ПО МЕСЯЦАМ — нажмите для раскрытия по дням</div>
+          {Object.entries(byMonth).sort((a,b)=>b[0].localeCompare(a[0])).map(([mk,d])=>{
             const mn = parseInt(mk.split("-")[1],10)-1;
             return (
-              <div key={mk} style={s.card}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                  <span style={{fontWeight:700}}>{MONTH_NAMES[mn]}</span>
-                  <span style={{color:d.amount>=0?C.accent:C.refund,fontWeight:700}}>{fmt(d.amount)} р</span>
-                </div>
-                <div style={{display:"flex",gap:16,marginTop:4,fontSize:12,color:C.textSub,flexWrap:"wrap"}}>
-                  <span>{fmt(d.qty)} шт</span>
-                  {d.defect>0&&<span style={{color:C.warn}}>брак {d.defect}</span>}
-                  <span>{d.days.size} раб. дн.</span>
-                  <span>{fmt(d.amount/d.days.size)} р/день</span>
-                  {workshop==="SMART"&&<span style={{color:C.success}}>доход {fmt(d.amount*INCOME_PCT)} р</span>}
-                </div>
-              </div>
+              <YearMonthCard key={mk} monthKey={mk} monthData={d} monthName={mn}
+                workshop={workshop} onEditRecord={setEditRec} allRecords={records}/>
             );
           })}
           <div style={{fontSize:13,fontWeight:700,color:C.textSub,marginBottom:8,marginTop:16}}>ПО КАТЕГОРИЯМ</div>
@@ -990,6 +1329,8 @@ export default function App(){
         onSave={handleEditSave} onDelete={handleEditDelete} onClose={()=>setEditRec(null)}/>}
       {pwdModalOpen&&<PasswordModal workshop={workshop}
         onChange={handleChangePassword} onClose={()=>setPwdModalOpen(false)}/>}
+      {renameModal&&<RenameMarkerModal cat={renameModal.cat} oldName={renameModal.oldName}
+        onRename={renameMarker} onClose={()=>setRenameModal(null)}/>}
       <div style={{maxWidth:600,margin:"0 auto",padding:"12px 12px 40px"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
           <div style={{display:"flex",alignItems:"center",gap:8}}>
@@ -1025,6 +1366,10 @@ export default function App(){
                 </div>
               )}
             </div>
+
+            {/* Топ-15 популярных маркировок за год — только для продажи */}
+            {recordType==="sale" && <TopMarkersBlock records={records} workshop={workshop}
+              wsStock={wsStock} stockCfg={safeStockCfg} onPick={setMarker} selected={marker}/>}
 
             <div style={{marginBottom:12}}>
               <label style={s.label}>Категория</label>
@@ -1295,7 +1640,10 @@ export default function App(){
                               onChange={async e=>{const val=+e.target.value,np={...safePrices};if(val>0)np[m]=val;else delete np[m];setPrices(np);await sSet("prices",np);}}
                               style={{...s.input,width:80,textAlign:"center",padding:"5px 8px",fontSize:13}}/>
                             <span style={{fontSize:12,color:C.textSub,whiteSpace:"nowrap"}}>р/шт</span>
-                            <button onClick={()=>deleteMarker(cat,m)} style={{...s.btn("danger"),padding:"5px 8px",fontSize:11}}>✕</button>
+                            <button onClick={()=>setRenameModal({cat, oldName:m})} title="Переименовать"
+                              style={{...s.btn(),padding:"5px 8px",fontSize:11}}>✎</button>
+                            <button onClick={()=>deleteMarker(cat,m)} title="Удалить"
+                              style={{...s.btn("danger"),padding:"5px 8px",fontSize:11}}>✕</button>
                           </div>
                         </div>
                       ))}
