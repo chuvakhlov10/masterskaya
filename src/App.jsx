@@ -39,6 +39,17 @@ const MONTH_NAMES = ["Январь","Февраль","Март","Апрель","
 // Знак для агрегации: продажа = +1, возврат = -1
 function signOf(r){ return r.recordType === "refund" ? -1 : 1; }
 
+// Сколько заготовок списать со склада:
+// - refund: 0 (заготовка уже списана при продаже)
+// - sale с qty>0: qty (все изготовленные, включая брак)
+// - sale с qty=0 и defect>0: defect (только брак — отдельная операция)
+// - sale с qty=0 и defect=0: 0 (пустая запись)
+function stockDelta(r){
+  if(r.recordType === "refund") return 0;
+  if(r.qty > 0) return r.qty;
+  return r.defect || 0;
+}
+
 function NumInput({ value, onChange, style, min="0", placeholder="" }) {
   const [local, setLocal] = useState(String(value ?? ""));
   useEffect(() => { setLocal(String(value ?? "")); }, [value]);
@@ -293,11 +304,12 @@ function DayReport({ records, workshop, wsStock, stockCfg, dateStr, onEditRecord
   const byM={};
   dayRecs.forEach(r=>{
     const sign = signOf(r);
-    if(!byM[r.marker]) byM[r.marker]={qty:0,defect:0,amount:0,refundQty:0};
+    if(!byM[r.marker]) byM[r.marker]={qty:0,defect:0,amount:0,stockUsed:0,refundQty:0};
     byM[r.marker].qty += r.qty * sign;
     byM[r.marker].defect += r.defect;
     byM[r.marker].amount += r.amount * sign;
-    if(r.recordType==="refund") byM[r.marker].refundQty = (byM[r.marker].refundQty||0) + r.qty;
+    byM[r.marker].stockUsed += stockDelta(r);
+    if(r.recordType === "refund") byM[r.marker].refundQty = (byM[r.marker].refundQty||0) + r.qty;
   });
   const report=Object.entries(byM).sort((a,b)=>b[1].qty-a[1].qty);
 
@@ -316,7 +328,7 @@ function DayReport({ records, workshop, wsStock, stockCfg, dateStr, onEditRecord
       <StatsBreakdown data={dayRecs} totalAmt={totalAmt} totalQty={totalQtySold-totalQtyRefund}/>
       <div style={{fontSize:12,fontWeight:700,color:C.textSub,marginBottom:8,marginTop:12}}>БЫЛО → СТАЛО</div>
       {report.map(([m,d])=>{
-        const soldClean=Math.max(d.qty-d.defect,0),stockNow=wsStock[m]||0,stockBefore=stockNow+soldClean;
+        const stockNow=wsStock[m]||0,stockBefore=stockNow+d.stockUsed;
         return (
           <div key={m} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
             padding:"7px 0",borderBottom:`1px solid ${C.border}`,fontSize:13}}>
@@ -337,34 +349,66 @@ function DayReport({ records, workshop, wsStock, stockCfg, dateStr, onEditRecord
         </div>
       )}
 
-      {/* Все записи дня — кликабельны для редактирования */}
-      <div style={{fontSize:12,fontWeight:700,color:C.textSub,marginBottom:8,marginTop:16}}>ВСЕ ЗАПИСИ ДНЯ ({dayRecs.length})</div>
-      <div style={{fontSize:11,color:C.textDim,marginBottom:8}}>Нажмите на запись, чтобы изменить или удалить</div>
-      {dayRecs.map((r,i)=>{
-        const globalIdx = records.findIndex(rr=>rr===r);
-        const isRefund = r.recordType === "refund";
-        return (
-          <div key={i} onClick={()=>onEditRecord({record:r,globalIdx})}
-            style={{...s.card,cursor:"pointer",borderLeft:`3px solid ${isRefund?C.refund:C.accent+"88"}`}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              <div style={{display:"flex",alignItems:"center",gap:8}}>
-                {isRefund
-                  ? <span style={{color:C.refund,fontWeight:700,fontSize:16}}>↩</span>
-                  : <span style={{color:C.success,fontWeight:700,fontSize:16}}>↑</span>}
-                <span style={{fontWeight:600}}>{r.marker}</span>
-                {isRefund&&<TypeBadge recordType="refund"/>}
+      {/* Все записи дня — сворачиваемый блок, по умолчанию свёрнут */}
+      <DayRecordsList dayRecs={dayRecs} records={records} onEditRecord={onEditRecord}/>
+    </div>
+  );
+}
+
+// ── Сворачиваемый список записей дня ──
+function DayRecordsList({ dayRecs, records, onEditRecord }){
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div style={{marginTop:16}}>
+      <div onClick={()=>setExpanded(v=>!v)}
+        style={{
+          display:"flex",justifyContent:"space-between",alignItems:"center",
+          padding:"10px 14px",background:C.bgCard,border:`1px solid ${C.border}`,
+          borderRadius:8,cursor:"pointer",userSelect:"none"
+        }}>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <span style={{fontSize:12,fontWeight:700,color:C.textSub}}>
+            ВСЕ ЗАПИСИ ДНЯ ({dayRecs.length})
+          </span>
+        </div>
+        <span style={{color:C.textDim,fontSize:14}}>{expanded?"▲":"▼"}</span>
+      </div>
+      {expanded && (
+        <div style={{marginTop:8}}>
+          <div style={{fontSize:11,color:C.textDim,marginBottom:8}}>Нажмите на запись, чтобы изменить или удалить</div>
+          {dayRecs.map((r,i)=>{
+            const globalIdx = records.findIndex(rr=>rr===r);
+            const isRefund = r.recordType === "refund";
+            const isOnlyDefect = !isRefund && r.qty === 0 && r.defect > 0;
+            return (
+              <div key={i} onClick={()=>onEditRecord({record:r,globalIdx})}
+                style={{...s.card,cursor:"pointer",borderLeft:`3px solid ${isRefund?C.refund:isOnlyDefect?C.warn:C.accent+"88"}`}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8}}>
+                    {isRefund
+                      ? <span style={{color:C.refund,fontWeight:700,fontSize:16}}>↩</span>
+                      : isOnlyDefect
+                        ? <span style={{color:C.warn,fontWeight:700,fontSize:16}}>⚠</span>
+                        : <span style={{color:C.success,fontWeight:700,fontSize:16}}>↑</span>}
+                    <span style={{fontWeight:600}}>{r.marker}</span>
+                    {isRefund&&<TypeBadge recordType="refund"/>}
+                    {isOnlyDefect&&<span style={{...s.tag(C.warn),fontSize:10}}>только брак</span>}
+                  </div>
+                  <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                    <span style={{fontSize:12,color:isRefund?C.refund:isOnlyDefect?C.warn:C.textSub}}>
+                      {isRefund?"−":""}{r.qty} шт{r.defect>0?` · брак ${r.defect}`:""} · {fmt(r.amount)} р
+                    </span>
+                    <span style={{fontSize:11,color:C.accent}}>✎</span>
+                  </div>
+                </div>
+                <div style={{fontSize:12,color:C.textDim,marginTop:2}}>
+                  {r.category}{r.comment&&` · ${r.comment}`}
+                </div>
               </div>
-              <div style={{display:"flex",gap:8,alignItems:"center"}}>
-                <span style={{fontSize:12,color:isRefund?C.refund:C.textSub}}>{isRefund?"−":""}{r.qty} шт · {fmt(r.amount)} р</span>
-                <span style={{fontSize:11,color:C.accent}}>✎</span>
-              </div>
-            </div>
-            <div style={{fontSize:12,color:C.textDim,marginTop:2}}>
-              {r.category}{r.defect>0?` · брак ${r.defect}`:""}{r.comment&&` · ${r.comment}`}
-            </div>
-          </div>
-        );
-      })}
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -515,7 +559,9 @@ export default function App(){
   // ── добавление записи ──
   async function submitRecord(){
     if(!marker.trim()){setSubmitMsg({ok:false,text:"Укажите маркировку"});return;}
-    if(qty<=0 && recordType==="sale"){setSubmitMsg({ok:false,text:"Количество должно быть > 0"});return;}
+    if(recordType==="sale" && qty===0 && defect===0){
+      setSubmitMsg({ok:false,text:"Укажите количество или брак"});return;
+    }
     if(amount<0){setSubmitMsg({ok:false,text:"Сумма не может быть отрицательной"});return;}
 
     const m = marker.trim();
@@ -526,17 +572,18 @@ export default function App(){
     const next = [...records, rec];
     setRecords(next); await sSet("records", next);
 
-    // Склад: списываем только для sale (возврат не возвращает заготовку)
-    if(recordType !== "refund"){
+    // Склад: списываем через stockDelta (для refund = 0, для sale = qty или defect)
+    const delta = stockDelta(rec);
+    if(delta > 0){
       const wsStk = {...stockWS[workshop]};
-      wsStk[m] = Math.max((wsStk[m]||0) - Math.max(qty-defect,0), 0);
+      wsStk[m] = Math.max((wsStk[m]||0) - delta, 0);
       setStockWS(p=>({...p,[workshop]:wsStk})); await sSet(`stock:ws:${workshop}`, wsStk);
     }
 
     // Сброс формы — qty/defect по 0 (как просил пользователь)
     setMarker(""); setQty(0); setDefect(0); setAmount(0);
     setManualAmount(false); setComment(""); setRecordType("sale");
-    setSubmitMsg({ok:true, text: rec.recordType==="refund" ? "Возврат оформлен" : "Запись добавлена"});
+    setSubmitMsg({ok:true, text: rec.recordType==="refund" ? "Возврат оформлен" : (rec.qty===0&&rec.defect>0 ? "Брак оформлен" : "Запись добавлена")});
     setTimeout(()=>setSubmitMsg(null), 2000);
   }
 
@@ -545,13 +592,15 @@ export default function App(){
     const old = records[editRec.globalIdx];
     const wsStk = {...(stockWS[updated.workshop]||{})};
 
-    // 1) Возвращаем старое списание (только если старая запись была sale)
-    if(!old.recordType || old.recordType === "sale"){
-      wsStk[old.marker] = (wsStk[old.marker]||0) + Math.max(old.qty - old.defect, 0);
+    // 1) Возвращаем старое списание (через stockDelta: для refund = 0, для sale = qty или defect)
+    const oldDelta = stockDelta(old);
+    if(oldDelta > 0){
+      wsStk[old.marker] = (wsStk[old.marker]||0) + oldDelta;
     }
-    // 2) Применяем новое списание (только если новая запись sale)
-    if(!updated.recordType || updated.recordType === "sale"){
-      wsStk[updated.marker] = Math.max((wsStk[updated.marker]||0) - Math.max(updated.qty - updated.defect, 0), 0);
+    // 2) Применяем новое списание (через stockDelta)
+    const newDelta = stockDelta(updated);
+    if(newDelta > 0){
+      wsStk[updated.marker] = Math.max((wsStk[updated.marker]||0) - newDelta, 0);
     }
 
     const next = records.map((r,i)=>i===editRec.globalIdx?updated:r);
@@ -564,9 +613,10 @@ export default function App(){
     if(!confirm("Удалить эту запись?")) return;
     const old = records[gi];
     const wsStk = {...(stockWS[old.workshop]||{})};
-    // Возвращаем списание только если старая запись была sale
-    if(!old.recordType || old.recordType === "sale"){
-      wsStk[old.marker] = (wsStk[old.marker]||0) + Math.max(old.qty - old.defect, 0);
+    // Возвращаем списание через stockDelta (для refund = 0, для sale = qty или defect)
+    const oldDelta = stockDelta(old);
+    if(oldDelta > 0){
+      wsStk[old.marker] = (wsStk[old.marker]||0) + oldDelta;
     }
     const next = records.filter((_,i)=>i!==gi);
     setRecords(next); await sSet("records", next);
@@ -900,9 +950,30 @@ export default function App(){
               </div>
             )}
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
-              <div><label style={s.label}>Количество</label><NumInput value={qty} onChange={setQty} min="0" style={s.input}/></div>
-              <div><label style={s.label}>Брак</label><NumInput value={defect} onChange={setDefect} min="0" style={s.input}/></div>
+              <div>
+                <label style={s.label}>Количество {recordType==="sale"&&<span style={{color:C.textDim,fontSize:10}}>(включая брак)</span>}</label>
+                <NumInput value={qty} onChange={setQty} min="0" style={s.input}/>
+              </div>
+              <div>
+                <label style={s.label}>Брак {recordType==="sale"&&qty===0&&defect>0&&<span style={{color:C.warn,fontSize:10}}>(только брак)</span>}</label>
+                <NumInput value={defect} onChange={setDefect} min="0" style={s.input}/>
+              </div>
             </div>
+            {recordType==="sale"&&qty>0&&defect>0&&(
+              <div style={{...s.card,padding:"8px 12px",marginBottom:10,background:C.warnDim,borderColor:C.warn+"44"}}>
+                <div style={{fontSize:12,color:C.warn,lineHeight:1.5}}>
+                  ⚠ Списания со склада: <b>{qty} шт</b> (все изготовленные, включая {defect} брак)<br/>
+                  Сумма: только за годные <b>{qty-defect} шт</b> × цена
+                </div>
+              </div>
+            )}
+            {recordType==="sale"&&qty===0&&defect>0&&(
+              <div style={{...s.card,padding:"8px 12px",marginBottom:10,background:C.warnDim,borderColor:C.warn+"44"}}>
+                <div style={{fontSize:12,color:C.warn,lineHeight:1.5}}>
+                  ⚠ Только брак: со склада спишется <b>{defect} шт</b>. Сумма продажи = 0.
+                </div>
+              </div>
+            )}
             <div style={{marginBottom:16}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
                 <label style={{...s.label,margin:0}}>Сумма, руб</label>
