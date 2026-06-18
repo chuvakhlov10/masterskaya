@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback, Component } from "react";
-import { dbGet, dbSet, dbDumpAll } from "./supabase.js";
+import { useState, useEffect, useCallback } from "react";
+import { dbGet, dbSet } from "./supabase.js";
 
 const DEFAULT_MARKERS = {
   "Автомобильные": ["Замена корпуса","HD39RP","Нарезка лезвия","LD-1P","MIT8AP","MIT8RP (п.ч.)","XT27A"],
@@ -53,9 +53,6 @@ function stockDelta(r){
 function sortedCategories(markers){
   return Object.keys(markers).sort((a,b)=>a.localeCompare(b,"ru"));
 }
-function sortedCategoryEntries(markers){
-  return sortedCategories(markers).map(cat=>[cat, markers[cat]]);
-}
 
 function NumInput({ value, onChange, style, min="0", placeholder="" }) {
   const [local, setLocal] = useState(String(value ?? ""));
@@ -80,11 +77,6 @@ function NumInput({ value, onChange, style, min="0", placeholder="" }) {
 
 async function sGet(key){ return dbGet(key); }
 async function sSet(key,val){ return dbSet(key,val); }
-
-// Защита: получить объект из любого значения (для prices, stock, cfg)
-function ensureObj(v){ return (v && typeof v === "object" && !Array.isArray(v)) ? v : {}; }
-// Защита: получить массив из любого значения (для records)
-function ensureArr(v){ return Array.isArray(v) ? v : []; }
 
 const C = {
   bg:"#0f1117", bgCard:"#181c27", bgInput:"#1e2333",
@@ -426,33 +418,6 @@ function DayRecordsList({ dayRecs, records, onEditRecord }){
   );
 }
 
-// ── ErrorBoundary: ловит ошибки рендера, не даёт белый экран ──
-export class ErrorBoundary extends Component {
-  constructor(props){ super(props); this.state = { hasError:false, error:null }; }
-  static getDerivedStateFromError(error){ return { hasError:true, error }; }
-  componentDidCatch(error, info){ console.error("App render error:", error, info); }
-  render(){
-    if(this.state.hasError){
-      return (
-        <div style={{minHeight:"100vh",background:"#0f1117",color:"#e2e8f0",padding:24,fontFamily:"system-ui,sans-serif"}}>
-          <div style={{maxWidth:600,margin:"0 auto"}}>
-            <h2 style={{color:"#ef4444",marginBottom:12}}>⚠ Ошибка рендера</h2>
-            <p style={{color:"#8892a4",marginBottom:16}}>Что-то пошло не так. Попробуй перезагрузить страницу.</p>
-            <pre style={{background:"#181c27",padding:12,borderRadius:8,fontSize:12,overflow:"auto",color:"#f59e0b",border:"1px solid #2a3048"}}>
-              {String(this.state.error?.message || this.state.error || "Unknown error")}
-            </pre>
-            <button onClick={()=>{this.setState({hasError:false,error:null});try{localStorage.removeItem("workshop_auth_v2");localStorage.removeItem("workshop_choice_v2");}catch{}}}
-              style={{marginTop:16,padding:"10px 20px",background:"#4f8ef7",color:"#fff",border:"none",borderRadius:8,cursor:"pointer"}}>
-              Сбросить авторизацию и попробовать снова
-            </button>
-          </div>
-        </div>
-      );
-    }
-    return this.props.children;
-  }
-}
-
 // ── Модалка смены пароля ──
 function PasswordModal({ workshop, onChange, onClose }){
   const [oldPwd, setOldPwd] = useState("");
@@ -565,50 +530,6 @@ export default function App(){
   // редактирование
   const [editRec, setEditRec] = useState(null);
 
-  // ── диагностика записи в Supabase ──
-  const [diagResult, setDiagResult] = useState(null);
-  const [diagRunning, setDiagRunning] = useState(false);
-  async function runDiagnostic(){
-    setDiagRunning(true);
-    setDiagResult(null);
-    console.log("═══ НАЧАЛО ДИАГНОСТИКИ SUPABASE ═══");
-    // 1. Тест записи
-    const testKey = "__diagnostic_test__";
-    const testVal = { ts: Date.now(), hello: "world" };
-    console.log("[DIAG] Тест 1: запись тестового ключа...");
-    const writeResult = await dbSet(testKey, testVal);
-    console.log("[DIAG] Результат записи:", writeResult);
-    // 2. Тест чтения
-    console.log("[DIAG] Тест 2: чтение тестового ключа...");
-    const readVal = await dbGet(testKey);
-    console.log("[DIAG] Прочитано:", readVal);
-    const readOk = readVal && readVal.ts === testVal.ts;
-    // 3. Удалить тестовый ключ
-    console.log("[DIAG] Тест 3: удалить тестовый ключ...");
-    try {
-      const { supabase } = await import("./supabase.js");
-      await supabase.from("kv_store").delete().eq("key", testKey);
-      console.log("[DIAG] Удаление OK");
-    } catch(e) {
-      console.warn("[DIAG] Не удалось удалить:", e);
-    }
-    // 4. Дамп всех ключей
-    console.log("[DIAG] Тест 4: дамп всех ключей...");
-    const allKeys = await dbDumpAll();
-    console.log("[DIAG] Всего ключей в БД:", allKeys?.length || 0);
-    // Итог
-    const result = {
-      writeOk: writeResult?.ok || false,
-      readOk: readOk,
-      totalKeys: allKeys?.length || 0,
-      keys: allKeys?.map(r => r.key) || [],
-      writeError: writeResult?.error ? JSON.stringify(writeResult.error) : null,
-    };
-    console.log("═══ ИТОГ ДИАГНОСТИКИ ═══", result);
-    setDiagResult(result);
-    setDiagRunning(false);
-  }
-
   // ── загрузка при старте ──
   useEffect(()=>{
     (async()=>{
@@ -630,19 +551,12 @@ export default function App(){
         sGet("stock:main"), Promise.all(WORKSHOPS.map(w=>sGet(`stock:ws:${w}`))),
         sGet("stock:cfg"), sGet("custom:markers"),
       ]);
-      // Защита: гарантируем, что у нас правильные типы (массив/объект),
-      // иначе рендер упадёт с белым экраном
-      if(Array.isArray(r)) setRecords(r);
-      if(p && typeof p === "object" && !Array.isArray(p)) setPrices(p);
-      if(sm && typeof sm === "object" && !Array.isArray(sm)) setStockMain(sm);
-      const wsObj = {};
-      WORKSHOPS.forEach((w,i)=>{
-        const v = sS[i];
-        wsObj[w] = (v && typeof v === "object" && !Array.isArray(v)) ? v : {};
-      });
-      setStockWS(wsObj);
-      if(sCfg && typeof sCfg === "object" && !Array.isArray(sCfg)) setStockCfg(sCfg);
-      if(sm2 && typeof sm2 === "object" && !Array.isArray(sm2)) setMarkers(sm2);
+      if(r) setRecords(r);
+      if(p) setPrices(p);
+      if(sm) setStockMain(sm);
+      const wsObj={}; WORKSHOPS.forEach((w,i)=>{wsObj[w]=sS[i]||{};}); setStockWS(wsObj);
+      if(sCfg) setStockCfg(sCfg);
+      if(sm2) setMarkers(sm2);
 
       // Проверяем сохранённую авторизацию
       try{
@@ -1014,13 +928,7 @@ export default function App(){
   );
 
   const wsColor = workshop==="SMART"?C.smart:C.begemot;
-  // Гарантируем, что state — правильные типы, чтобы не было белого экрана
-  const safePrices = ensureObj(prices);
-  const safeStockMain = ensureObj(stockMain);
-  const safeStockWS = ensureObj(stockWS);
-  const safeStockCfg = ensureObj(stockCfg);
-  const safeMarkers = markers && typeof markers === "object" ? markers : DEFAULT_MARKERS;
-  const wsStock = ensureObj(safeStockWS[workshop]);
+  const wsStock = stockWS[workshop]||{};
   const tabs = [
     {id:"record",label:"📝 Запись"},
     {id:"stats",label:"📊 Статистика"},
@@ -1030,45 +938,11 @@ export default function App(){
 
   return (
     <div style={s.app}>
-      {editRec&&<EditModal record={editRec.record} idx={editRec.globalIdx} markers={safeMarkers}
+      {editRec&&<EditModal record={editRec.record} idx={editRec.globalIdx} markers={markers}
         onSave={handleEditSave} onDelete={handleEditDelete} onClose={()=>setEditRec(null)}/>}
       {pwdModalOpen&&<PasswordModal workshop={workshop}
         onChange={handleChangePassword} onClose={()=>setPwdModalOpen(false)}/>}
       <div style={{maxWidth:600,margin:"0 auto",padding:"12px 12px 40px"}}>
-        {/* ── ДИАГНОСТИЧЕСКАЯ ПАНЕЛЬ (временно) ── */}
-        <div style={{...s.card,borderColor:C.warn+"66",background:C.warnDim,marginBottom:14}}>
-          <div style={{fontSize:12,fontWeight:700,color:C.warn,marginBottom:8}}>🔧 ДИАГНОСТИКА SUPABASE</div>
-          <button onClick={runDiagnostic} disabled={diagRunning}
-            style={{...s.btn("warn"),padding:"6px 12px",fontSize:12,opacity:diagRunning?.6:1}}>
-            {diagRunning ? "Выполняется..." : "Запустить диагностику"}
-          </button>
-          {diagResult && (
-            <div style={{marginTop:10,fontSize:12,lineHeight:1.6}}>
-              <div style={{color:diagResult.writeOk?C.success:C.danger}}>
-                Запись: {diagResult.writeOk ? "✓ работает" : "✗ не работает"}
-              </div>
-              <div style={{color:diagResult.readOk?C.success:C.danger}}>
-                Чтение: {diagResult.readOk ? "✓ работает" : "✗ не работает"}
-              </div>
-              <div style={{color:C.text}}>
-                Всего ключей в БД: {diagResult.totalKeys}
-              </div>
-              {diagResult.keys.length > 0 && (
-                <div style={{color:C.textSub,marginTop:4,fontSize:11}}>
-                  Ключи: {diagResult.keys.join(", ")}
-                </div>
-              )}
-              {diagResult.writeError && (
-                <div style={{color:C.danger,marginTop:6,fontSize:11,wordBreak:"break-all"}}>
-                  Ошибка: {diagResult.writeError}
-                </div>
-              )}
-              <div style={{color:C.textDim,marginTop:6,fontSize:11}}>
-                Подробности — в консоли (F12 → Console)
-              </div>
-            </div>
-          )}
-        </div>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
           <div style={{display:"flex",alignItems:"center",gap:8}}>
             <span style={{...s.tag(wsColor),fontSize:13,fontWeight:700}}>{workshop}</span>
@@ -1107,15 +981,15 @@ export default function App(){
             <div style={{marginBottom:12}}>
               <label style={s.label}>Категория</label>
               <select value={category} onChange={e=>{setCategory(e.target.value);setMarker("");}} style={s.input}>
-                {sortedCategories(safeMarkers).map(c=><option key={c}>{c}</option>)}
+                {sortedCategories(markers).map(c=><option key={c}>{c}</option>)}
               </select>
             </div>
             <div style={{marginBottom:12}}>
               <label style={s.label}>Маркировка</label>
               <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:8}}>
-                {(safeMarkers[category]||[]).map(m=>{
+                {(markers[category]||[]).map(m=>{
                   const wq = wsStock[m]||0;
-                  const cfg = safeStockCfg[m]||{};
+                  const cfg = stockCfg[m]||{};
                   const low = cfg.threshold>0 && wq<=cfg.threshold;
                   const empty = wq===0;
                   return (
@@ -1280,7 +1154,7 @@ export default function App(){
               <div>
                 <div style={{fontSize:13,color:C.textSub,marginBottom:10}}>Остатки · <b style={{color:wsColor}}>{workshop}</b></div>
                 <input value={stockSearch} onChange={e=>setStockSearch(e.target.value)} placeholder="Поиск по маркировке..." style={{...s.input,marginBottom:12}}/>
-                {sortedCategories(safeMarkers).map(cat=>renderStockCategory(cat,wsStock,true))}
+                {sortedCategories(markers).map(cat=>renderStockCategory(cat,wsStock,true))}
                 <div style={{fontSize:11,color:C.textDim,marginTop:4}}>«Порог» — при каком остатке показывать ⚠</div>
               </div>
             )}
@@ -1288,7 +1162,7 @@ export default function App(){
               <div>
                 <div style={{fontSize:13,color:C.textSub,marginBottom:10}}>Общий склад</div>
                 <input value={stockSearch} onChange={e=>setStockSearch(e.target.value)} placeholder="Поиск..." style={{...s.input,marginBottom:12}}/>
-                {sortedCategories(safeMarkers).map(cat=>renderStockCategory(cat,stockMain,false))}
+                {sortedCategories(markers).map(cat=>renderStockCategory(cat,stockMain,false))}
               </div>
             )}
             {stockTab==="move"&&(
@@ -1296,7 +1170,7 @@ export default function App(){
                 <div style={{...s.card,marginBottom:16}}>
                   <div style={{fontSize:13,fontWeight:700,marginBottom:12}}>Поступление на общий склад</div>
                   <label style={s.label}>Маркировка</label>
-                  <MarkerPicker markers={safeMarkers} value={moveMarker} onChange={setMoveMarker}/>
+                  <MarkerPicker markers={markers} value={moveMarker} onChange={setMoveMarker}/>
                   <label style={{...s.label,marginTop:10}}>Количество</label>
                   <NumInput value={moveQty} onChange={setMoveQty} min="1" style={{...s.input,marginBottom:10}}/>
                   <button onClick={async()=>{
@@ -1310,7 +1184,7 @@ export default function App(){
                 <div style={s.card}>
                   <div style={{fontSize:13,fontWeight:700,marginBottom:12}}>Общий склад → Мастерская</div>
                   <label style={s.label}>Маркировка</label>
-                  <MarkerPicker markers={safeMarkers} value={moveMarker} onChange={setMoveMarker} extraLabel={m=>`склад: ${safeStockMain[m]||0}`}/>
+                  <MarkerPicker markers={markers} value={moveMarker} onChange={setMoveMarker} extraLabel={m=>`склад: ${stockMain[m]||0}`}/>
                   <label style={{...s.label,marginTop:10}}>В мастерскую</label>
                   <select value={moveTo} onChange={e=>setMoveTo(e.target.value)} style={{...s.input,marginBottom:10}}>
                     {WORKSHOPS.map(w=><option key={w}>{w}</option>)}
@@ -1333,7 +1207,7 @@ export default function App(){
               <label style={s.label}>Категория</label>
               <select value={newMarkerCat} onChange={e=>setNewMarkerCat(e.target.value)} style={{...s.input,marginBottom:10}}>
                 <option value="">Выбрать...</option>
-                {sortedCategories(safeMarkers).map(c=><option key={c}>{c}</option>)}
+                {sortedCategories(markers).map(c=><option key={c}>{c}</option>)}
               </select>
               <label style={s.label}>Название</label>
               <div style={{display:"flex",gap:8}}>
@@ -1346,11 +1220,11 @@ export default function App(){
 
             <input value={priceSearch} onChange={e=>setPriceSearch(e.target.value)} placeholder="Поиск маркировки..." style={{...s.input,marginBottom:14}}/>
 
-            {sortedCategoryEntries(safeMarkers).map(([cat,ms])=>{
+            {sortedCategoryEntries(markers).map(([cat,ms])=>{
               const filtered = ms.filter(m=>m.toLowerCase().includes(priceSearch.toLowerCase()));
               if(filtered.length===0) return null;
               const expanded = priceExpandedCats[cat]!==false;
-              const withPrice = filtered.filter(m=>safePrices[m]).length;
+              const withPrice = filtered.filter(m=>prices[m]).length;
               return (
                 <div key={cat} style={{...s.card,padding:0,overflow:"hidden",marginBottom:8}}>
                   <div onClick={()=>setPriceExpandedCats(p=>({...p,[cat]:!expanded}))}
@@ -1369,8 +1243,8 @@ export default function App(){
                           padding:"8px 14px",borderBottom:`1px solid ${C.border}22`}}>
                           <span style={{fontSize:13,flex:1}}>{m}</span>
                           <div style={{display:"flex",alignItems:"center",gap:6}}>
-                            <input type="number" min="0" step="1" value={safePrices[m]||""} placeholder="—"
-                              onChange={async e=>{const val=+e.target.value,np={...safePrices};if(val>0)np[m]=val;else delete np[m];setPrices(np);await sSet("prices",np);}}
+                            <input type="number" min="0" step="1" value={prices[m]||""} placeholder="—"
+                              onChange={async e=>{const val=+e.target.value,np={...prices};if(val>0)np[m]=val;else delete np[m];setPrices(np);await sSet("prices",np);}}
                               style={{...s.input,width:80,textAlign:"center",padding:"5px 8px",fontSize:13}}/>
                             <span style={{fontSize:12,color:C.textSub,whiteSpace:"nowrap"}}>р/шт</span>
                             <button onClick={()=>deleteMarker(cat,m)} style={{...s.btn("danger"),padding:"5px 8px",fontSize:11}}>✕</button>
