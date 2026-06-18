@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, Component } from "react";
 import { dbGet, dbSet } from "./supabase.js";
 
 const DEFAULT_MARKERS = {
@@ -77,6 +77,11 @@ function NumInput({ value, onChange, style, min="0", placeholder="" }) {
 
 async function sGet(key){ return dbGet(key); }
 async function sSet(key,val){ return dbSet(key,val); }
+
+// Защита: получить объект из любого значения (для prices, stock, cfg)
+function ensureObj(v){ return (v && typeof v === "object" && !Array.isArray(v)) ? v : {}; }
+// Защита: получить массив из любого значения (для records)
+function ensureArr(v){ return Array.isArray(v) ? v : []; }
 
 const C = {
   bg:"#0f1117", bgCard:"#181c27", bgInput:"#1e2333",
@@ -418,6 +423,33 @@ function DayRecordsList({ dayRecs, records, onEditRecord }){
   );
 }
 
+// ── ErrorBoundary: ловит ошибки рендера, не даёт белый экран ──
+export class ErrorBoundary extends Component {
+  constructor(props){ super(props); this.state = { hasError:false, error:null }; }
+  static getDerivedStateFromError(error){ return { hasError:true, error }; }
+  componentDidCatch(error, info){ console.error("App render error:", error, info); }
+  render(){
+    if(this.state.hasError){
+      return (
+        <div style={{minHeight:"100vh",background:"#0f1117",color:"#e2e8f0",padding:24,fontFamily:"system-ui,sans-serif"}}>
+          <div style={{maxWidth:600,margin:"0 auto"}}>
+            <h2 style={{color:"#ef4444",marginBottom:12}}>⚠ Ошибка рендера</h2>
+            <p style={{color:"#8892a4",marginBottom:16}}>Что-то пошло не так. Попробуй перезагрузить страницу.</p>
+            <pre style={{background:"#181c27",padding:12,borderRadius:8,fontSize:12,overflow:"auto",color:"#f59e0b",border:"1px solid #2a3048"}}>
+              {String(this.state.error?.message || this.state.error || "Unknown error")}
+            </pre>
+            <button onClick={()=>{this.setState({hasError:false,error:null});try{localStorage.removeItem("workshop_auth_v2");localStorage.removeItem("workshop_choice_v2");}catch{}}}
+              style={{marginTop:16,padding:"10px 20px",background:"#4f8ef7",color:"#fff",border:"none",borderRadius:8,cursor:"pointer"}}>
+              Сбросить авторизацию и попробовать снова
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 // ── Модалка смены пароля ──
 function PasswordModal({ workshop, onChange, onClose }){
   const [oldPwd, setOldPwd] = useState("");
@@ -551,12 +583,19 @@ export default function App(){
         sGet("stock:main"), Promise.all(WORKSHOPS.map(w=>sGet(`stock:ws:${w}`))),
         sGet("stock:cfg"), sGet("custom:markers"),
       ]);
-      if(r) setRecords(r);
-      if(p) setPrices(p);
-      if(sm) setStockMain(sm);
-      const wsObj={}; WORKSHOPS.forEach((w,i)=>{wsObj[w]=sS[i]||{};}); setStockWS(wsObj);
-      if(sCfg) setStockCfg(sCfg);
-      if(sm2) setMarkers(sm2);
+      // Защита: гарантируем, что у нас правильные типы (массив/объект),
+      // иначе рендер упадёт с белым экраном
+      if(Array.isArray(r)) setRecords(r);
+      if(p && typeof p === "object" && !Array.isArray(p)) setPrices(p);
+      if(sm && typeof sm === "object" && !Array.isArray(sm)) setStockMain(sm);
+      const wsObj = {};
+      WORKSHOPS.forEach((w,i)=>{
+        const v = sS[i];
+        wsObj[w] = (v && typeof v === "object" && !Array.isArray(v)) ? v : {};
+      });
+      setStockWS(wsObj);
+      if(sCfg && typeof sCfg === "object" && !Array.isArray(sCfg)) setStockCfg(sCfg);
+      if(sm2 && typeof sm2 === "object" && !Array.isArray(sm2)) setMarkers(sm2);
 
       // Проверяем сохранённую авторизацию
       try{
@@ -928,7 +967,13 @@ export default function App(){
   );
 
   const wsColor = workshop==="SMART"?C.smart:C.begemot;
-  const wsStock = stockWS[workshop]||{};
+  // Гарантируем, что state — правильные типы, чтобы не было белого экрана
+  const safePrices = ensureObj(prices);
+  const safeStockMain = ensureObj(stockMain);
+  const safeStockWS = ensureObj(stockWS);
+  const safeStockCfg = ensureObj(stockCfg);
+  const safeMarkers = markers && typeof markers === "object" ? markers : DEFAULT_MARKERS;
+  const wsStock = ensureObj(safeStockWS[workshop]);
   const tabs = [
     {id:"record",label:"📝 Запись"},
     {id:"stats",label:"📊 Статистика"},
@@ -1220,11 +1265,11 @@ export default function App(){
 
             <input value={priceSearch} onChange={e=>setPriceSearch(e.target.value)} placeholder="Поиск маркировки..." style={{...s.input,marginBottom:14}}/>
 
-            {sortedCategoryEntries(markers).map(([cat,ms])=>{
+            {sortedCategoryEntries(safeMarkers).map(([cat,ms])=>{
               const filtered = ms.filter(m=>m.toLowerCase().includes(priceSearch.toLowerCase()));
               if(filtered.length===0) return null;
               const expanded = priceExpandedCats[cat]!==false;
-              const withPrice = filtered.filter(m=>prices[m]).length;
+              const withPrice = filtered.filter(m=>safePrices[m]).length;
               return (
                 <div key={cat} style={{...s.card,padding:0,overflow:"hidden",marginBottom:8}}>
                   <div onClick={()=>setPriceExpandedCats(p=>({...p,[cat]:!expanded}))}
@@ -1243,8 +1288,8 @@ export default function App(){
                           padding:"8px 14px",borderBottom:`1px solid ${C.border}22`}}>
                           <span style={{fontSize:13,flex:1}}>{m}</span>
                           <div style={{display:"flex",alignItems:"center",gap:6}}>
-                            <input type="number" min="0" step="1" value={prices[m]||""} placeholder="—"
-                              onChange={async e=>{const val=+e.target.value,np={...prices};if(val>0)np[m]=val;else delete np[m];setPrices(np);await sSet("prices",np);}}
+                            <input type="number" min="0" step="1" value={safePrices[m]||""} placeholder="—"
+                              onChange={async e=>{const val=+e.target.value,np={...safePrices};if(val>0)np[m]=val;else delete np[m];setPrices(np);await sSet("prices",np);}}
                               style={{...s.input,width:80,textAlign:"center",padding:"5px 8px",fontSize:13}}/>
                             <span style={{fontSize:12,color:C.textSub,whiteSpace:"nowrap"}}>р/шт</span>
                             <button onClick={()=>deleteMarker(cat,m)} style={{...s.btn("danger"),padding:"5px 8px",fontSize:11}}>✕</button>
