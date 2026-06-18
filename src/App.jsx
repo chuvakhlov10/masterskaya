@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, Component } from "react";
-import { dbGet, dbSet } from "./supabase.js";
+import { dbGet, dbSet, dbDumpAll } from "./supabase.js";
 
 const DEFAULT_MARKERS = {
   "Автомобильные": ["Замена корпуса","HD39RP","Нарезка лезвия","LD-1P","MIT8AP","MIT8RP (п.ч.)","XT27A"],
@@ -565,6 +565,50 @@ export default function App(){
   // редактирование
   const [editRec, setEditRec] = useState(null);
 
+  // ── диагностика записи в Supabase ──
+  const [diagResult, setDiagResult] = useState(null);
+  const [diagRunning, setDiagRunning] = useState(false);
+  async function runDiagnostic(){
+    setDiagRunning(true);
+    setDiagResult(null);
+    console.log("═══ НАЧАЛО ДИАГНОСТИКИ SUPABASE ═══");
+    // 1. Тест записи
+    const testKey = "__diagnostic_test__";
+    const testVal = { ts: Date.now(), hello: "world" };
+    console.log("[DIAG] Тест 1: запись тестового ключа...");
+    const writeResult = await dbSet(testKey, testVal);
+    console.log("[DIAG] Результат записи:", writeResult);
+    // 2. Тест чтения
+    console.log("[DIAG] Тест 2: чтение тестового ключа...");
+    const readVal = await dbGet(testKey);
+    console.log("[DIAG] Прочитано:", readVal);
+    const readOk = readVal && readVal.ts === testVal.ts;
+    // 3. Удалить тестовый ключ
+    console.log("[DIAG] Тест 3: удалить тестовый ключ...");
+    try {
+      const { supabase } = await import("./supabase.js");
+      await supabase.from("kv_store").delete().eq("key", testKey);
+      console.log("[DIAG] Удаление OK");
+    } catch(e) {
+      console.warn("[DIAG] Не удалось удалить:", e);
+    }
+    // 4. Дамп всех ключей
+    console.log("[DIAG] Тест 4: дамп всех ключей...");
+    const allKeys = await dbDumpAll();
+    console.log("[DIAG] Всего ключей в БД:", allKeys?.length || 0);
+    // Итог
+    const result = {
+      writeOk: writeResult?.ok || false,
+      readOk: readOk,
+      totalKeys: allKeys?.length || 0,
+      keys: allKeys?.map(r => r.key) || [],
+      writeError: writeResult?.error ? JSON.stringify(writeResult.error) : null,
+    };
+    console.log("═══ ИТОГ ДИАГНОСТИКИ ═══", result);
+    setDiagResult(result);
+    setDiagRunning(false);
+  }
+
   // ── загрузка при старте ──
   useEffect(()=>{
     (async()=>{
@@ -991,6 +1035,40 @@ export default function App(){
       {pwdModalOpen&&<PasswordModal workshop={workshop}
         onChange={handleChangePassword} onClose={()=>setPwdModalOpen(false)}/>}
       <div style={{maxWidth:600,margin:"0 auto",padding:"12px 12px 40px"}}>
+        {/* ── ДИАГНОСТИЧЕСКАЯ ПАНЕЛЬ (временно) ── */}
+        <div style={{...s.card,borderColor:C.warn+"66",background:C.warnDim,marginBottom:14}}>
+          <div style={{fontSize:12,fontWeight:700,color:C.warn,marginBottom:8}}>🔧 ДИАГНОСТИКА SUPABASE</div>
+          <button onClick={runDiagnostic} disabled={diagRunning}
+            style={{...s.btn("warn"),padding:"6px 12px",fontSize:12,opacity:diagRunning?.6:1}}>
+            {diagRunning ? "Выполняется..." : "Запустить диагностику"}
+          </button>
+          {diagResult && (
+            <div style={{marginTop:10,fontSize:12,lineHeight:1.6}}>
+              <div style={{color:diagResult.writeOk?C.success:C.danger}}>
+                Запись: {diagResult.writeOk ? "✓ работает" : "✗ не работает"}
+              </div>
+              <div style={{color:diagResult.readOk?C.success:C.danger}}>
+                Чтение: {diagResult.readOk ? "✓ работает" : "✗ не работает"}
+              </div>
+              <div style={{color:C.text}}>
+                Всего ключей в БД: {diagResult.totalKeys}
+              </div>
+              {diagResult.keys.length > 0 && (
+                <div style={{color:C.textSub,marginTop:4,fontSize:11}}>
+                  Ключи: {diagResult.keys.join(", ")}
+                </div>
+              )}
+              {diagResult.writeError && (
+                <div style={{color:C.danger,marginTop:6,fontSize:11,wordBreak:"break-all"}}>
+                  Ошибка: {diagResult.writeError}
+                </div>
+              )}
+              <div style={{color:C.textDim,marginTop:6,fontSize:11}}>
+                Подробности — в консоли (F12 → Console)
+              </div>
+            </div>
+          )}
+        </div>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
           <div style={{display:"flex",alignItems:"center",gap:8}}>
             <span style={{...s.tag(wsColor),fontSize:13,fontWeight:700}}>{workshop}</span>
