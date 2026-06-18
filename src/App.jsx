@@ -49,6 +49,11 @@ function stockDelta(r){
   return (r.qty || 0) + (r.defect || 0);
 }
 
+// Сортировка категорий по алфавиту (А → Я)
+function sortedCategories(markers){
+  return Object.keys(markers).sort((a,b)=>a.localeCompare(b,"ru"));
+}
+
 function NumInput({ value, onChange, style, min="0", placeholder="" }) {
   const [local, setLocal] = useState(String(value ?? ""));
   useEffect(() => { setLocal(String(value ?? "")); }, [value]);
@@ -202,7 +207,7 @@ function EditModal({ record, idx, markers, onSave, onDelete, onClose }){
 
         <label style={s.label}>Категория</label>
         <select value={cat} onChange={e=>setCat(e.target.value)} style={{...s.input,marginBottom:10}}>
-          {Object.keys(markers).map(c=><option key={c}>{c}</option>)}
+          {sortedCategories(markers).map(c=><option key={c}>{c}</option>)}
         </select>
         <label style={s.label}>Маркировка</label>
         <div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:6}}>
@@ -262,7 +267,12 @@ function StatsBreakdown({ data, totalAmt, totalQty }){
   if(Object.keys(byCategory).length===0) return <div style={{fontSize:13,color:C.textDim}}>Нет данных</div>;
   return (
     <div>
-      {Object.entries(byCategory).sort((a,b)=>b[1].amount-a[1].amount).map(([cat,d])=>(
+      {Object.entries(byCategory).sort((a,b)=>{
+        // сортируем по алфавиту (А → Я), потом по сумме
+        const nameCompare = a[0].localeCompare(b[0], "ru");
+        if(nameCompare !== 0) return nameCompare;
+        return b[1].amount - a[1].amount;
+      }).map(([cat,d])=>(
         <div key={cat} style={{...s.card,padding:0,overflow:"hidden",marginBottom:8}}>
           <div onClick={()=>setExpanded(p=>({...p,[cat]:!p[cat]}))}
             style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 14px",cursor:"pointer"}}>
@@ -320,15 +330,6 @@ function DayReport({ records, workshop, wsStock, stockCfg, dateStr, onEditRecord
   if(report.length===0) return <div style={{fontSize:13,color:C.textDim,padding:"8px 0"}}>Записей нет</div>;
   return (
     <div>
-      <div style={{...s.card,background:C.successDim,borderColor:C.success+"44",marginBottom:14}}>
-        <div style={{fontSize:12,color:C.textSub}}>Итого за день</div>
-        <div style={{fontSize:22,fontWeight:700,color:C.success}}>{fmt(totalAmt)} р</div>
-        <div style={{display:"flex",gap:14,marginTop:4,fontSize:11,color:C.textDim}}>
-          <span>Продаж: {totalQtySold} шт</span>
-          {totalQtyRefund>0&&<span style={{color:C.refund}}>Возвратов: {totalQtyRefund} шт</span>}
-        </div>
-        {workshop==="SMART"&&<div style={{fontSize:12,color:C.textDim,marginTop:2}}>Доход: {fmt(totalAmt*INCOME_PCT)} р</div>}
-      </div>
       <StatsBreakdown data={dayRecs} totalAmt={totalAmt} totalQty={totalQtySold-totalQtyRefund}/>
       <div style={{fontSize:12,fontWeight:700,color:C.textSub,marginBottom:8,marginTop:12}}>БЫЛО → СТАЛО</div>
       {report.map(([m,d])=>{
@@ -413,6 +414,60 @@ function DayRecordsList({ dayRecs, records, onEditRecord }){
           })}
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Модалка смены пароля ──
+function PasswordModal({ workshop, onChange, onClose }){
+  const [oldPwd, setOldPwd] = useState("");
+  const [newPwd, setNewPwd] = useState("");
+  const [confirmPwd, setConfirmPwd] = useState("");
+  const [msg, setMsg] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  async function submit(){
+    setLoading(true);
+    setMsg(null);
+    const result = await onChange(oldPwd, newPwd, confirmPwd);
+    setLoading(false);
+    if(result.ok){
+      setMsg({ok:true, text:result.text});
+      setTimeout(()=>{onClose();}, 1200);
+    } else {
+      setMsg({ok:false, text:result.text});
+    }
+  }
+
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.75)",zIndex:100,display:"flex",alignItems:"flex-end",justifyContent:"center"}}
+      onClick={e=>{if(e.target===e.currentTarget)onClose();}}>
+      <div style={{background:C.bgCard,borderRadius:"16px 16px 0 0",border:`1px solid ${C.border}`,padding:20,
+        width:"100%",maxWidth:600,maxHeight:"90vh",overflowY:"auto"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+          <span style={{fontWeight:700,fontSize:16}}>Сменить пароль · {workshop}</span>
+          <button onClick={onClose} style={{...s.btn(),padding:"4px 10px",fontSize:12}}>✕</button>
+        </div>
+        <label style={s.label}>Старый пароль</label>
+        <input type="password" value={oldPwd} onChange={e=>setOldPwd(e.target.value)}
+          style={{...s.input,marginBottom:10}} placeholder="Текущий пароль"/>
+        <label style={s.label}>Новый пароль</label>
+        <input type="password" value={newPwd} onChange={e=>setNewPwd(e.target.value)}
+          style={{...s.input,marginBottom:10}} placeholder="Минимум 4 символа"/>
+        <label style={s.label}>Повторите новый пароль</label>
+        <input type="password" value={confirmPwd} onChange={e=>setConfirmPwd(e.target.value)}
+          onKeyDown={e=>{if(e.key==="Enter"&&!loading)submit();}}
+          style={{...s.input,marginBottom:16}} placeholder="Ещё раз"/>
+        {msg&&<div style={{fontSize:12,marginBottom:10,color:msg.ok?C.success:C.danger}}>{msg.text}</div>}
+        <button onClick={submit} disabled={loading}
+          style={{...s.btn("accent"),width:"100%",padding:"10px 0",opacity:loading?.6:1}}>
+          {loading ? "Сохранение..." : "Обновить пароль"}
+        </button>
+        <div style={{fontSize:11,color:C.textDim,marginTop:10,lineHeight:1.5}}>
+          Пароль применяется только к мастерской <b>{workshop}</b>.<br/>
+          Хранится в Supabase как SHA-256 хэш — прочитать его невозможно.
+        </div>
+      </div>
     </div>
   );
 }
@@ -558,6 +613,23 @@ export default function App(){
       localStorage.removeItem(LOCAL_WS_KEY);
       localStorage.removeItem(LOCAL_AUTH_KEY);
     }catch{}
+  }
+
+  // ── смена пароля ──
+  const [pwdModalOpen, setPwdModalOpen] = useState(false);
+  async function handleChangePassword(oldPwd, newPwd, confirmPwd){
+    if(!oldPwd || !newPwd){ return {ok:false, text:"Заполните все поля"}; }
+    if(newPwd.length < 4){ return {ok:false, text:"Новый пароль слишком короткий (мин. 4 символа)"}; }
+    if(newPwd !== confirmPwd){ return {ok:false, text:"Пароли не совпадают"}; }
+    const oldHash = await sha256(oldPwd);
+    if(passwords[workshop] !== oldHash){
+      return {ok:false, text:"Старый пароль неверный"};
+    }
+    const newHash = await sha256(newPwd);
+    const next = {...passwords, [workshop]: newHash};
+    setPasswords(next);
+    await sSet("passwords", next);
+    return {ok:true, text:"Пароль обновлён"};
   }
 
   // ── добавление записи ──
@@ -868,13 +940,18 @@ export default function App(){
     <div style={s.app}>
       {editRec&&<EditModal record={editRec.record} idx={editRec.globalIdx} markers={markers}
         onSave={handleEditSave} onDelete={handleEditDelete} onClose={()=>setEditRec(null)}/>}
+      {pwdModalOpen&&<PasswordModal workshop={workshop}
+        onChange={handleChangePassword} onClose={()=>setPwdModalOpen(false)}/>}
       <div style={{maxWidth:600,margin:"0 auto",padding:"12px 12px 40px"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
           <div style={{display:"flex",alignItems:"center",gap:8}}>
             <span style={{...s.tag(wsColor),fontSize:13,fontWeight:700}}>{workshop}</span>
             <span style={{fontSize:12,color:C.textDim}}>{todayStr()}</span>
           </div>
-          <button onClick={handleLogout} style={{...s.btn(),padding:"5px 10px",fontSize:12}}>Выйти</button>
+          <div style={{display:"flex",gap:6}}>
+            <button onClick={()=>setPwdModalOpen(true)} style={{...s.btn(),padding:"5px 10px",fontSize:12}}>🔑 Пароль</button>
+            <button onClick={handleLogout} style={{...s.btn(),padding:"5px 10px",fontSize:12}}>Выйти</button>
+          </div>
         </div>
         <Tabs tabs={tabs} active={tab} onChange={setTab}/>
 
@@ -904,7 +981,7 @@ export default function App(){
             <div style={{marginBottom:12}}>
               <label style={s.label}>Категория</label>
               <select value={category} onChange={e=>{setCategory(e.target.value);setMarker("");}} style={s.input}>
-                {Object.keys(markers).map(c=><option key={c}>{c}</option>)}
+                {sortedCategories(markers).map(c=><option key={c}>{c}</option>)}
               </select>
             </div>
             <div style={{marginBottom:12}}>
@@ -1044,8 +1121,17 @@ export default function App(){
               ))}
             </div>
             <div style={{marginBottom:14,position:"relative"}}>
-              <input type="date" value={statsDate} onChange={e=>setStatsDate(e.target.value)}
-                style={{...s.input,paddingRight:40}}/>
+              <label style={{...s.input,position:"relative",display:"flex",alignItems:"center",cursor:"pointer",paddingRight:40}}>
+                <input type="date" value={statsDate} onChange={e=>setStatsDate(e.target.value)}
+                  style={{
+                    position:"absolute",inset:0,opacity:0,cursor:"pointer",
+                    width:"100%",height:"100%",border:"none",background:"transparent"
+                  }}/>
+                <span style={{color:statsDate?C.text:C.textDim}}>
+                  {statsDate ? new Date(statsDate+"T00:00:00").toLocaleDateString("ru-RU",{day:"numeric",month:"long",year:"numeric"}) : "Выберите дату"}
+                </span>
+                <span style={{position:"absolute",right:12,color:C.textSub,fontSize:16,pointerEvents:"none"}}>📅</span>
+              </label>
             </div>
             {renderStats()}
           </div>
@@ -1068,7 +1154,7 @@ export default function App(){
               <div>
                 <div style={{fontSize:13,color:C.textSub,marginBottom:10}}>Остатки · <b style={{color:wsColor}}>{workshop}</b></div>
                 <input value={stockSearch} onChange={e=>setStockSearch(e.target.value)} placeholder="Поиск по маркировке..." style={{...s.input,marginBottom:12}}/>
-                {Object.keys(markers).map(cat=>renderStockCategory(cat,wsStock,true))}
+                {sortedCategories(markers).map(cat=>renderStockCategory(cat,wsStock,true))}
                 <div style={{fontSize:11,color:C.textDim,marginTop:4}}>«Порог» — при каком остатке показывать ⚠</div>
               </div>
             )}
@@ -1076,7 +1162,7 @@ export default function App(){
               <div>
                 <div style={{fontSize:13,color:C.textSub,marginBottom:10}}>Общий склад</div>
                 <input value={stockSearch} onChange={e=>setStockSearch(e.target.value)} placeholder="Поиск..." style={{...s.input,marginBottom:12}}/>
-                {Object.keys(markers).map(cat=>renderStockCategory(cat,stockMain,false))}
+                {sortedCategories(markers).map(cat=>renderStockCategory(cat,stockMain,false))}
               </div>
             )}
             {stockTab==="move"&&(
@@ -1121,7 +1207,7 @@ export default function App(){
               <label style={s.label}>Категория</label>
               <select value={newMarkerCat} onChange={e=>setNewMarkerCat(e.target.value)} style={{...s.input,marginBottom:10}}>
                 <option value="">Выбрать...</option>
-                {Object.keys(markers).map(c=><option key={c}>{c}</option>)}
+                {sortedCategories(markers).map(c=><option key={c}>{c}</option>)}
               </select>
               <label style={s.label}>Название</label>
               <div style={{display:"flex",gap:8}}>
@@ -1134,7 +1220,7 @@ export default function App(){
 
             <input value={priceSearch} onChange={e=>setPriceSearch(e.target.value)} placeholder="Поиск маркировки..." style={{...s.input,marginBottom:14}}/>
 
-            {Object.entries(markers).map(([cat,ms])=>{
+            {sortedCategoryEntries(markers).map(([cat,ms])=>{
               const filtered = ms.filter(m=>m.toLowerCase().includes(priceSearch.toLowerCase()));
               if(filtered.length===0) return null;
               const expanded = priceExpandedCats[cat]!==false;
