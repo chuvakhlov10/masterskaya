@@ -41,13 +41,12 @@ function signOf(r){ return r.recordType === "refund" ? -1 : 1; }
 
 // Сколько заготовок списать со склада:
 // - refund: 0 (заготовка уже списана при продаже)
-// - sale с qty>0: qty (все изготовленные, включая брак)
-// - sale с qty=0 и defect>0: defect (только брак — отдельная операция)
+// - sale: qty + defect (все изготовленные — годные + брак)
+// - sale с qty=0 и defect>0: defect (только брак)
 // - sale с qty=0 и defect=0: 0 (пустая запись)
 function stockDelta(r){
   if(r.recordType === "refund") return 0;
-  if(r.qty > 0) return r.qty;
-  return r.defect || 0;
+  return (r.qty || 0) + (r.defect || 0);
 }
 
 function NumInput({ value, onChange, style, min="0", placeholder="" }) {
@@ -217,9 +216,14 @@ function EditModal({ record, idx, markers, onSave, onDelete, onClose }){
         </div>
         <input value={mrk} onChange={e=>setMrk(e.target.value)} style={{...s.input,marginBottom:10}} placeholder="или своя маркировка"/>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
-          <div><label style={s.label}>Количество</label><NumInput value={qty} onChange={setQty} min="0" style={s.input}/></div>
-          <div><label style={s.label}>Брак</label><NumInput value={defect} onChange={setDefect} min="0" style={s.input}/></div>
+          <div><label style={s.label}>Готовых <span style={{color:C.textDim,fontSize:10}}>(годные)</span></label><NumInput value={qty} onChange={setQty} min="0" style={s.input}/></div>
+          <div><label style={s.label}>Брак <span style={{color:C.textDim,fontSize:10}}>(испорченные)</span></label><NumInput value={defect} onChange={setDefect} min="0" style={s.input}/></div>
         </div>
+        {recordType==="sale"&&qty>0&&defect>0&&(
+          <div style={{fontSize:11,color:C.textDim,marginBottom:10,lineHeight:1.5}}>
+            Всего изготовлено: <b>{qty+defect} шт</b> · Списание со склада: <b>{qty+defect} шт</b> · Сумма: <b>{qty} шт</b> × цена
+          </div>
+        )}
         <label style={s.label}>Сумма, руб {recordType==="refund"&&<span style={{color:C.refund}}>(будет вычтена)</span>}</label>
         <NumInput value={amount} onChange={setAmount} min="0" style={{...s.input,marginBottom:10}}/>
         <label style={s.label}>Комментарий</label>
@@ -517,7 +521,7 @@ export default function App(){
     if(manualAmount) return;
     if(recordType === "refund") return;  // для возврата всегда ручной ввод
     const p = prices[marker];
-    if(p) setAmount(Math.max(qty-defect,0)*p);
+    if(p) setAmount(qty * p);   // сумма = только готовые × цена
   },[marker,qty,defect,manualAmount,prices,recordType]);
 
   // ── фото маркировки ──
@@ -583,7 +587,7 @@ export default function App(){
     // Сброс формы — qty/defect по 0 (как просил пользователь)
     setMarker(""); setQty(0); setDefect(0); setAmount(0);
     setManualAmount(false); setComment(""); setRecordType("sale");
-    setSubmitMsg({ok:true, text: rec.recordType==="refund" ? "Возврат оформлен" : (rec.qty===0&&rec.defect>0 ? "Брак оформлен" : "Запись добавлена")});
+    setSubmitMsg({ok:true, text: rec.recordType==="refund" ? "Возврат оформлен" : (rec.qty===0&&rec.defect>0 ? `Брак оформлен (${rec.defect} шт)` : "Запись добавлена")});
     setTimeout(()=>setSubmitMsg(null), 2000);
   }
 
@@ -951,19 +955,20 @@ export default function App(){
             )}
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
               <div>
-                <label style={s.label}>Количество {recordType==="sale"&&<span style={{color:C.textDim,fontSize:10}}>(включая брак)</span>}</label>
+                <label style={s.label}>Готовых {recordType==="sale"&&<span style={{color:C.textDim,fontSize:10}}>(годные ключи)</span>}</label>
                 <NumInput value={qty} onChange={setQty} min="0" style={s.input}/>
               </div>
               <div>
-                <label style={s.label}>Брак {recordType==="sale"&&qty===0&&defect>0&&<span style={{color:C.warn,fontSize:10}}>(только брак)</span>}</label>
+                <label style={s.label}>Брак {recordType==="sale"&&<span style={{color:C.textDim,fontSize:10}}>(испорченные)</span>}</label>
                 <NumInput value={defect} onChange={setDefect} min="0" style={s.input}/>
               </div>
             </div>
             {recordType==="sale"&&qty>0&&defect>0&&(
               <div style={{...s.card,padding:"8px 12px",marginBottom:10,background:C.warnDim,borderColor:C.warn+"44"}}>
                 <div style={{fontSize:12,color:C.warn,lineHeight:1.5}}>
-                  ⚠ Списания со склада: <b>{qty} шт</b> (все изготовленные, включая {defect} брак)<br/>
-                  Сумма: только за годные <b>{qty-defect} шт</b> × цена
+                  ⚠ Всего изготовлено: <b>{qty+defect} шт</b> ({qty} готовых + {defect} брак)<br/>
+                  Списания со склада: <b>{qty+defect} шт</b><br/>
+                  Сумма: <b>{qty} шт</b> × цена (только годные)
                 </div>
               </div>
             )}
