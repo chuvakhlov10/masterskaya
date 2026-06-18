@@ -53,6 +53,9 @@ function stockDelta(r){
 function sortedCategories(markers){
   return Object.keys(markers).sort((a,b)=>a.localeCompare(b,"ru"));
 }
+function sortedCategoryEntries(markers){
+  return sortedCategories(markers).map(cat=>[cat, markers[cat]]);
+}
 
 function NumInput({ value, onChange, style, min="0", placeholder="" }) {
   const [local, setLocal] = useState(String(value ?? ""));
@@ -983,7 +986,7 @@ export default function App(){
 
   return (
     <div style={s.app}>
-      {editRec&&<EditModal record={editRec.record} idx={editRec.globalIdx} markers={markers}
+      {editRec&&<EditModal record={editRec.record} idx={editRec.globalIdx} markers={safeMarkers}
         onSave={handleEditSave} onDelete={handleEditDelete} onClose={()=>setEditRec(null)}/>}
       {pwdModalOpen&&<PasswordModal workshop={workshop}
         onChange={handleChangePassword} onClose={()=>setPwdModalOpen(false)}/>}
@@ -1026,15 +1029,15 @@ export default function App(){
             <div style={{marginBottom:12}}>
               <label style={s.label}>Категория</label>
               <select value={category} onChange={e=>{setCategory(e.target.value);setMarker("");}} style={s.input}>
-                {sortedCategories(markers).map(c=><option key={c}>{c}</option>)}
+                {sortedCategories(safeMarkers).map(c=><option key={c}>{c}</option>)}
               </select>
             </div>
             <div style={{marginBottom:12}}>
               <label style={s.label}>Маркировка</label>
               <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:8}}>
-                {(markers[category]||[]).map(m=>{
+                {(safeMarkers[category]||[]).map(m=>{
                   const wq = wsStock[m]||0;
-                  const cfg = stockCfg[m]||{};
+                  const cfg = safeStockCfg[m]||{};
                   const low = cfg.threshold>0 && wq<=cfg.threshold;
                   const empty = wq===0;
                   return (
@@ -1199,7 +1202,7 @@ export default function App(){
               <div>
                 <div style={{fontSize:13,color:C.textSub,marginBottom:10}}>Остатки · <b style={{color:wsColor}}>{workshop}</b></div>
                 <input value={stockSearch} onChange={e=>setStockSearch(e.target.value)} placeholder="Поиск по маркировке..." style={{...s.input,marginBottom:12}}/>
-                {sortedCategories(markers).map(cat=>renderStockCategory(cat,wsStock,true))}
+                {sortedCategories(safeMarkers).map(cat=>renderStockCategory(cat,wsStock,true))}
                 <div style={{fontSize:11,color:C.textDim,marginTop:4}}>«Порог» — при каком остатке показывать ⚠</div>
               </div>
             )}
@@ -1207,7 +1210,7 @@ export default function App(){
               <div>
                 <div style={{fontSize:13,color:C.textSub,marginBottom:10}}>Общий склад</div>
                 <input value={stockSearch} onChange={e=>setStockSearch(e.target.value)} placeholder="Поиск..." style={{...s.input,marginBottom:12}}/>
-                {sortedCategories(markers).map(cat=>renderStockCategory(cat,stockMain,false))}
+                {sortedCategories(safeMarkers).map(cat=>renderStockCategory(cat,stockMain,false))}
               </div>
             )}
             {stockTab==="move"&&(
@@ -1215,7 +1218,7 @@ export default function App(){
                 <div style={{...s.card,marginBottom:16}}>
                   <div style={{fontSize:13,fontWeight:700,marginBottom:12}}>Поступление на общий склад</div>
                   <label style={s.label}>Маркировка</label>
-                  <MarkerPicker markers={markers} value={moveMarker} onChange={setMoveMarker}/>
+                  <MarkerPicker markers={safeMarkers} value={moveMarker} onChange={setMoveMarker}/>
                   <label style={{...s.label,marginTop:10}}>Количество</label>
                   <NumInput value={moveQty} onChange={setMoveQty} min="1" style={{...s.input,marginBottom:10}}/>
                   <button onClick={async()=>{
@@ -1229,7 +1232,7 @@ export default function App(){
                 <div style={s.card}>
                   <div style={{fontSize:13,fontWeight:700,marginBottom:12}}>Общий склад → Мастерская</div>
                   <label style={s.label}>Маркировка</label>
-                  <MarkerPicker markers={markers} value={moveMarker} onChange={setMoveMarker} extraLabel={m=>`склад: ${stockMain[m]||0}`}/>
+                  <MarkerPicker markers={safeMarkers} value={moveMarker} onChange={setMoveMarker} extraLabel={m=>`склад: ${safeStockMain[m]||0}`}/>
                   <label style={{...s.label,marginTop:10}}>В мастерскую</label>
                   <select value={moveTo} onChange={e=>setMoveTo(e.target.value)} style={{...s.input,marginBottom:10}}>
                     {WORKSHOPS.map(w=><option key={w}>{w}</option>)}
@@ -1252,7 +1255,7 @@ export default function App(){
               <label style={s.label}>Категория</label>
               <select value={newMarkerCat} onChange={e=>setNewMarkerCat(e.target.value)} style={{...s.input,marginBottom:10}}>
                 <option value="">Выбрать...</option>
-                {sortedCategories(markers).map(c=><option key={c}>{c}</option>)}
+                {sortedCategories(safeMarkers).map(c=><option key={c}>{c}</option>)}
               </select>
               <label style={s.label}>Название</label>
               <div style={{display:"flex",gap:8}}>
