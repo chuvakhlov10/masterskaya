@@ -79,6 +79,43 @@ function NumInput({ value, onChange, style, min="0", placeholder="" }) {
   );
 }
 
+// ── Инпут с кнопками + и - ──
+function StepperInput({ value, onChange, step = 1, min = 0, style, inputStyle }) {
+  const dec = () => {
+    const v = Math.max((value || 0) - step, min);
+    onChange(v);
+  };
+  const inc = () => {
+    const v = (value || 0) + step;
+    onChange(v);
+  };
+  const btnStyle = {
+    width: 32,
+    height: 36,
+    background: C.bgInput,
+    border: `1px solid ${C.border}`,
+    color: C.text,
+    cursor: "pointer",
+    fontSize: 18,
+    fontWeight: 700,
+    borderRadius: 6,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 0,
+    userSelect: "none",
+    flexShrink: 0,
+  };
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 4, ...style }}>
+      <button type="button" onClick={dec} style={{ ...btnStyle, opacity: (value||0) <= min ? 0.4 : 1 }}>−</button>
+      <NumInput value={value} onChange={onChange} min={String(min)} style={{ textAlign: "center", width: 60, padding: "6px 4px", fontSize: 13, ...inputStyle }}/>
+      <button type="button" onClick={inc} style={btnStyle}>+</button>
+    </div>
+  );
+}
+
+
 async function sGet(key){ return dbGet(key); }
 async function sSet(key,val){ return dbSet(key,val); }
 
@@ -230,8 +267,8 @@ function EditModal({ record, idx, markers, onSave, onDelete, onClose }){
         </div>
         <input value={mrk} onChange={e=>setMrk(e.target.value)} style={{...s.input,marginBottom:10}} placeholder="или своя маркировка"/>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
-          <div><label style={s.label}>Готовых <span style={{color:C.textDim,fontSize:10}}>(годные)</span></label><NumInput value={qty} onChange={setQty} min="0" style={s.input}/></div>
-          <div><label style={s.label}>Брак <span style={{color:C.textDim,fontSize:10}}>(испорченные)</span></label><NumInput value={defect} onChange={setDefect} min="0" style={s.input}/></div>
+          <div><label style={s.label}>Готовых <span style={{color:C.textDim,fontSize:10}}>(годные)</span></label><StepperInput value={qty} onChange={setQty} style={{width:"100%"}} inputStyle={{width:"100%"}}/></div>
+          <div><label style={s.label}>Брак <span style={{color:C.textDim,fontSize:10}}>(испорченные)</span></label><StepperInput value={defect} onChange={setDefect} style={{width:"100%"}} inputStyle={{width:"100%"}}/></div>
         </div>
         {recordType==="sale"&&qty>0&&defect>0&&(
           <div style={{fontSize:11,color:C.textDim,marginBottom:10,lineHeight:1.5}}>
@@ -1206,18 +1243,18 @@ export default function App(){
         </div>
         {expanded&&(
           <div style={{borderTop:`1px solid ${C.border}`}}>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 100px",gap:6,
+            <div style={{display:"grid",gridTemplateColumns:"1fr 150px",gap:6,
               padding:"6px 14px",fontSize:11,color:C.textDim,borderBottom:`1px solid ${C.border}`,background:"#13161f"}}>
               <span>Маркировка</span><span style={{textAlign:"center"}}>Кол-во</span>
             </div>
             {filtered.map(m=>{
               const q=stockObj[m]||0,cfg=stockCfg[m]||{};
               return (
-                <div key={m} style={{display:"grid",gridTemplateColumns:"1fr 100px",gap:6,
+                <div key={m} style={{display:"grid",gridTemplateColumns:"1fr 150px",gap:6,
                   padding:"7px 14px",borderBottom:`1px solid ${C.border}22`,alignItems:"center",
                   background:q===0?"#16111a":q>0&&cfg.threshold>0&&q<=cfg.threshold?"#1f1a0e":"transparent"}}>
                   <span style={{fontSize:13,color:q===0?C.textDim:C.text}}>{m}</span>
-                  <NumInput value={q} onChange={async nq=>{
+                  <StepperInput value={q} onChange={async nq=>{
                     const ns={...stockObj,[m]:nq};
                     if(isWS){
                       setStockWS(p=>({...p,[workshop]:ns}));
@@ -1226,8 +1263,9 @@ export default function App(){
                       setStockMain(ns);
                       debouncedSave("stock:main", ns);
                     }
-                  }} style={{...s.input,width:"100%",textAlign:"center",padding:"5px 6px",fontSize:13,
-                    color:q===0?C.danger:cfg.threshold>0&&q<=cfg.threshold?C.warn:C.success}}/>
+                  }} inputStyle={{
+                    color:q===0?C.danger:cfg.threshold>0&&q<=cfg.threshold?C.warn:C.success
+                  }}/>
                 </div>
               );
             })}
@@ -1558,11 +1596,11 @@ export default function App(){
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
               <div>
                 <label style={s.label}>Готовых {recordType==="sale"&&<span style={{color:C.textDim,fontSize:10}}>(годные ключи)</span>}</label>
-                <NumInput value={qty} onChange={setQty} min="0" style={s.input}/>
+                <StepperInput value={qty} onChange={setQty} style={{width:"100%"}} inputStyle={{width:"100%"}}/>
               </div>
               <div>
                 <label style={s.label}>Брак {recordType==="sale"&&<span style={{color:C.textDim,fontSize:10}}>(испорченные)</span>}</label>
-                <NumInput value={defect} onChange={setDefect} min="0" style={s.input}/>
+                <StepperInput value={defect} onChange={setDefect} style={{width:"100%"}} inputStyle={{width:"100%"}}/>
               </div>
             </div>
             {recordType==="sale"&&qty>0&&defect>0&&(
@@ -1694,7 +1732,7 @@ export default function App(){
                   <label style={s.label}>Маркировка</label>
                   <MarkerPicker markers={safeMarkers} value={moveMarker} onChange={setMoveMarker}/>
                   <label style={{...s.label,marginTop:10}}>Количество</label>
-                  <NumInput value={moveQty} onChange={setMoveQty} min="1" style={{...s.input,marginBottom:10}}/>
+                  <StepperInput value={moveQty} onChange={setMoveQty} min={1} style={{marginBottom:10}}/>
                   <button onClick={async()=>{
                     if(!moveMarker||moveQty<=0){setMoveMsg({ok:false,text:"Заполните поля"});return;}
                     const ns={...stockMain,[moveMarker]:(stockMain[moveMarker]||0)+moveQty};
@@ -1712,7 +1750,7 @@ export default function App(){
                     {WORKSHOPS.map(w=><option key={w}>{w}</option>)}
                   </select>
                   <label style={s.label}>Количество</label>
-                  <NumInput value={moveQty} onChange={setMoveQty} min="1" style={{...s.input,marginBottom:10}}/>
+                  <StepperInput value={moveQty} onChange={setMoveQty} min={1} style={{marginBottom:10}}/>
                   <button onClick={doMove} style={{...s.btn("accent"),width:"100%"}}>Переместить</button>
                 </div>
                 {moveMsg&&<div style={{textAlign:"center",marginTop:10,fontSize:13,color:moveMsg.ok?C.success:C.danger}}>{moveMsg.text}</div>}
@@ -1762,19 +1800,20 @@ export default function App(){
                     <div style={{borderTop:`1px solid ${C.border}`}}>
                       {filtered.map(m=>(
                         <div key={m} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
-                          padding:"8px 14px",borderBottom:`1px solid ${C.border}22`}}>
-                          <span style={{fontSize:13,flex:1}}>{m}</span>
+                          padding:"8px 14px",borderBottom:`1px solid ${C.border}22`,gap:8,flexWrap:"wrap"}}>
+                          <span style={{fontSize:13,flex:1,minWidth:80}}>{m}</span>
                           <div style={{display:"flex",alignItems:"center",gap:6}}>
-                            <input type="number" min="0" step="1" value={safePrices[m]||""} placeholder="—"
-                              onChange={async e=>{
-                                const val = +e.target.value;
+                            <StepperInput
+                              value={safePrices[m]||0}
+                              onChange={async (val) => {
                                 const np = {...safePrices};
                                 if(val > 0) np[m] = val;
                                 else delete np[m];
                                 setPrices(np);
                                 debouncedSave("prices", np);
                               }}
-                              style={{...s.input,width:80,textAlign:"center",padding:"5px 8px",fontSize:13}}/>
+                              step={10}
+                              />
                             <span style={{fontSize:12,color:C.textSub,whiteSpace:"nowrap"}}>р/шт</span>
                             <button onClick={()=>setRenameModal({cat, oldName:m})} title="Переименовать"
                               style={{...s.btn(),padding:"5px 8px",fontSize:11}}>✎</button>
