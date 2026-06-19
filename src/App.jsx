@@ -495,28 +495,27 @@ function YearMonthCard({ monthKey, monthData, monthName, workshop, onEditRecord,
         </div>
       )}
       {expanded && (
-        <div style={{borderTop:`1px solid ${C.border}`,padding:"10px 14px"}}>
-          {/* Сводка по месяцу */}
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:12,fontSize:12}}>
-            <div style={{background:C.bgInput,padding:"8px",borderRadius:6}}>
-              <div style={{color:C.textSub,fontSize:10}}>Сумма</div>
-              <div style={{color:monthData.amount>=0?C.accent:C.refund,fontWeight:700}}>{fmt(monthData.amount)} р</div>
-            </div>
-            <div style={{background:C.bgInput,padding:"8px",borderRadius:6}}>
-              <div style={{color:C.textSub,fontSize:10}}>Ключей</div>
-              <div style={{fontWeight:700}}>{fmt(monthData.qty)} шт</div>
-            </div>
-            <div style={{background:C.bgInput,padding:"8px",borderRadius:6}}>
-              <div style={{color:C.textSub,fontSize:10}}>Раб. дней</div>
-              <div style={{fontWeight:700}}>{monthData.days.size}</div>
-            </div>
+        <div style={{borderTop:`1px solid ${C.border}`,padding:"12px 14px"}}>
+          {/* ПОЛНАЯ СТАТИСТИКА — как во вкладке "Месяц" */}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
+            <StatCard label="Всего ключей" value={fmt(monthData.qty)}/>
+            <StatCard label="Общая сумма" value={fmt(monthData.amount)+" р"}/>
+            <StatCard label="Брак" value={fmt(monthData.defect)} color={monthData.defect>0?C.warn:undefined}/>
+            <StatCard label="% брака" value={monthData.qty>0?(monthData.defect/Math.abs(monthData.qty)*100).toFixed(1)+"%":"0%"} color={monthData.defect>0?C.warn:undefined}/>
+            <StatCard label="Рабочих дней" value={monthData.days.size} sub="дней с записями"/>
+            <StatCard label="Среднее/день" value={fmt(avgPerDay)+" р"} sub="по рабочим дням"/>
+            {workshop==="SMART"&&<StatCard label="Доход 40%" value={fmt(monthData.amount*INCOME_PCT)+" р"} color={C.success}/>}
           </div>
 
-          {/* По дням */}
-          <div style={{fontSize:11,fontWeight:700,color:C.textDim,marginBottom:6,textTransform:"uppercase"}}>По дням</div>
+          {/* По категориям */}
+          <div style={{fontSize:13,fontWeight:700,color:C.textSub,marginBottom:8}}>ПО КАТЕГОРИЯМ</div>
+          <StatsBreakdown data={monthData.recList} totalAmt={monthData.amount} totalQty={monthData.qty}/>
+
+          {/* По дням — кликабельные, разворачиваются в записи */}
+          <div style={{fontSize:13,fontWeight:700,color:C.textSub,marginBottom:8,marginTop:16}}>ПО ДНЯМ — нажмите для записей</div>
           {Object.entries(byDay).sort((a,b)=>b[0].localeCompare(a[0])).map(([dk,d])=>{
             const parts = dk.split("-");
-            const label = `${parts[2]}.${parts[1]}.${parts[0]}`;
+            const label = `${parts[2]}.${parts[1]}`;
             return (
               <DayRow key={dk} dateLabel={label} dayData={d} workshop={workshop}
                 onEditRecord={onEditRecord} allRecords={allRecords}/>
@@ -574,16 +573,24 @@ function DayRow({ dateLabel, dayData, workshop, onEditRecord, allRecords }){
   );
 }
 
-// ── Топ-15 популярных маркировок за год (для текущей мастерской) ──
-function TopMarkersBlock({ records, workshop, wsStock, stockCfg, onPick, selected }){
+// ── Топ-15 популярных маркировок за год (для текущей мастерской и категории) ──
+// Категории, для которых НЕ показываем топ (мало наименований):
+const NO_TOP_CATEGORIES = ["Домофонные", "Крестовые", "Прочие услуги"];
+
+function TopMarkersBlock({ records, workshop, wsStock, stockCfg, onPick, selected, category }){
+  // Не показываем топ для некоторых категорий
+  if(NO_TOP_CATEGORIES.includes(category)){
+    return null;
+  }
   const [expanded, setExpanded] = useState(true);
   const now = new Date();
-  const yearAgo = new Date(now.getFullYear() - (now.getMonth() < 11 ? 0 : 1), now.getMonth(), now.getDate()).getTime();
-  // Считаем количество проданных ключей (qty) за последний год, только sale
+  const yearAgo = now.getTime() - 365 * 24 * 60 * 60 * 1000;
+  // Считаем количество проданных ключей (qty) за последний год, только sale, только текущая категория
   const counts = {};
   records.forEach(r=>{
     if(r.workshop !== workshop) return;
     if(r.recordType === "refund") return;
+    if(r.category !== category) return;
     if(r.timestamp < yearAgo) return;
     counts[r.marker] = (counts[r.marker] || 0) + (r.qty || 0);
   });
@@ -596,12 +603,11 @@ function TopMarkersBlock({ records, workshop, wsStock, stockCfg, onPick, selecte
     return (
       <div style={{...s.card,marginBottom:12,padding:"10px 14px",borderColor:C.accent+"33"}}>
         <div style={{fontSize:11,color:C.textDim,lineHeight:1.5}}>
-          ⭐ Топ-15 появится после первых продаж (статистика за год)
+          ⭐ Топ-15 по категории «{category}» появится после первых продаж
         </div>
       </div>
     );
   }
-  const maxCount = top[0][1];
 
   return (
     <div style={{...s.card,marginBottom:12,padding:0,overflow:"hidden",borderColor:C.accent+"44"}}>
@@ -610,7 +616,7 @@ function TopMarkersBlock({ records, workshop, wsStock, stockCfg, onPick, selecte
           background:C.accentDim}}>
         <div style={{display:"flex",alignItems:"center",gap:6}}>
           <span style={{color:C.accent,fontSize:14}}>⭐</span>
-          <span style={{fontWeight:700,fontSize:12,color:C.accent}}>ТОП-{top.length} за год</span>
+          <span style={{fontWeight:700,fontSize:12,color:C.accent}}>ТОП-{top.length} · {category}</span>
         </div>
         <span style={{color:C.textDim,fontSize:11}}>{expanded?"▲":"▼"}</span>
       </div>
@@ -619,16 +625,20 @@ function TopMarkersBlock({ records, workshop, wsStock, stockCfg, onPick, selecte
           {top.map(([m,c],i)=>{
             const wq = wsStock[m]||0;
             const cfg = stockCfg[m]||{};
-            const low = cfg.threshold > 0 && wq <= cfg.threshold;
+            const low = cfg.threshold > 0 && wq <= cfg.threshold && wq > 0;
             const empty = wq === 0;
             const isSelected = selected === m;
+            // Цвета: красный только если реально 0 (не для услуг), жёлтый если ниже порога, иначе нейтрально
+            const bgColor = isSelected ? C.accent : (empty ? C.dangerDim : low ? C.warnDim : C.bgInput);
+            const borderColor = isSelected ? C.accent : (empty ? C.danger+"88" : low ? C.warn+"88" : C.border);
+            const textColor = isSelected ? "#fff" : (empty ? C.danger : low ? C.warn : C.text);
             return (
-              <button key={m} onClick={()=>onPick(m)} title={`${c} ключей за год`}
+              <button key={m} onClick={()=>onPick(m)} title={`${c} ключей за год · остаток ${wq} шт`}
                 style={{
                   fontSize:12, padding:"5px 10px", borderRadius:7, cursor:"pointer",
-                  background: isSelected ? C.accent : (empty ? C.dangerDim : low ? C.warnDim : C.bgInput),
-                  border: `1px solid ${isSelected ? C.accent : (empty ? C.danger+"88" : low ? C.warn+"88" : C.border)}`,
-                  color: isSelected ? "#fff" : (empty ? C.danger : low ? C.warn : C.text),
+                  background: bgColor,
+                  border: `1px solid ${borderColor}`,
+                  color: textColor,
                   display:"flex", alignItems:"center", gap:4,
                 }}>
                 <span style={{fontSize:10,opacity:.7}}>{i+1}.</span>
@@ -1350,7 +1360,15 @@ export default function App(){
               <label style={s.label}>Тип записи</label>
               <div style={{display:"flex",gap:6}}>
                 {[["sale","↑ Продажа"],["refund","↩ Возврат от клиента"]].map(([id,label])=>(
-                  <button key={id} type="button" onClick={()=>setRecordType(id)} style={{
+                  <button key={id} type="button" onClick={()=>{
+                    setRecordType(id);
+                    // При переключении на возврат — уходим с "Прочие услуги" (возвратов по ним не бывает)
+                    if(id === "refund" && category === "Прочие услуги"){
+                      const firstNonService = sortedCategories(safeMarkers).find(c => c !== "Прочие услуги");
+                      if(firstNonService) setCategory(firstNonService);
+                      setMarker("");
+                    }
+                  }} style={{
                     flex:1,padding:"8px 0",fontSize:12,fontWeight:600,borderRadius:8,cursor:"pointer",
                     border:`1px solid ${recordType===id?(id==="refund"?C.refund:C.accent):C.border}`,
                     background:recordType===id?(id==="refund"?C.refundDim:C.accentDim):C.bgInput,
@@ -1367,12 +1385,15 @@ export default function App(){
 
             {/* Топ-15 популярных маркировок за год — только для продажи */}
             {recordType==="sale" && <TopMarkersBlock records={records} workshop={workshop}
-              wsStock={wsStock} stockCfg={safeStockCfg} onPick={setMarker} selected={marker}/>}
+              wsStock={wsStock} stockCfg={safeStockCfg} onPick={setMarker} selected={marker}
+              category={category}/>}
 
             <div style={{marginBottom:12}}>
               <label style={s.label}>Категория</label>
               <select value={category} onChange={e=>{setCategory(e.target.value);setMarker("");}} style={s.input}>
-                {sortedCategories(safeMarkers).map(c=><option key={c}>{c}</option>)}
+                {sortedCategories(safeMarkers)
+                  .filter(c => recordType !== "refund" || c !== "Прочие услуги")
+                  .map(c=><option key={c}>{c}</option>)}
               </select>
             </div>
             <div style={{marginBottom:12}}>
@@ -1513,18 +1534,15 @@ export default function App(){
                 }}>{label}</button>
               ))}
             </div>
-            <div style={{marginBottom:14,position:"relative"}}>
-              <label style={{...s.input,position:"relative",display:"flex",alignItems:"center",cursor:"pointer",paddingRight:40}}>
-                <input type="date" value={statsDate} onChange={e=>setStatsDate(e.target.value)}
-                  style={{
-                    position:"absolute",inset:0,opacity:0,cursor:"pointer",
-                    width:"100%",height:"100%",border:"none",background:"transparent"
-                  }}/>
-                <span style={{color:statsDate?C.text:C.textDim}}>
-                  {statsDate ? new Date(statsDate+"T00:00:00").toLocaleDateString("ru-RU",{day:"numeric",month:"long",year:"numeric"}) : "Выберите дату"}
-                </span>
-                <span style={{position:"absolute",right:12,color:C.textSub,fontSize:16,pointerEvents:"none"}}>📅</span>
-              </label>
+            <div style={{marginBottom:14}}>
+              <input type="date" value={statsDate} onChange={e=>setStatsDate(e.target.value)}
+                style={{
+                  ...s.input,
+                  cursor:"pointer",
+                  colorScheme:"dark",
+                  color: statsDate ? C.text : C.textDim,
+                  fontWeight:500,
+                }}/>
             </div>
             {renderStats()}
           </div>
