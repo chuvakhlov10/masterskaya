@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, Component } from "react";
-import { dbGet, dbSet } from "./supabase.js";
+import { dbGet, dbSet, hasToken, setToken, clearToken, verifyToken, photoGet, photoSet, photoDelete } from "./github-storage.js";
 
 const DEFAULT_MARKERS = {
   "Автомобильные": ["Замена корпуса","HD39RP","Нарезка лезвия","LD-1P","MIT8AP","MIT8RP (п.ч.)","XT27A"],
@@ -763,6 +763,12 @@ function PasswordModal({ workshop, onChange, onClose }){
 //  ГЛАВНЫЙ КОМПОНЕНТ
 // ──────────────────────────────────────────────────────────────
 export default function App(){
+  // ── GitHub токен ──
+  const [tokenOk, setTokenOk] = useState(hasToken());
+  const [tokenInput, setTokenInput] = useState("");
+  const [tokenError, setTokenError] = useState("");
+  const [tokenChecking, setTokenChecking] = useState(false);
+
   // ── авторизация ──
   const [authed, setAuthed] = useState(false);
   const [passwordInput, setPasswordInput] = useState("");
@@ -881,7 +887,7 @@ export default function App(){
     if(!marker){setMarkerPhoto(null);return;}
     const cached=photoCache[marker];
     if(cached!==undefined){setMarkerPhoto(cached);return;}
-    sGet(`photo:${marker}`).then(v=>{ setPhotoCache(p=>({...p,[marker]:v})); setMarkerPhoto(v); });
+    photoGet(marker).then(v=>{ setPhotoCache(p=>({...p,[marker]:v})); setMarkerPhoto(v); });
   },[marker]);
 
   // ── авторизация ──
@@ -904,6 +910,33 @@ export default function App(){
     setAuthError("Неверный пароль");
   }
   function handleLogout(){
+    setAuthed(false);
+    setWorkshop(null);
+    try{
+      localStorage.removeItem(LOCAL_WS_KEY);
+      localStorage.removeItem(LOCAL_AUTH_KEY);
+    }catch{}
+  }
+
+  // ── GitHub токен: вход / выход ──
+  async function handleTokenSubmit(){
+    setTokenError("");
+    setTokenChecking(true);
+    const result = await verifyToken(tokenInput.trim());
+    setTokenChecking(false);
+    if(result.ok){
+      setToken(tokenInput.trim());
+      setTokenOk(true);
+      setTokenInput("");
+      // Перезагружаем чтобы инициализация прошла с токеном
+      window.location.reload();
+    } else {
+      setTokenError(result.error || "Неверный токен");
+    }
+  }
+  function handleTokenLogout(){
+    clearToken();
+    setTokenOk(false);
     setAuthed(false);
     setWorkshop(null);
     try{
@@ -1096,11 +1129,11 @@ export default function App(){
     }
 
     // 7. photo (фото заготовки) — асинхронно, не блокируем UI
-    sGet(`photo:${oldName}`).then(async photo => {
+    photoGet(oldName).then(async photo => {
       if(photo){
-        await sSet(`photo:${newName}`, photo);
+        await photoSet(newName, photo);
         // удаляем старое фото
-        try { await supabaseDelete(`photo:${oldName}`); } catch {}
+        try { await photoDelete(oldName); } catch {}
         // обновляем кэш
         setPhotoCache(p=>{
           const next = {...p};
@@ -1112,16 +1145,6 @@ export default function App(){
     });
 
     return {ok:true, text:`«${oldName}» → «${newName}»`};
-  }
-
-  // Хелпер для удаления ключа из Supabase (для фото)
-  async function supabaseDelete(key){
-    try {
-      const { supabase } = await import("./supabase.js");
-      await supabase.from("kv_store").delete().eq("key", key);
-    } catch(e) {
-      console.warn(`[supabaseDelete] "${key}" failed:`, e);
-    }
   }
 
   function renderStockCategory(cat, stockObj, isWS){
@@ -1285,6 +1308,41 @@ export default function App(){
   }
 
   // ── экраны ──
+  // Экран ввода GitHub токена (если токена нет)
+  if(!tokenOk) return (
+    <div style={{...s.app,display:"flex",alignItems:"center",justifyContent:"center",minHeight:"100vh"}}>
+      <div style={{width:"100%",maxWidth:380,padding:24}}>
+        <div style={{textAlign:"center",marginBottom:24}}>
+          <div style={{fontSize:32,marginBottom:8}}>🔑</div>
+          <div style={{fontSize:22,fontWeight:700}}>Мастерская</div>
+          <div style={{fontSize:13,color:C.textSub,marginTop:4}}>Подключение к хранилищу</div>
+        </div>
+        <div style={{...s.card,marginBottom:16,background:C.bgInput,padding:"10px 12px"}}>
+          <div style={{fontSize:11,color:C.textSub,lineHeight:1.5}}>
+            📦 Данные хранятся в GitHub (приватный репозиторий).<br/>
+            Введите Personal Access Token от вашего GitHub.
+          </div>
+        </div>
+        <label style={s.label}>GitHub Personal Access Token</label>
+        <input type="password" value={tokenInput}
+          onChange={e=>setTokenInput(e.target.value)}
+          onKeyDown={e=>{if(e.key==="Enter"&&!tokenChecking)handleTokenSubmit();}}
+          placeholder="ghp_xxxxxxxxxxxx"
+          style={{...s.input,marginBottom:10,fontSize:13}}/>
+        {tokenError&&<div style={{fontSize:12,color:C.danger,marginBottom:10}}>{tokenError}</div>}
+        <button onClick={handleTokenSubmit} disabled={tokenChecking}
+          style={{...s.btn("accent"),width:"100%",padding:"12px 0",fontSize:15,fontWeight:700,opacity:tokenChecking?.6:1}}>
+          {tokenChecking ? "Проверка..." : "Подключиться"}
+        </button>
+        <div style={{fontSize:11,color:C.textDim,marginTop:12,lineHeight:1.5}}>
+          Токен создаётся в:<br/>
+          GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic) → Generate new token (classic)<br/>
+          Нужны права: <b>repo</b> (полный доступ к репозиториям).
+        </div>
+      </div>
+    </div>
+  );
+
   if(loading || !pwdLoaded) return (
     <div style={{...s.app,display:"flex",alignItems:"center",justifyContent:"center",minHeight:"100vh"}}>
       <div style={{textAlign:"center"}}><div style={{fontSize:32,marginBottom:12}}>🔑</div><div style={{fontSize:14,color:C.textSub}}>Загрузка...</div></div>
@@ -1347,7 +1405,8 @@ export default function App(){
           </div>
           <div style={{display:"flex",gap:6}}>
             <button onClick={()=>setPwdModalOpen(true)} style={{...s.btn(),padding:"5px 10px",fontSize:12}}>🔑 Пароль</button>
-            <button onClick={handleLogout} style={{...s.btn(),padding:"5px 10px",fontSize:12}}>Выйти</button>
+            <button onClick={handleLogout} style={{...s.btn(),padding:"5px 10px",fontSize:12}}>Сменить мастерскую</button>
+            <button onClick={handleTokenLogout} style={{...s.btn("danger"),padding:"5px 10px",fontSize:12}}>Отключить хранилище</button>
           </div>
         </div>
         <Tabs tabs={tabs} active={tab} onChange={setTab}/>
@@ -1431,7 +1490,7 @@ export default function App(){
                 const reader=new FileReader();
                 reader.onload=async()=>{
                   const url=reader.result;
-                  await sSet(`photo:${marker.trim()}`,url);
+                  await photoSet(marker.trim(),url);
                   setPhotoCache(p=>({...p,[marker.trim()]:url})); setMarkerPhoto(url);
                   setSubmitMsg({ok:true,text:"Фото сохранено"}); setTimeout(()=>setSubmitMsg(null),2000);
                 };
