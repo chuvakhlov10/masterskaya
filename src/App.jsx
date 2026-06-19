@@ -937,6 +937,7 @@ export default function App(){
   const [expandedCats, setExpandedCats] = useState({});
   const [stockSort, setStockSort] = useState("alpha"); // alpha | qty-desc | qty-asc | empty-first
   const [stockFilter, setStockFilter] = useState("all"); // all | with-stock | empty | low
+  const [catFilter, setCatFilter] = useState({}); // {категория: "all" | "with-stock" | "empty"}
   const [moveMarker, setMoveMarker] = useState("");
   const [moveTo, setMoveTo] = useState("SMART");
   const [moveQty, setMoveQty] = useState(1);
@@ -1540,14 +1541,15 @@ export default function App(){
     const search = stockSearch.toLowerCase();
     // Поиск
     let filtered = search ? ms.filter(m=>matchesSearch(m, stockSearch)) : ms.slice();
-    // Фильтр
+    // Фильтр: локальный (по категории) приоритетнее глобального
+    const effectiveFilter = catFilter[cat] || stockFilter;
     filtered = filtered.filter(m=>{
       const q = stockObj[m]||0;
       const cfg = stockCfg[m]||{};
       const isLow = cfg.threshold > 0 && q <= cfg.threshold;
-      if(stockFilter === "with-stock") return q > 0;
-      if(stockFilter === "empty") return q === 0;
-      if(stockFilter === "low") return isLow;
+      if(effectiveFilter === "with-stock") return q > 0;
+      if(effectiveFilter === "empty") return q === 0;
+      if(effectiveFilter === "low") return isLow;
       return true; // all
     });
     if(filtered.length===0) return null;
@@ -1574,6 +1576,24 @@ export default function App(){
     const withStockCount = filteredMs.length - emptyCount;
     const hasLow = filteredMs.some(m=>{ const q=stockObj[m]||0,t=(stockCfg[m]||{}).threshold||0; return t>0&&q<=t; });
     const expanded = expandedCats[cat]!==false;
+    const activeCatFilter = catFilter[cat] || "all";
+
+    // Мини-кнопка фильтра для категории
+    const catFilterBtn = (id, label, color) => {
+      const isActive = activeCatFilter === id;
+      return (
+        <button type="button" onClick={(e)=>{
+          e.stopPropagation();
+          setCatFilter(p => ({...p, [cat]: id}));
+        }} style={{
+          padding:"2px 7px",fontSize:10,fontWeight:600,borderRadius:5,cursor:"pointer",
+          border:`1px solid ${isActive?(color||C.accent):C.border+"88"}`,
+          background:isActive?((color||C.accent)+"22"):"transparent",
+          color:isActive?(color||C.accent):C.textSub,
+        }}>{label}</button>
+      );
+    };
+
     return (
       <div key={cat} style={{...s.card,padding:0,overflow:"hidden",marginBottom:8}}>
         <div onClick={()=>setExpandedCats(p=>({...p,[cat]:!expanded}))}
@@ -1592,8 +1612,23 @@ export default function App(){
             <span style={{color:C.textDim,fontSize:12}}>{expanded?"▲":"▼"}</span>
           </div>
         </div>
+        {expanded && (
+          <div style={{borderTop:`1px solid ${C.border}`,padding:"6px 14px",display:"flex",gap:5,flexWrap:"wrap",alignItems:"center",background:"#13161f",borderBottom:`1px solid ${C.border}`}}>
+            <span style={{fontSize:10,color:C.textDim,marginRight:4}}>Фильтр:</span>
+            {catFilterBtn("all","Все",C.accent)}
+            {catFilterBtn("with-stock","С остатком",C.success)}
+            {catFilterBtn("empty","Пустые",C.danger)}
+            {hasLow && catFilterBtn("low","⚠ Мало",C.warn)}
+            {activeCatFilter !== "all" && (
+              <button type="button" onClick={(e)=>{e.stopPropagation();setCatFilter(p=>{const n={...p};delete n[cat];return n;});}} style={{
+                padding:"2px 7px",fontSize:10,borderRadius:5,cursor:"pointer",
+                border:`1px solid ${C.border}`,background:"transparent",color:C.textSub,
+              }}>✕ Сбросить</button>
+            )}
+          </div>
+        )}
         {expanded&&(
-          <div style={{borderTop:`1px solid ${C.border}`}}>
+          <div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 150px 36px",gap:6,
               padding:"6px 14px",fontSize:11,color:C.textDim,borderBottom:`1px solid ${C.border}`,background:"#13161f"}}>
               <span>Маркировка</span><span style={{textAlign:"center"}}>Кол-во</span><span></span>
@@ -1877,7 +1912,7 @@ export default function App(){
     {id:"record",label:"📝 Запись"},
     {id:"stats",label:"📊 Статистика"},
     {id:"stock",label:"📦 Склад"},
-    {id:"prices",label:"💰 Цены"}
+    {id:"prices",label:"🏷️ Маркировки"}
   ];
 
   return (
@@ -1957,7 +1992,7 @@ export default function App(){
 
             <div style={{marginBottom:12}}>
               <label style={s.label}>Категория</label>
-              <select value={category} onChange={e=>{setCategory(e.target.value);setMarker("");setShowAllMarkers(false);}} style={s.input}>
+              <select value={category} onChange={e=>{setCategory(e.target.value);setMarker("");setShowAllMarkers(false);setMarkerSearch("");}} style={s.input}>
                 {sortedCategories(safeMarkers)
                   .filter(c => recordType !== "refund" || c !== "Прочие услуги")
                   .map(c=><option key={c}>{c}</option>)}
@@ -1975,6 +2010,14 @@ export default function App(){
                 {(() => {
                   const isService = category === "Прочие услуги";
                   const allMarkers = safeMarkers[category] || [];
+
+                  // Для услуг — показываем все сразу (без топа)
+                  if(isService){
+                    const search = markerSearch.toLowerCase();
+                    const list = search ? allMarkers.filter(m => matchesSearch(m, markerSearch)) : allMarkers;
+                    if(list.length === 0) return <div style={{padding:"8px",color:C.textDim,fontSize:12}}>Ничего не найдено</div>;
+                    return list.map(m => renderMarkerButton(m, isService));
+                  }
 
                   // Если показываем все — применяем поиск
                   if(showAllMarkers){
@@ -2008,16 +2051,23 @@ export default function App(){
                 })()}
               </div>
 
-              {/* Кнопка переключения "Показать все" / "Только топ" */}
-              <button type="button" onClick={()=>setShowAllMarkers(v=>!v)} style={{
-                ...s.btn(),
-                padding:"5px 10px",
-                fontSize:11,
-                width:"100%",
-                marginBottom:8,
-              }}>
-                {showAllMarkers ? "⭐ Показать только топ-20" : `📋 Показать все маркировки (${(safeMarkers[category]||[]).length})`}
-              </button>
+              {/* Кнопка переключения "Показать все" / "Только топ" — скрываем для услуг */}
+              {category !== "Прочие услуги" && (
+                <button type="button" onClick={()=>setShowAllMarkers(v=>!v)} style={{
+                  ...s.btn(),
+                  padding:"5px 10px",
+                  fontSize:11,
+                  width:"100%",
+                  marginBottom:8,
+                }}>
+                  {showAllMarkers ? "⭐ Показать только топ-20" : `📋 Показать все маркировки (${(safeMarkers[category]||[]).length})`}
+                </button>
+              )}
+
+              {/* Для услуг — поле поиска (раз уж мы не показываем кнопку "Показать все") */}
+              {category === "Прочие услуги" && (
+                <input value={markerSearch} onChange={e=>setMarkerSearch(e.target.value)} placeholder="🔍 Поиск услуги..." style={{...s.input,marginBottom:8}}/>
+              )}
 
               <input value={marker} onChange={e=>setMarker(e.target.value)} placeholder="Или введите свою маркировку" style={s.input}/>
             </div>
@@ -2219,7 +2269,7 @@ export default function App(){
           </div>
         )}
 
-        {/* ══ ЦЕНЫ ══ */}
+        {/* ══ МАРКИРОВКИ (Цены + Алиасы + Комментарии) ══ */}
         {tab==="prices"&&(
           <div>
             <div style={{...s.card,marginBottom:16,borderColor:C.accent+"44"}}>
