@@ -610,6 +610,69 @@ function DayRow({ dateLabel, dayData, workshop, onEditRecord, allRecords }){
   );
 }
 
+// ── Модалка комментария к маркировке ──
+function NoteModal({ markerName, currentNote, onSave, onClose }){
+  const [text, setText] = useState(currentNote || "");
+  const [msg, setMsg] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  async function submit(){
+    setLoading(true); setMsg(null);
+    const r = await onSave(markerName, text);
+    setLoading(false);
+    setMsg({ok: r.ok, text: r.text});
+    if(r.ok) setTimeout(()=>onClose(), 1000);
+  }
+
+  async function remove(){
+    if(!currentNote) return;
+    if(!confirm("Удалить комментарий?")) return;
+    setText("");
+    setLoading(true); setMsg(null);
+    const r = await onSave(markerName, "");
+    setLoading(false);
+    setMsg({ok: r.ok, text: r.text});
+    if(r.ok) setTimeout(()=>onClose(), 1000);
+  }
+
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.75)",zIndex:100,display:"flex",alignItems:"flex-end",justifyContent:"center"}}
+      onClick={e=>{if(e.target===e.currentTarget)onClose();}}>
+      <div style={{background:C.bgCard,borderRadius:"16px 16px 0 0",border:`1px solid ${C.border}`,padding:20,
+        width:"100%",maxWidth:600,maxHeight:"90vh",overflowY:"auto"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+          <div>
+            <div style={{fontWeight:700,fontSize:16}}>💬 Комментарий</div>
+            <div style={{fontSize:11,color:C.textSub,marginTop:2}}>{markerName}</div>
+          </div>
+          <button onClick={onClose} style={{...s.btn(),padding:"4px 10px",fontSize:12}}>✕</button>
+        </div>
+        <label style={s.label}>Текст комментария</label>
+        <textarea value={text} onChange={e=>setText(e.target.value)}
+          rows={4} autoFocus
+          placeholder="Например: использовать только для BMW 2015+, нет на базах, замена для..."
+          style={{...s.input,resize:"vertical",marginBottom:12,fontSize:14}}/>
+        {msg && <div style={{fontSize:12,marginBottom:10,color:msg.ok?C.success:C.danger}}>{msg.text}</div>}
+        <div style={{display:"flex",gap:8}}>
+          <button onClick={submit} disabled={loading}
+            style={{...s.btn("accent"),flex:1,padding:"10px 0",opacity:loading?.6:1}}>
+            {loading ? "Сохранение..." : "Сохранить"}
+          </button>
+          {currentNote && (
+            <button onClick={remove} disabled={loading}
+              style={{...s.btn("danger"),padding:"10px 14px",opacity:loading?.6:1}}>
+              Удалить
+            </button>
+          )}
+        </div>
+        <div style={{fontSize:11,color:C.textDim,marginTop:10,lineHeight:1.5}}>
+          💡 Комментарий виден в ценах, на складе и в форме записи (как подсказка).
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Модалка управления алиасами ──
 function AliasesModal({ cat, markerName, aliases, onAdd, onRemove, onPromote, onClose }){
   const [newAlias, setNewAlias] = useState("");
@@ -850,6 +913,7 @@ export default function App(){
   const [stockCfg, setStockCfg] = useState({});
   const [markers, setMarkers] = useState(DEFAULT_MARKERS);
   const [aliases, setAliases] = useState({});  // {основное_имя: [альтернативные]}
+  const [notes, setNotes] = useState({});      // {маркировка: "комментарий"}
 
   // форма записи
   const [category, setCategory] = useState("Домофонные");
@@ -931,6 +995,8 @@ export default function App(){
   const [renameModal, setRenameModal] = useState(null); // {cat, oldName}
   // алиасы — модалка
   const [aliasesModal, setAliasesModal] = useState(null); // {cat, markerName}
+  // комментарий — модалка
+  const [noteModal, setNoteModal] = useState(null); // {markerName}
 
   // ── загрузка при старте ──
   useEffect(()=>{
@@ -948,10 +1014,10 @@ export default function App(){
       setPwdLoaded(true);
 
       // Загружаем остальные данные
-      const [r,p,sm,sS,sCfg,sm2,al] = await Promise.all([
+      const [r,p,sm,sS,sCfg,sm2,al,nt] = await Promise.all([
         sGet("records"), sGet("prices"),
         sGet("stock:main"), Promise.all(WORKSHOPS.map(w=>sGet(`stock:ws:${w}`))),
-        sGet("stock:cfg"), sGet("custom:markers"), sGet("marker-aliases"),
+        sGet("stock:cfg"), sGet("custom:markers"), sGet("marker-aliases"), sGet("marker-notes"),
       ]);
       // Защита: гарантируем, что у нас правильные типы (массив/объект),
       // иначе рендер упадёт с белым экраном
@@ -967,6 +1033,7 @@ export default function App(){
       if(sCfg && typeof sCfg === "object" && !Array.isArray(sCfg)) setStockCfg(sCfg);
       if(sm2 && typeof sm2 === "object" && !Array.isArray(sm2)) setMarkers(sm2);
       if(al && typeof al === "object" && !Array.isArray(al)) setAliases(al);
+      if(nt && typeof nt === "object" && !Array.isArray(nt)) setNotes(nt);
 
       // Проверяем сохранённую авторизацию
       try{
@@ -1272,6 +1339,15 @@ export default function App(){
       await sSet("stock:cfg", nextCfg);
     }
 
+    // 6a. Обновить notes (комментарии)
+    if(notes[oldMain] !== undefined){
+      const nextNotes = {...notes};
+      nextNotes[newMain] = nextNotes[oldMain];
+      delete nextNotes[oldMain];
+      setNotes(nextNotes);
+      await sSet("marker-notes", nextNotes);
+    }
+
     // 7. Фото — асинхронно
     photoGet(oldMain).then(async photo => {
       if(photo){
@@ -1350,6 +1426,15 @@ export default function App(){
       delete nextCfg[oldName];
       setStockCfg(nextCfg);
       await sSet("stock:cfg", nextCfg);
+    }
+
+    // 6a. notes (комментарии)
+    if(notes[oldName] !== undefined){
+      const nextNotes = {...notes};
+      nextNotes[newName] = nextNotes[oldName];
+      delete nextNotes[oldName];
+      setNotes(nextNotes);
+      await sSet("marker-notes", nextNotes);
     }
 
     // 7. photo (фото заготовки) — асинхронно, не блокируем UI
@@ -1509,15 +1594,16 @@ export default function App(){
         </div>
         {expanded&&(
           <div style={{borderTop:`1px solid ${C.border}`}}>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 150px",gap:6,
+            <div style={{display:"grid",gridTemplateColumns:"1fr 150px 36px",gap:6,
               padding:"6px 14px",fontSize:11,color:C.textDim,borderBottom:`1px solid ${C.border}`,background:"#13161f"}}>
-              <span>Маркировка</span><span style={{textAlign:"center"}}>Кол-во</span>
+              <span>Маркировка</span><span style={{textAlign:"center"}}>Кол-во</span><span></span>
             </div>
             {filteredMs.map(m=>{
               const q=stockObj[m]||0,cfg=stockCfg[m]||{};
               const mAliases = getAliases(m);
+              const mNote = getNote(m);
               return (
-                <div key={m} style={{display:"grid",gridTemplateColumns:"1fr 150px",gap:6,
+                <div key={m} style={{display:"grid",gridTemplateColumns:"1fr 150px 36px",gap:6,
                   padding:"7px 14px",borderBottom:`1px solid ${C.border}22`,alignItems:"center",
                   background:q===0?"#16111a":q>0&&cfg.threshold>0&&q<=cfg.threshold?"#1f1a0e":"transparent"}}>
                   <div>
@@ -1525,6 +1611,11 @@ export default function App(){
                     {mAliases.length > 0 && (
                       <div style={{fontSize:10,color:C.textDim,marginTop:2,lineHeight:1.3}}>
                         = {mAliases.join(", ")}
+                      </div>
+                    )}
+                    {mNote && (
+                      <div style={{fontSize:10,color:C.warn,marginTop:2,lineHeight:1.3,fontStyle:"italic"}}>
+                        💬 {mNote}
                       </div>
                     )}
                   </div>
@@ -1540,6 +1631,14 @@ export default function App(){
                   }} inputStyle={{
                     color:q===0?C.danger:cfg.threshold>0&&q<=cfg.threshold?C.warn:C.success
                   }}/>
+                  <button onClick={()=>setNoteModal({markerName:m})} title="Комментарий"
+                    style={{
+                      ...s.btn(),
+                      padding:"5px 6px",
+                      fontSize:11,
+                      borderColor: mNote ? C.warn+"66" : C.border,
+                      color: mNote ? C.warn : C.textSub,
+                    }}>💬</button>
                 </div>
               );
             })}
@@ -1733,6 +1832,26 @@ export default function App(){
   const safeStockCfg = ensureObj(stockCfg);
   const safeMarkers = markers && typeof markers === "object" ? markers : DEFAULT_MARKERS;
   const safeAliases = ensureObj(aliases);
+  const safeNotes = ensureObj(notes);
+
+  // Получить комментарий для маркировки
+  function getNote(markerName){
+    return safeNotes[markerName] || "";
+  }
+
+  // Сохранить комментарий
+  async function saveNote(markerName, note){
+    const next = {...safeNotes};
+    const trimmed = (note || "").trim();
+    if(trimmed){
+      next[markerName] = trimmed;
+    } else {
+      delete next[markerName];
+    }
+    setNotes(next);
+    await sSet("marker-notes", next);
+    return {ok:true, text: trimmed ? "Комментарий сохранён" : "Комментарий удалён"};
+  }
 
   // Найти алиасы для маркировки (возвращает массив)
   function getAliases(markerName){
@@ -1773,6 +1892,8 @@ export default function App(){
         aliases={getAliases(aliasesModal.markerName)}
         onAdd={addAlias} onRemove={removeAlias} onPromote={promoteAlias}
         onClose={()=>setAliasesModal(null)}/>}
+      {noteModal&&<NoteModal markerName={noteModal.markerName} currentNote={getNote(noteModal.markerName)}
+        onSave={saveNote} onClose={()=>setNoteModal(null)}/>}
       <div style={{maxWidth:600,margin:"0 auto",padding:"12px 12px 40px"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
           <div style={{display:"flex",alignItems:"center",gap:8}}>
@@ -1924,6 +2045,12 @@ export default function App(){
               <div style={{...s.card,padding:"8px 12px",marginBottom:12,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                 <span style={{fontSize:12,color:C.textSub}}>Остаток в {workshop}</span>
                 <StockBadge qty={wsStock[marker.trim()]||0} threshold={(stockCfg[marker.trim()]||{}).threshold||0}/>
+              </div>
+            )}
+            {marker && getNote(marker.trim()) && (
+              <div style={{...s.card,padding:"8px 12px",marginBottom:12,borderColor:C.warn+"44",background:C.warnDim}}>
+                <div style={{fontSize:11,color:C.warn,marginBottom:2,fontWeight:600}}>💬 Комментарий к «{marker.trim()}»</div>
+                <div style={{fontSize:12,color:C.warn,lineHeight:1.5,fontStyle:"italic"}}>{getNote(marker.trim())}</div>
               </div>
             )}
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
@@ -2133,6 +2260,7 @@ export default function App(){
                     <div style={{borderTop:`1px solid ${C.border}`}}>
                       {filtered.map(m=>{
                         const mAliases = getAliases(m);
+                        const mNote = getNote(m);
                         return (
                         <div key={m} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
                           padding:"8px 14px",borderBottom:`1px solid ${C.border}22`,gap:8,flexWrap:"wrap"}}>
@@ -2141,6 +2269,11 @@ export default function App(){
                             {mAliases.length > 0 && (
                               <div style={{fontSize:10,color:C.textDim,marginTop:2}}>
                                 = {mAliases.join(", ")}
+                              </div>
+                            )}
+                            {mNote && (
+                              <div style={{fontSize:10,color:C.warn,marginTop:2,lineHeight:1.3,fontStyle:"italic"}}>
+                                💬 {mNote}
                               </div>
                             )}
                           </div>
@@ -2157,6 +2290,14 @@ export default function App(){
                               step={10}
                               />
                             <span style={{fontSize:12,color:C.textSub,whiteSpace:"nowrap"}}>р/шт</span>
+                            <button onClick={()=>setNoteModal({markerName:m})} title="Комментарий"
+                              style={{
+                                ...s.btn(),
+                                padding:"5px 8px",
+                                fontSize:11,
+                                borderColor: mNote ? C.warn+"66" : C.border,
+                                color: mNote ? C.warn : C.textSub,
+                              }}>💬</button>
                             <button onClick={()=>setAliasesModal({cat, markerName:m})} title="Алиасы"
                               style={{
                                 ...s.btn(),
