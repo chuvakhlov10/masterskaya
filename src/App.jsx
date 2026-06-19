@@ -844,6 +844,8 @@ export default function App(){
   // склад
   const [stockTab, setStockTab] = useState("ws");
   const [expandedCats, setExpandedCats] = useState({});
+  const [stockSort, setStockSort] = useState("alpha"); // alpha | qty-desc | qty-asc | empty-first
+  const [stockFilter, setStockFilter] = useState("all"); // all | with-stock | empty | low
   const [moveMarker, setMoveMarker] = useState("");
   const [moveTo, setMoveTo] = useState("SMART");
   const [moveQty, setMoveQty] = useState(1);
@@ -1218,26 +1220,106 @@ export default function App(){
     return {ok:true, text:`«${oldName}» → «${newName}»`};
   }
 
+  // ── Панель управления складом: поиск + сортировка + фильтры ──
+  function StockControls({ search, setSearch, sort, setSort, filter, setFilter }){
+    const filterBtn = (id, label, color) => (
+      <button type="button" onClick={()=>setFilter(id)} style={{
+        padding:"5px 10px",fontSize:11,fontWeight:600,borderRadius:6,cursor:"pointer",
+        border:`1px solid ${filter===id?(color||C.accent):C.border}`,
+        background:filter===id?((color||C.accent)+"22"):C.bgInput,
+        color:filter===id?(color||C.accent):C.textSub,
+      }}>{label}</button>
+    );
+    return (
+      <div style={{marginBottom:12}}>
+        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="🔍 Поиск по маркировке..." style={{...s.input,marginBottom:8}}/>
+        <div style={{display:"flex",gap:6,marginBottom:8,flexWrap:"wrap"}}>
+          {filterBtn("all","Все",C.accent)}
+          {filterBtn("with-stock","С остатком",C.success)}
+          {filterBtn("empty","Пустые",C.danger)}
+          {filterBtn("low","⚠ Мало",C.warn)}
+        </div>
+        <div style={{display:"flex",gap:6,alignItems:"center",fontSize:11,color:C.textSub,marginBottom:8}}>
+          <span>Сорт.:</span>
+          <select value={sort} onChange={e=>setSort(e.target.value)} style={{...s.input,padding:"4px 8px",fontSize:11,flex:1}}>
+            <option value="alpha">По алфавиту (А→Я)</option>
+            <option value="qty-desc">По остатку (больше → меньше)</option>
+            <option value="qty-asc">По остатку (меньше → больше)</option>
+            <option value="empty-first">Сначала пустые</option>
+          </select>
+        </div>
+        <div style={{display:"flex",gap:6}}>
+          <button type="button" onClick={()=>setExpandedCats({})} style={{...s.btn(),padding:"4px 10px",fontSize:11}}>
+            ▼ Раскрыть все
+          </button>
+          <button type="button" onClick={()=>{
+            const all = {};
+            sortedCategories(safeMarkers).forEach(c => all[c] = false);
+            setExpandedCats(all);
+          }} style={{...s.btn(),padding:"4px 10px",fontSize:11}}>
+            ▲ Свернуть все
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   function renderStockCategory(cat, stockObj, isWS){
     // «Прочие услуги» — не показываем в складах (это услуги, не заготовки)
     if(cat === "Прочие услуги") return null;
     const ms = markers[cat]||[];
     const search = stockSearch.toLowerCase();
-    const filtered = search ? ms.filter(m=>m.toLowerCase().includes(search)) : ms;
+    // Поиск
+    let filtered = search ? ms.filter(m=>m.toLowerCase().includes(search)) : ms.slice();
+    // Фильтр
+    filtered = filtered.filter(m=>{
+      const q = stockObj[m]||0;
+      const cfg = stockCfg[m]||{};
+      const isLow = cfg.threshold > 0 && q <= cfg.threshold;
+      if(stockFilter === "with-stock") return q > 0;
+      if(stockFilter === "empty") return q === 0;
+      if(stockFilter === "low") return isLow;
+      return true; // all
+    });
     if(filtered.length===0) return null;
-    const total = filtered.reduce((s,m)=>s+(stockObj[m]||0),0);
-    const hasLow = filtered.some(m=>{ const q=stockObj[m]||0,t=(stockCfg[m]||{}).threshold||0; return t>0&&q<=t; });
+    // Сортировка (сохраняем оригинальный индекс для stable sort)
+    filtered = filtered.map((m, idx) => ({ m, idx }));
+    if(stockSort === "alpha"){
+      filtered.sort((a,b) => a.m.localeCompare(b.m, "ru"));
+    } else if(stockSort === "qty-desc"){
+      filtered.sort((a,b) => (stockObj[b.m]||0) - (stockObj[a.m]||0));
+    } else if(stockSort === "qty-asc"){
+      filtered.sort((a,b) => (stockObj[a.m]||0) - (stockObj[b.m]||0));
+    } else if(stockSort === "empty-first"){
+      filtered.sort((a,b) => {
+        const qa = stockObj[a.m]||0, qb = stockObj[b.m]||0;
+        if(qa === 0 && qb !== 0) return -1;
+        if(qa !== 0 && qb === 0) return 1;
+        return a.m.localeCompare(b.m, "ru");
+      });
+    }
+    const filteredMs = filtered.map(x => x.m);
+    // Статистика по категории
+    const total = filteredMs.reduce((s,m)=>s+(stockObj[m]||0),0);
+    const emptyCount = filteredMs.filter(m=>(stockObj[m]||0)===0).length;
+    const withStockCount = filteredMs.length - emptyCount;
+    const hasLow = filteredMs.some(m=>{ const q=stockObj[m]||0,t=(stockCfg[m]||{}).threshold||0; return t>0&&q<=t; });
     const expanded = expandedCats[cat]!==false;
     return (
       <div key={cat} style={{...s.card,padding:0,overflow:"hidden",marginBottom:8}}>
         <div onClick={()=>setExpandedCats(p=>({...p,[cat]:!expanded}))}
           style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 14px",cursor:"pointer",background:expanded?C.bgCard:"#141826"}}>
-          <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
             <span style={{fontWeight:700,fontSize:13}}>{cat}</span>
+            <span style={{fontSize:11,color:C.textDim}}>
+              {filteredMs.length} шт
+              {withStockCount > 0 && <span style={{color:C.success}}> · {withStockCount} с остатком</span>}
+              {emptyCount > 0 && <span style={{color:C.danger}}> · {emptyCount} пустых</span>}
+            </span>
             {hasLow&&<span style={{...s.tag(C.warn),fontSize:10,padding:"1px 6px"}}>⚠ мало</span>}
           </div>
           <div style={{display:"flex",alignItems:"center",gap:10}}>
-            <span style={{fontSize:12,color:C.textSub}}>итого: <b style={{color:C.text}}>{total}</b> шт</span>
+            <span style={{fontSize:12,color:C.textSub}}>итого: <b style={{color:C.text}}>{total}</b></span>
             <span style={{color:C.textDim,fontSize:12}}>{expanded?"▲":"▼"}</span>
           </div>
         </div>
@@ -1247,7 +1329,7 @@ export default function App(){
               padding:"6px 14px",fontSize:11,color:C.textDim,borderBottom:`1px solid ${C.border}`,background:"#13161f"}}>
               <span>Маркировка</span><span style={{textAlign:"center"}}>Кол-во</span>
             </div>
-            {filtered.map(m=>{
+            {filteredMs.map(m=>{
               const q=stockObj[m]||0,cfg=stockCfg[m]||{};
               return (
                 <div key={m} style={{display:"grid",gridTemplateColumns:"1fr 150px",gap:6,
@@ -1713,7 +1795,7 @@ export default function App(){
             {stockTab==="ws"&&(
               <div>
                 <div style={{fontSize:13,color:C.textSub,marginBottom:10}}>Остатки · <b style={{color:wsColor}}>{workshop}</b></div>
-                <input value={stockSearch} onChange={e=>setStockSearch(e.target.value)} placeholder="Поиск по маркировке..." style={{...s.input,marginBottom:12}}/>
+                <StockControls search={stockSearch} setSearch={setStockSearch} sort={stockSort} setSort={setStockSort} filter={stockFilter} setFilter={setStockFilter}/>
                 {sortedCategories(safeMarkers).map(cat=>renderStockCategory(cat,wsStock,true))}
                 <div style={{fontSize:11,color:C.textDim,marginTop:4}}>«Прочие услуги» в складе не отображаются</div>
               </div>
@@ -1721,7 +1803,7 @@ export default function App(){
             {stockTab==="main"&&(
               <div>
                 <div style={{fontSize:13,color:C.textSub,marginBottom:10}}>Общий склад</div>
-                <input value={stockSearch} onChange={e=>setStockSearch(e.target.value)} placeholder="Поиск..." style={{...s.input,marginBottom:12}}/>
+                <StockControls search={stockSearch} setSearch={setStockSearch} sort={stockSort} setSort={setStockSort} filter={stockFilter} setFilter={setStockFilter}/>
                 {sortedCategories(safeMarkers).map(cat=>renderStockCategory(cat,stockMain,false))}
               </div>
             )}
