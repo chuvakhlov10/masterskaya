@@ -610,87 +610,6 @@ function DayRow({ dateLabel, dayData, workshop, onEditRecord, allRecords }){
   );
 }
 
-// ── Топ-15 популярных маркировок за год (для текущей мастерской и категории) ──
-// Категории, для которых НЕ показываем топ (мало наименований):
-const NO_TOP_CATEGORIES = ["Домофонные", "Крестовые", "Прочие услуги"];
-
-function TopMarkersBlock({ records, workshop, wsStock, stockCfg, onPick, selected, category }){
-  // Не показываем топ для некоторых категорий
-  if(NO_TOP_CATEGORIES.includes(category)){
-    return null;
-  }
-  const [expanded, setExpanded] = useState(true);
-  const now = new Date();
-  const yearAgo = now.getTime() - 365 * 24 * 60 * 60 * 1000;
-  // Считаем количество проданных ключей (qty) за последний год, только sale, только текущая категория
-  const counts = {};
-  records.forEach(r=>{
-    if(r.workshop !== workshop) return;
-    if(r.recordType === "refund") return;
-    if(r.category !== category) return;
-    if(r.timestamp < yearAgo) return;
-    counts[r.marker] = (counts[r.marker] || 0) + (r.qty || 0);
-  });
-  const top = Object.entries(counts)
-    .sort((a,b)=>b[1]-a[1])
-    .slice(0, 15)
-    .filter(([m,c])=>c > 0);
-
-  if(top.length === 0){
-    return (
-      <div style={{...s.card,marginBottom:12,padding:"10px 14px",borderColor:C.accent+"33"}}>
-        <div style={{fontSize:11,color:C.textDim,lineHeight:1.5}}>
-          ⭐ Топ-15 по категории «{category}» появится после первых продаж
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div style={{...s.card,marginBottom:12,padding:0,overflow:"hidden",borderColor:C.accent+"44"}}>
-      <div onClick={()=>setExpanded(v=>!v)}
-        style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 12px",cursor:"pointer",
-          background:C.accentDim}}>
-        <div style={{display:"flex",alignItems:"center",gap:6}}>
-          <span style={{color:C.accent,fontSize:14}}>⭐</span>
-          <span style={{fontWeight:700,fontSize:12,color:C.accent}}>ТОП-{top.length} · {category}</span>
-        </div>
-        <span style={{color:C.textDim,fontSize:11}}>{expanded?"▲":"▼"}</span>
-      </div>
-      {expanded && (
-        <div style={{padding:"8px 12px",display:"flex",flexWrap:"wrap",gap:5}}>
-          {top.map(([m,c],i)=>{
-            const wq = wsStock[m]||0;
-            const cfg = stockCfg[m]||{};
-            const low = cfg.threshold > 0 && wq <= cfg.threshold && wq > 0;
-            const empty = wq === 0;
-            const isSelected = selected === m;
-            // Цвета: красный только если реально 0 (не для услуг), жёлтый если ниже порога, иначе нейтрально
-            const bgColor = isSelected ? C.accent : (empty ? C.dangerDim : low ? C.warnDim : C.bgInput);
-            const borderColor = isSelected ? C.accent : (empty ? C.danger+"88" : low ? C.warn+"88" : C.border);
-            const textColor = isSelected ? "#fff" : (empty ? C.danger : low ? C.warn : C.text);
-            return (
-              <button key={m} onClick={()=>onPick(m)} title={`${c} ключей за год · остаток ${wq} шт`}
-                style={{
-                  fontSize:12, padding:"5px 10px", borderRadius:7, cursor:"pointer",
-                  background: bgColor,
-                  border: `1px solid ${borderColor}`,
-                  color: textColor,
-                  display:"flex", alignItems:"center", gap:4,
-                }}>
-                <span style={{fontSize:10,opacity:.7}}>{i+1}.</span>
-                <span>{m}</span>
-                {wq > 0 && <span style={{fontSize:10,opacity:.7}}>{wq}</span>}
-                <span style={{fontSize:9,opacity:.5}}>({c})</span>
-              </button>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ── Модалка переименования маркировки ──
 function RenameMarkerModal({ cat, oldName, onRename, onClose }){
   const [newName, setNewName] = useState(oldName);
@@ -861,6 +780,10 @@ export default function App(){
 
   // редактирование
   const [editRec, setEditRec] = useState(null);
+
+  // ── форма записи: режим отображения маркировок ──
+  const [showAllMarkers, setShowAllMarkers] = useState(false);
+  const [markerSearch, setMarkerSearch] = useState("");
 
   // ── Дебаунс-система для отложенного сохранения в GitHub ──
   // Решает проблему race condition при быстром вводе цифр
@@ -1264,6 +1187,29 @@ export default function App(){
     );
   }
 
+  // ── Кнопка маркировки в форме записи ──
+  function renderMarkerButton(m, isService, yearCount){
+    const wq = isService ? 0 : (wsStock[m]||0);
+    const cfg = safeStockCfg[m]||{};
+    const low = !isService && cfg.threshold>0 && wq<=cfg.threshold && wq > 0;
+    const empty = !isService && wq===0;
+    const isSelected = marker === m;
+    return (
+      <button key={m} type="button" onClick={()=>setMarker(m)} title={yearCount ? `${yearCount} ключей за год · остаток ${wq} шт` : `остаток ${wq} шт`}
+        style={{
+          fontSize:11, padding:"4px 8px", borderRadius:6, cursor:"pointer",
+          background: isSelected ? C.accent : (empty ? C.dangerDim : low ? C.warnDim : C.bgCard),
+          border: `1px solid ${isSelected ? C.accent : (empty ? C.danger+"88" : low ? C.warn+"88" : C.border)}`,
+          color: isSelected ? "#fff" : (empty ? C.danger : low ? C.warn : C.text),
+          display:"flex", alignItems:"center", gap:4,
+        }}>
+        <span>{m}</span>
+        {!isService && wq > 0 && <span style={{fontSize:9,opacity:.7}}>{wq}</span>}
+        {yearCount && <span style={{fontSize:9,opacity:.5}}>({yearCount})</span>}
+      </button>
+    );
+  }
+
   function renderStockCategory(cat, stockObj, isWS){
     // «Прочие услуги» — не показываем в складах (это услуги, не заготовки)
     if(cat === "Прочие услуги") return null;
@@ -1615,38 +1561,72 @@ export default function App(){
             </div>
 
             {/* Топ-15 популярных маркировок за год — только для продажи */}
-            {recordType==="sale" && <TopMarkersBlock records={records} workshop={workshop}
-              wsStock={wsStock} stockCfg={safeStockCfg} onPick={setMarker} selected={marker}
-              category={category}/>}
+            {/* Убрали TopMarkersBlock — теперь показываем топ-20 прямо в списке маркировок */}
 
             <div style={{marginBottom:12}}>
               <label style={s.label}>Категория</label>
-              <select value={category} onChange={e=>{setCategory(e.target.value);setMarker("");}} style={s.input}>
+              <select value={category} onChange={e=>{setCategory(e.target.value);setMarker("");setShowAllMarkers(false);}} style={s.input}>
                 {sortedCategories(safeMarkers)
                   .filter(c => recordType !== "refund" || c !== "Прочие услуги")
                   .map(c=><option key={c}>{c}</option>)}
               </select>
             </div>
             <div style={{marginBottom:12}}>
-              <label style={s.label}>Маркировка</label>
-              <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:8}}>
-                {(safeMarkers[category]||[]).map(m=>{
+              <label style={s.label}>Маркировка {showAllMarkers ? "(все)" : "(топ-20 за год)"}</label>
+
+              {/* Поле поиска — показываем только в режиме "Показать все" */}
+              {showAllMarkers && (
+                <input value={markerSearch} onChange={e=>setMarkerSearch(e.target.value)} placeholder="🔍 Поиск..." style={{...s.input,marginBottom:8}}/>
+              )}
+
+              <div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:8,maxHeight:showAllMarkers?400:200,overflowY:"auto",padding:4,background:C.bgInput,borderRadius:8,border:`1px solid ${C.border}`}}>
+                {(() => {
                   const isService = category === "Прочие услуги";
-                  const wq = isService ? 0 : (wsStock[m]||0);
-                  const cfg = safeStockCfg[m]||{};
-                  const low = !isService && cfg.threshold>0 && wq<=cfg.threshold;
-                  const empty = !isService && wq===0;
-                  const showStockWarning = !isService;
-                  return (
-                    <button key={m} onClick={()=>setMarker(m)} style={{
-                      fontSize:12,padding:"5px 10px",borderRadius:7,cursor:"pointer",
-                      background:marker===m?C.accentDim:C.bgInput,
-                      border:`1px solid ${marker===m?C.accent:(showStockWarning&&empty)?C.danger+"88":low?C.warn+"88":C.border}`,
-                      color:marker===m?C.accent:(showStockWarning&&empty)?C.danger:low?C.warn:C.text,
-                    }}>{m}{!isService&&wq>0&&<span style={{fontSize:10,opacity:.7,marginLeft:4}}>{wq}</span>}</button>
-                  );
-                })}
+                  const allMarkers = safeMarkers[category] || [];
+
+                  // Если показываем все — применяем поиск
+                  if(showAllMarkers){
+                    const search = markerSearch.toLowerCase();
+                    const list = search ? allMarkers.filter(m => m.toLowerCase().includes(search)) : allMarkers;
+                    if(list.length === 0) return <div style={{padding:"8px",color:C.textDim,fontSize:12}}>Ничего не найдено</div>;
+                    return list.map(m => renderMarkerButton(m, isService));
+                  }
+
+                  // Иначе — топ-20 за год для этой категории
+                  const now = new Date();
+                  const yearAgo = now.getTime() - 365 * 24 * 60 * 60 * 1000;
+                  const counts = {};
+                  records.forEach(r => {
+                    if(r.workshop !== workshop) return;
+                    if(r.recordType === "refund") return;
+                    if(r.category !== category) return;
+                    if(r.timestamp < yearAgo) return;
+                    counts[r.marker] = (counts[r.marker] || 0) + (r.qty || 0);
+                  });
+                  const top = Object.entries(counts)
+                    .sort((a,b) => b[1] - a[1])
+                    .slice(0, 20)
+                    .filter(([m,c]) => c > 0);
+
+                  if(top.length === 0){
+                    return <div style={{padding:"8px",color:C.textDim,fontSize:12}}>⭐ Топ-20 появится после первых продаж. Нажмите «Показать все» ниже.</div>;
+                  }
+
+                  return top.map(([m, c]) => renderMarkerButton(m, isService, c));
+                })()}
               </div>
+
+              {/* Кнопка переключения "Показать все" / "Только топ" */}
+              <button type="button" onClick={()=>setShowAllMarkers(v=>!v)} style={{
+                ...s.btn(),
+                padding:"5px 10px",
+                fontSize:11,
+                width:"100%",
+                marginBottom:8,
+              }}>
+                {showAllMarkers ? "⭐ Показать только топ-20" : `📋 Показать все маркировки (${(safeMarkers[category]||[]).length})`}
+              </button>
+
               <input value={marker} onChange={e=>setMarker(e.target.value)} placeholder="Или введите свою маркировку" style={s.input}/>
             </div>
             {markerPhoto&&(
