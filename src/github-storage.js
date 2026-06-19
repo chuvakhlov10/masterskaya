@@ -44,10 +44,21 @@ async function withWriteQueue(key, fn) {
 }
 
 // ── GitHub API helpers ──
+// Кодируем путь по сегментам: / не трогаем, остальные спецсимволы кодируем
+function encodePath(path){
+  return path.split("/").map(seg => encodeURIComponent(seg)).join("/");
+}
+
+// Имя файла для ключа: заменяем двоеточия на дефисы (':' не работает в путях GitHub)
+function keyToFileName(key){
+  return key.replace(/:/g, "-");
+}
+
 async function ghRequest(method, path, body) {
   const token = getToken();
   if (!token) throw new Error("NO_TOKEN");
-  const url = `https://api.github.com/repos/${OWNER}/${REPO}/contents/${encodeURIComponent(path)}`;
+  // path уже содержит data/ — не кодируем его целиком, а по сегментам
+  const url = `https://api.github.com/repos/${OWNER}/${REPO}/contents/${encodePath(path)}`;
   const res = await fetch(url, {
     method,
     headers: {
@@ -87,7 +98,7 @@ function decodeB64(b64) {
 // ── dbGet: прочитать JSON из файла в репо ──
 export async function dbGet(key) {
   try {
-    const path = `${DATA_PREFIX}${key}.json`;
+    const path = `${DATA_PREFIX}${keyToFileName(key)}.json`;
     const data = await ghRequest("GET", path);
     if (!data) return null;
     // Сохраняем SHA для последующих обновлений
@@ -110,7 +121,7 @@ export async function dbGet(key) {
 export async function dbSet(key, value) {
   return withWriteQueue(key, async () => {
     try {
-      const path = `${DATA_PREFIX}${key}.json`;
+      const path = `${DATA_PREFIX}${keyToFileName(key)}.json`;
       const content = JSON.stringify(value);
       const body = {
         message: `update ${key}`,
@@ -142,7 +153,7 @@ export async function dbSet(key, value) {
         delete shaCache[key];
         console.warn(`[dbSet] conflict on "${key}", retrying...`);
         try {
-          const path = `${DATA_PREFIX}${key}.json`;
+          const path = `${DATA_PREFIX}${keyToFileName(key)}.json`;
           const existing = await ghRequest("GET", path);
           const body = {
             message: `update ${key} (retry)`,
@@ -168,7 +179,7 @@ export async function dbSet(key, value) {
 // ── dbDelete: удалить файл (для фото и т.п.) ──
 export async function dbDelete(key) {
   try {
-    const path = `${DATA_PREFIX}${key}.json`;
+    const path = `${DATA_PREFIX}${keyToFileName(key)}.json`;
     // Сначала получить SHA
     let sha = shaCache[key];
     if (!sha) {
