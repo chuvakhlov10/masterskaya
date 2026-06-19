@@ -610,6 +610,113 @@ function DayRow({ dateLabel, dayData, workshop, onEditRecord, allRecords }){
   );
 }
 
+// ── Модалка управления алиасами ──
+function AliasesModal({ cat, markerName, aliases, onAdd, onRemove, onPromote, onClose }){
+  const [newAlias, setNewAlias] = useState("");
+  const [msg, setMsg] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  async function submitAdd(){
+    setLoading(true); setMsg(null);
+    const r = await onAdd(markerName, newAlias);
+    setLoading(false);
+    if(r.ok){
+      setNewAlias("");
+      setMsg({ok:true, text:r.text});
+      setTimeout(()=>setMsg(null), 2000);
+    } else {
+      setMsg({ok:false, text:r.text});
+    }
+  }
+
+  async function submitRemove(alias){
+    if(!confirm(`Удалить алиас «${alias}»?`)) return;
+    setLoading(true); setMsg(null);
+    const r = await onRemove(markerName, alias);
+    setLoading(false);
+    setMsg({ok: r.ok, text: r.text});
+    if(r.ok) setTimeout(()=>setMsg(null), 2000);
+  }
+
+  async function submitPromote(alias){
+    if(!confirm(`Сделать «${alias}» основным именем? Старое имя «${markerName}» станет алиасом.`)) return;
+    setLoading(true); setMsg(null);
+    const r = await onPromote(cat, markerName, alias);
+    setLoading(false);
+    if(r.ok){
+      setMsg({ok:true, text:r.text});
+      setTimeout(()=>onClose(), 1500);
+    } else {
+      setMsg({ok:false, text:r.text});
+    }
+  }
+
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.75)",zIndex:100,display:"flex",alignItems:"flex-end",justifyContent:"center"}}
+      onClick={e=>{if(e.target===e.currentTarget)onClose();}}>
+      <div style={{background:C.bgCard,borderRadius:"16px 16px 0 0",border:`1px solid ${C.border}`,padding:20,
+        width:"100%",maxWidth:600,maxHeight:"90vh",overflowY:"auto"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+          <div>
+            <div style={{fontWeight:700,fontSize:16}}>Алиасы маркировки</div>
+            <div style={{fontSize:11,color:C.textSub,marginTop:2}}>Категория: {cat}</div>
+          </div>
+          <button onClick={onClose} style={{...s.btn(),padding:"4px 10px",fontSize:12}}>✕</button>
+        </div>
+
+        {/* Основное имя */}
+        <div style={{...s.card,padding:"10px 12px",marginBottom:14,background:C.bgInput,borderColor:C.accent+"66"}}>
+          <div style={{fontSize:11,color:C.textSub}}>Основное имя (выделено в списках)</div>
+          <div style={{fontSize:15,fontWeight:700,color:C.accent}}>{markerName}</div>
+        </div>
+
+        {/* Список алиасов */}
+        <div style={{fontSize:13,fontWeight:700,color:C.textSub,marginBottom:8}}>Альтернативные названия ({aliases.length})</div>
+        {aliases.length === 0 ? (
+          <div style={{...s.card,padding:"10px 14px",color:C.textDim,fontSize:12}}>Алиасов пока нет. Добавьте ниже.</div>
+        ) : (
+          <div style={{marginBottom:14}}>
+            {aliases.map(alias => (
+              <div key={alias} style={{...s.card,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                <span style={{fontSize:13,color:C.text}}>{alias}</span>
+                <div style={{display:"flex",gap:6}}>
+                  <button type="button" onClick={()=>submitPromote(alias)} disabled={loading}
+                    style={{...s.btn(),padding:"4px 8px",fontSize:11,opacity:loading?.6:1}} title="Сделать основным именем">
+                    ⭐ Основное
+                  </button>
+                  <button type="button" onClick={()=>submitRemove(alias)} disabled={loading}
+                    style={{...s.btn("danger"),padding:"4px 8px",fontSize:11,opacity:loading?.6:1}}>
+                    ✕
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Добавить новый алиас */}
+        <label style={s.label}>Добавить алиас</label>
+        <div style={{display:"flex",gap:8,marginBottom:10}}>
+          <input value={newAlias} onChange={e=>setNewAlias(e.target.value)}
+            onKeyDown={e=>{if(e.key==="Enter"&&!loading)submitAdd();}}
+            style={s.input} placeholder="Например: BA7R"/>
+          <button type="button" onClick={submitAdd} disabled={loading}
+            style={{...s.btn("accent"),padding:"8px 14px",opacity:loading?.6:1}}>
+            {loading ? "..." : "Добавить"}
+          </button>
+        </div>
+        {msg && <div style={{fontSize:12,marginBottom:10,color:msg.ok?C.success:C.danger}}>{msg.text}</div>}
+
+        <div style={{fontSize:11,color:C.textDim,lineHeight:1.5,marginTop:10}}>
+          💡 Алиасы — это альтернативные названия одной и той же маркировки.<br/>
+          Поиск по складу и форме записи найдёт маркировку по любому имени.<br/>
+          «⭐ Основное» — поменять основное имя местами с алиасом (старое станет алиасом).
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Модалка переименования маркировки ──
 function RenameMarkerModal({ cat, oldName, onRename, onClose }){
   const [newName, setNewName] = useState(oldName);
@@ -742,6 +849,7 @@ export default function App(){
   const [stockWS, setStockWS] = useState({SMART:{},Бегемот:{}});
   const [stockCfg, setStockCfg] = useState({});
   const [markers, setMarkers] = useState(DEFAULT_MARKERS);
+  const [aliases, setAliases] = useState({});  // {основное_имя: [альтернативные]}
 
   // форма записи
   const [category, setCategory] = useState("Домофонные");
@@ -821,6 +929,8 @@ export default function App(){
 
   // переименование маркировки
   const [renameModal, setRenameModal] = useState(null); // {cat, oldName}
+  // алиасы — модалка
+  const [aliasesModal, setAliasesModal] = useState(null); // {cat, markerName}
 
   // ── загрузка при старте ──
   useEffect(()=>{
@@ -838,10 +948,10 @@ export default function App(){
       setPwdLoaded(true);
 
       // Загружаем остальные данные
-      const [r,p,sm,sS,sCfg,sm2] = await Promise.all([
+      const [r,p,sm,sS,sCfg,sm2,al] = await Promise.all([
         sGet("records"), sGet("prices"),
         sGet("stock:main"), Promise.all(WORKSHOPS.map(w=>sGet(`stock:ws:${w}`))),
-        sGet("stock:cfg"), sGet("custom:markers"),
+        sGet("stock:cfg"), sGet("custom:markers"), sGet("marker-aliases"),
       ]);
       // Защита: гарантируем, что у нас правильные типы (массив/объект),
       // иначе рендер упадёт с белым экраном
@@ -856,6 +966,7 @@ export default function App(){
       setStockWS(wsObj);
       if(sCfg && typeof sCfg === "object" && !Array.isArray(sCfg)) setStockCfg(sCfg);
       if(sm2 && typeof sm2 === "object" && !Array.isArray(sm2)) setMarkers(sm2);
+      if(al && typeof al === "object" && !Array.isArray(al)) setAliases(al);
 
       // Проверяем сохранённую авторизацию
       try{
@@ -1054,7 +1165,124 @@ export default function App(){
     if(!confirm(`Удалить «${m}»?`)) return;
     const next = {...markers, [cat]:markers[cat].filter(x=>x!==m)};
     setMarkers(next); await sSet("custom:markers", next);
+    // Удалить алиасы тоже
+    if(aliases[m]){
+      const nextAliases = {...aliases};
+      delete nextAliases[m];
+      setAliases(nextAliases);
+      await sSet("marker-aliases", nextAliases);
+    }
   }
+
+  // ── Алиасы: добавить / удалить / сделать основным ──
+  async function addAlias(markerName, alias){
+    alias = (alias||"").trim();
+    if(!alias) return {ok:false, text:"Введите алиас"};
+    if(alias === markerName) return {ok:false, text:"Алиас не может совпадать с основным именем"};
+    const existing = aliases[markerName] || [];
+    if(existing.includes(alias)) return {ok:false, text:"Такой алиас уже есть"};
+    // Проверить что алиас не используется как основное имя или алиас другой маркировки
+    for(const [main, alList] of Object.entries(aliases)){
+      if(main !== markerName && alList.includes(alias)){
+        return {ok:false, text:`Алиас «${alias}» уже используется у «${main}»`};
+      }
+    }
+    // Проверить что алиас не является основной маркировкой в какой-то категории
+    for(const cat in markers){
+      if(markers[cat].includes(alias)){
+        return {ok:false, text:`«${alias}» — уже самостоятельная маркировка в категории «${cat}»`};
+      }
+    }
+    const next = {...aliases, [markerName]: [...existing, alias]};
+    setAliases(next);
+    await sSet("marker-aliases", next);
+    return {ok:true, text:`Алиас «${alias}» добавлен`};
+  }
+
+  async function removeAlias(markerName, alias){
+    const existing = aliases[markerName] || [];
+    const next = {...aliases, [markerName]: existing.filter(a => a !== alias)};
+    if(next[markerName].length === 0) delete next[markerName];
+    setAliases(next);
+    await sSet("marker-aliases", next);
+    return {ok:true, text:`Алиас «${alias}» удалён`};
+  }
+
+  // Сделать алиас основным именем (старое основное становится алиасом)
+  async function promoteAlias(cat, oldMain, newMain){
+    if(oldMain === newMain) return {ok:false, text:"Это уже основное имя"};
+    const existing = aliases[oldMain] || [];
+    if(!existing.includes(newMain)) return {ok:false, text:"Это не алиас"};
+
+    // 1. Обновить markers.json — заменить oldMain на newMain в категории
+    const nextMarkers = {...markers, [cat]: markers[cat].map(m => m === oldMain ? newMain : m)};
+    setMarkers(nextMarkers);
+    await sSet("custom:markers", nextMarkers);
+
+    // 2. Обновить aliases: newMain больше не алиас, oldMain становится алиасом
+    const newAliases = existing.filter(a => a !== newMain);
+    newAliases.push(oldMain);
+    const nextAliases = {...aliases};
+    delete nextAliases[oldMain];
+    if(newAliases.length > 0) nextAliases[newMain] = newAliases;
+    setAliases(nextAliases);
+    await sSet("marker-aliases", nextAliases);
+
+    // 3. Обновить records
+    let recChanged = false;
+    const nextRecords = records.map(r => {
+      if(r.marker === oldMain){ recChanged = true; return {...r, marker: newMain}; }
+      return r;
+    });
+    if(recChanged){ setRecords(nextRecords); await sSet("records", nextRecords); }
+
+    // 4. Обновить prices
+    if(prices[oldMain] !== undefined){
+      const nextPrices = {...prices};
+      nextPrices[newMain] = nextPrices[oldMain];
+      delete nextPrices[oldMain];
+      setPrices(nextPrices);
+      await sSet("prices", nextPrices);
+    }
+
+    // 5. Обновить склады
+    if(stockMain[oldMain] !== undefined){
+      const nextStockMain = {...stockMain};
+      nextStockMain[newMain] = nextStockMain[oldMain];
+      delete nextStockMain[oldMain];
+      setStockMain(nextStockMain);
+      await sSet("stock:main", nextStockMain);
+    }
+    for(const ws of WORKSHOPS){
+      if(stockWS[ws] && stockWS[ws][oldMain] !== undefined){
+        const nextWs = {...stockWS[ws]};
+        nextWs[newMain] = nextWs[oldMain];
+        delete nextWs[oldMain];
+        setStockWS(p => ({...p, [ws]: nextWs}));
+        await sSet(`stock:ws:${ws}`, nextWs);
+      }
+    }
+
+    // 6. Обновить stockCfg
+    if(stockCfg[oldMain] !== undefined){
+      const nextCfg = {...stockCfg};
+      nextCfg[newMain] = nextCfg[oldMain];
+      delete nextCfg[oldMain];
+      setStockCfg(nextCfg);
+      await sSet("stock:cfg", nextCfg);
+    }
+
+    // 7. Фото — асинхронно
+    photoGet(oldMain).then(async photo => {
+      if(photo){
+        await photoSet(newMain, photo);
+        try { await photoDelete(oldMain); } catch {}
+      }
+    });
+
+    return {ok:true, text:`«${oldMain}» → «${newMain}» (теперь основное)`};
+  }
+
 
   // ── переименование маркировки (синхронизируется во ВСЕХ местах) ──
   async function renameMarker(cat, oldName, newName){
@@ -1194,16 +1422,26 @@ export default function App(){
     const low = !isService && cfg.threshold>0 && wq<=cfg.threshold && wq > 0;
     const empty = !isService && wq===0;
     const isSelected = marker === m;
+    const mAliases = getAliases(m);
+    const titleParts = [];
+    if(yearCount) titleParts.push(`${yearCount} ключей за год`);
+    if(!isService) titleParts.push(`остаток ${wq} шт`);
+    if(mAliases.length > 0) titleParts.push(`алиасы: ${mAliases.join(", ")}`);
     return (
-      <button key={m} type="button" onClick={()=>setMarker(m)} title={yearCount ? `${yearCount} ключей за год · остаток ${wq} шт` : `остаток ${wq} шт`}
+      <button key={m} type="button" onClick={()=>setMarker(m)} title={titleParts.join(" · ")}
         style={{
           fontSize:11, padding:"4px 8px", borderRadius:6, cursor:"pointer",
           background: isSelected ? C.accent : (empty ? C.dangerDim : low ? C.warnDim : C.bgCard),
           border: `1px solid ${isSelected ? C.accent : (empty ? C.danger+"88" : low ? C.warn+"88" : C.border)}`,
           color: isSelected ? "#fff" : (empty ? C.danger : low ? C.warn : C.text),
-          display:"flex", alignItems:"center", gap:4,
+          display:"flex", alignItems:"center", gap:4, maxWidth:"100%",
         }}>
-        <span>{m}</span>
+        <span style={{fontWeight:600}}>{m}</span>
+        {mAliases.length > 0 && (
+          <span style={{fontSize:9, opacity:0.6, fontStyle:"italic"}}>
+            ={mAliases.length > 1 ? `${mAliases[0]} +${mAliases.length-1}` : mAliases[0]}
+          </span>
+        )}
         {!isService && wq > 0 && <span style={{fontSize:9,opacity:.7}}>{wq}</span>}
         {yearCount && <span style={{fontSize:9,opacity:.5}}>({yearCount})</span>}
       </button>
@@ -1216,7 +1454,7 @@ export default function App(){
     const ms = markers[cat]||[];
     const search = stockSearch.toLowerCase();
     // Поиск
-    let filtered = search ? ms.filter(m=>m.toLowerCase().includes(search)) : ms.slice();
+    let filtered = search ? ms.filter(m=>matchesSearch(m, stockSearch)) : ms.slice();
     // Фильтр
     filtered = filtered.filter(m=>{
       const q = stockObj[m]||0;
@@ -1277,11 +1515,19 @@ export default function App(){
             </div>
             {filteredMs.map(m=>{
               const q=stockObj[m]||0,cfg=stockCfg[m]||{};
+              const mAliases = getAliases(m);
               return (
                 <div key={m} style={{display:"grid",gridTemplateColumns:"1fr 150px",gap:6,
                   padding:"7px 14px",borderBottom:`1px solid ${C.border}22`,alignItems:"center",
                   background:q===0?"#16111a":q>0&&cfg.threshold>0&&q<=cfg.threshold?"#1f1a0e":"transparent"}}>
-                  <span style={{fontSize:13,color:q===0?C.textDim:C.text}}>{m}</span>
+                  <div>
+                    <div style={{fontSize:13,color:q===0?C.textDim:C.text,fontWeight:600}}>{m}</div>
+                    {mAliases.length > 0 && (
+                      <div style={{fontSize:10,color:C.textDim,marginTop:2,lineHeight:1.3}}>
+                        = {mAliases.join(", ")}
+                      </div>
+                    )}
+                  </div>
                   <StepperInput value={q} onChange={async nq=>{
                     const ns={...stockObj,[m]:nq};
                     if(isWS){
@@ -1486,6 +1732,27 @@ export default function App(){
   const safeStockWS = ensureObj(stockWS);
   const safeStockCfg = ensureObj(stockCfg);
   const safeMarkers = markers && typeof markers === "object" ? markers : DEFAULT_MARKERS;
+  const safeAliases = ensureObj(aliases);
+
+  // Найти алиасы для маркировки (возвращает массив)
+  function getAliases(markerName){
+    return safeAliases[markerName] || [];
+  }
+
+  // Проверить, содержит ли строка искомый текст (для поиска)
+  function matchesSearch(markerName, search){
+    if(!search) return true;
+    const s = search.toLowerCase();
+    if(markerName.toLowerCase().includes(s)) return true;
+    // Проверяем алиасы
+    const al = getAliases(markerName);
+    return al.some(a => a.toLowerCase().includes(s));
+  }
+
+  // Получить все имена маркировки (основное + алиасы)
+  function getAllNames(markerName){
+    return [markerName, ...getAliases(markerName)];
+  }
   const wsStock = ensureObj(safeStockWS[workshop]);
   const tabs = [
     {id:"record",label:"📝 Запись"},
@@ -1502,6 +1769,10 @@ export default function App(){
         onChange={handleChangePassword} onClose={()=>setPwdModalOpen(false)}/>}
       {renameModal&&<RenameMarkerModal cat={renameModal.cat} oldName={renameModal.oldName}
         onRename={renameMarker} onClose={()=>setRenameModal(null)}/>}
+      {aliasesModal&&<AliasesModal cat={aliasesModal.cat} markerName={aliasesModal.markerName}
+        aliases={getAliases(aliasesModal.markerName)}
+        onAdd={addAlias} onRemove={removeAlias} onPromote={promoteAlias}
+        onClose={()=>setAliasesModal(null)}/>}
       <div style={{maxWidth:600,margin:"0 auto",padding:"12px 12px 40px"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
           <div style={{display:"flex",alignItems:"center",gap:8}}>
@@ -1587,7 +1858,7 @@ export default function App(){
                   // Если показываем все — применяем поиск
                   if(showAllMarkers){
                     const search = markerSearch.toLowerCase();
-                    const list = search ? allMarkers.filter(m => m.toLowerCase().includes(search)) : allMarkers;
+                    const list = search ? allMarkers.filter(m => matchesSearch(m, markerSearch)) : allMarkers;
                     if(list.length === 0) return <div style={{padding:"8px",color:C.textDim,fontSize:12}}>Ничего не найдено</div>;
                     return list.map(m => renderMarkerButton(m, isService));
                   }
@@ -1860,10 +2131,19 @@ export default function App(){
                   </div>
                   {expanded&&(
                     <div style={{borderTop:`1px solid ${C.border}`}}>
-                      {filtered.map(m=>(
+                      {filtered.map(m=>{
+                        const mAliases = getAliases(m);
+                        return (
                         <div key={m} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
                           padding:"8px 14px",borderBottom:`1px solid ${C.border}22`,gap:8,flexWrap:"wrap"}}>
-                          <span style={{fontSize:13,flex:1,minWidth:80}}>{m}</span>
+                          <div style={{flex:1,minWidth:80}}>
+                            <div style={{fontSize:13,color:C.text}}>{m}</div>
+                            {mAliases.length > 0 && (
+                              <div style={{fontSize:10,color:C.textDim,marginTop:2}}>
+                                = {mAliases.join(", ")}
+                              </div>
+                            )}
+                          </div>
                           <div style={{display:"flex",alignItems:"center",gap:6}}>
                             <StepperInput
                               value={safePrices[m]||0}
@@ -1877,13 +2157,22 @@ export default function App(){
                               step={10}
                               />
                             <span style={{fontSize:12,color:C.textSub,whiteSpace:"nowrap"}}>р/шт</span>
+                            <button onClick={()=>setAliasesModal({cat, markerName:m})} title="Алиасы"
+                              style={{
+                                ...s.btn(),
+                                padding:"5px 8px",
+                                fontSize:11,
+                                borderColor: mAliases.length > 0 ? C.accent+"66" : C.border,
+                                color: mAliases.length > 0 ? C.accent : C.textSub,
+                              }}>≡</button>
                             <button onClick={()=>setRenameModal({cat, oldName:m})} title="Переименовать"
                               style={{...s.btn(),padding:"5px 8px",fontSize:11}}>✎</button>
                             <button onClick={()=>deleteMarker(cat,m)} title="Удалить"
                               style={{...s.btn("danger"),padding:"5px 8px",fontSize:11}}>✕</button>
                           </div>
                         </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   )}
                 </div>
