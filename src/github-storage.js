@@ -24,6 +24,24 @@ export function hasToken() {
 
 // ── Кэш SHA для каждого файла (чтобы не делать лишних запросов) ──
 const shaCache = {};
+// ── Очередь записей, чтобы избежать параллельных PUT на один файл ──
+const writeQueue = {};
+
+// ── Выполнить операцию последовательно для одного ключа ──
+async function withWriteQueue(key, fn) {
+  // Если для этого ключа уже идёт запись — ждём её окончания
+  while (writeQueue[key]) {
+    await writeQueue[key];
+  }
+  let resolve;
+  writeQueue[key] = new Promise(r => { resolve = r; });
+  try {
+    return await fn();
+  } finally {
+    delete writeQueue[key];
+    resolve();
+  }
+}
 
 // ── GitHub API helpers ──
 async function ghRequest(method, path, body) {
@@ -90,43 +108,61 @@ export async function dbGet(key) {
 
 // ── dbSet: записать JSON в файл (с SHA для обновления) ──
 export async function dbSet(key, value) {
-  try {
-    const path = `${DATA_PREFIX}${key}.json`;
-    const content = JSON.stringify(value);
-    const body = {
-      message: `update ${key}`,
-      content: encodeB64(content),
-    };
-    // Если есть SHA — добавляем (update), если нет — create
-    if (shaCache[key]) {
-      body.sha = shaCache[key];
-    } else {
-      // Попробуем получить текущий SHA
-      try {
-        const existing = await ghRequest("GET", path);
-        if (existing && existing.sha) {
-          shaCache[key] = existing.sha;
-          body.sha = existing.sha;
+  return withWriteQueue(key, async () => {
+    try {
+      const path = `${DATA_PREFIX}${key}.json`;
+      const content = JSON.stringify(value);
+      const body = {
+        message: `update ${key}`,
+        content: encodeB64(content),
+      };
+      // Если есть SHA — добавляем (update), если нет — create
+      if (shaCache[key]) {
+        body.sha = shaCache[key];
+      } else {
+        // Попробуем получить текущий SHA
+        try {
+          const existing = await ghRequest("GET", path);
+          if (existing && existing.sha) {
+            shaCache[key] = existing.sha;
+            body.sha = existing.sha;
+          }
+        } catch (e) {
+          if (e.status !== 404) console.warn(`[dbSet] get SHA for "${key}":`, e.message);
         }
-      } catch (e) {
-        if (e.status !== 404) console.warn(`[dbSet] get SHA for "${key}":`, e.message);
       }
+      const result = await ghRequest("PUT", path, body);
+      if (result && result.content && result.content.sha) {
+        shaCache[key] = result.content.sha;
+      }
+      return { ok: true };
+    } catch (e) {
+      if (e.status === 409 || e.status === 422) {
+        // Conflict — SHA устарел. Сбрасываем кэш и пробуем ещё раз (1 раз)
+        delete shaCache[key];
+        console.warn(`[dbSet] conflict on "${key}", retrying...`);
+        try {
+          const path = `${DATA_PREFIX}${key}.json`;
+          const existing = await ghRequest("GET", path);
+          const body = {
+            message: `update ${key} (retry)`,
+            content: encodeB64(JSON.stringify(value)),
+          };
+          if (existing && existing.sha) body.sha = existing.sha;
+          const result = await ghRequest("PUT", path, body);
+          if (result && result.content && result.content.sha) {
+            shaCache[key] = result.content.sha;
+          }
+          return { ok: true };
+        } catch (e2) {
+          console.error(`[dbSet] retry failed for "${key}":`, e2.message);
+          return { ok: false, error: e2.message };
+        }
+      }
+      console.error(`[dbSet] "${key}":`, e.message);
+      return { ok: false, error: e.message };
     }
-    const result = await ghRequest("PUT", path, body);
-    if (result && result.content && result.content.sha) {
-      shaCache[key] = result.content.sha;
-    }
-    return { ok: true };
-  } catch (e) {
-    if (e.status === 409 || e.status === 422) {
-      // Conflict — SHA устарел. Сбрасываем кэш и пробуем ещё раз
-      delete shaCache[key];
-      console.warn(`[dbSet] conflict on "${key}", retrying...`);
-      return dbSet(key, value);
-    }
-    console.error(`[dbSet] "${key}":`, e.message);
-    return { ok: false, error: e.message };
-  }
+  });
 }
 
 // ── dbDelete: удалить файл (для фото и т.п.) ──

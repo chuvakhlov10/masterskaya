@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, Component } from "react";
+import { useState, useEffect, useCallback, useRef, Component } from "react";
 import { dbGet, dbSet, hasToken, setToken, clearToken, verifyToken, photoGet, photoSet, photoDelete } from "./github-storage.js";
 
 const DEFAULT_MARKERS = {
@@ -823,6 +823,40 @@ export default function App(){
   // редактирование
   const [editRec, setEditRec] = useState(null);
 
+  // ── Дебаунс-система для отложенного сохранения в GitHub ──
+  // Решает проблему race condition при быстром вводе цифр
+  const [saveStatus, setSaveStatus] = useState({}); // {key: "saving" | "saved" | "error"}
+  const saveTimers = useRef({});
+  function debouncedSave(key, value, delayMs = 800){
+    // Мгновенно обновляем UI-статус
+    setSaveStatus(p => ({...p, [key]: "saving"}));
+    // Отменяем предыдущий таймер
+    if(saveTimers.current[key]){
+      clearTimeout(saveTimers.current[key]);
+    }
+    // Ставим новый
+    saveTimers.current[key] = setTimeout(async () => {
+      const result = await sSet(key, value);
+      setSaveStatus(p => ({...p, [key]: result.ok ? "saved" : "error"}));
+      // Через 2 сек убираем статус "saved"
+      if(result.ok){
+        setTimeout(() => {
+          setSaveStatus(p => {
+            const np = {...p};
+            delete np[key];
+            return np;
+          });
+        }, 2000);
+      }
+    }, delayMs);
+  }
+  // Эффект для очистки таймеров при размонтировании
+  useEffect(() => {
+    return () => {
+      Object.values(saveTimers.current).forEach(t => clearTimeout(t));
+    };
+  }, []);
+
   // переименование маркировки
   const [renameModal, setRenameModal] = useState(null); // {cat, oldName}
 
@@ -1185,8 +1219,13 @@ export default function App(){
                   <span style={{fontSize:13,color:q===0?C.textDim:C.text}}>{m}</span>
                   <NumInput value={q} onChange={async nq=>{
                     const ns={...stockObj,[m]:nq};
-                    if(isWS){setStockWS(p=>({...p,[workshop]:ns}));await sSet(`stock:ws:${workshop}`,ns);}
-                    else{setStockMain(ns);await sSet("stock:main",ns);}
+                    if(isWS){
+                      setStockWS(p=>({...p,[workshop]:ns}));
+                      debouncedSave(`stock:ws:${workshop}`, ns);
+                    } else {
+                      setStockMain(ns);
+                      debouncedSave("stock:main", ns);
+                    }
                   }} style={{...s.input,width:"100%",textAlign:"center",padding:"5px 6px",fontSize:13,
                     color:q===0?C.danger:cfg.threshold>0&&q<=cfg.threshold?C.warn:C.success}}/>
                 </div>
@@ -1402,6 +1441,19 @@ export default function App(){
           <div style={{display:"flex",alignItems:"center",gap:8}}>
             <span style={{...s.tag(wsColor),fontSize:13,fontWeight:700}}>{workshop}</span>
             <span style={{fontSize:12,color:C.textDim}}>{todayStr()}</span>
+            {/* Индикатор статуса сохранения */}
+            {Object.entries(saveStatus).map(([key, status]) => (
+              <span key={key} style={{
+                fontSize:10,
+                padding:"2px 6px",
+                borderRadius:4,
+                background: status === "saving" ? C.warnDim : status === "error" ? C.dangerDim : C.successDim,
+                color: status === "saving" ? C.warn : status === "error" ? C.danger : C.success,
+                border: `1px solid ${status === "saving" ? C.warn : status === "error" ? C.danger : C.success}44`,
+              }}>
+                {status === "saving" ? "⏳ Сохранение..." : status === "error" ? "⚠ Ошибка" : "✓ Сохранено"}
+              </span>
+            ))}
           </div>
           <div style={{display:"flex",gap:6}}>
             <button onClick={()=>setPwdModalOpen(true)} style={{...s.btn(),padding:"5px 10px",fontSize:12}}>🔑 Пароль</button>
@@ -1714,7 +1766,14 @@ export default function App(){
                           <span style={{fontSize:13,flex:1}}>{m}</span>
                           <div style={{display:"flex",alignItems:"center",gap:6}}>
                             <input type="number" min="0" step="1" value={safePrices[m]||""} placeholder="—"
-                              onChange={async e=>{const val=+e.target.value,np={...safePrices};if(val>0)np[m]=val;else delete np[m];setPrices(np);await sSet("prices",np);}}
+                              onChange={async e=>{
+                                const val = +e.target.value;
+                                const np = {...safePrices};
+                                if(val > 0) np[m] = val;
+                                else delete np[m];
+                                setPrices(np);
+                                debouncedSave("prices", np);
+                              }}
                               style={{...s.input,width:80,textAlign:"center",padding:"5px 8px",fontSize:13}}/>
                             <span style={{fontSize:12,color:C.textSub,whiteSpace:"nowrap"}}>р/шт</span>
                             <button onClick={()=>setRenameModal({cat, oldName:m})} title="Переименовать"
