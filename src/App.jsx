@@ -1087,6 +1087,7 @@ export default function App(){
   const [markers, setMarkers] = useState(DEFAULT_MARKERS);
   const [aliases, setAliases] = useState({});  // {основное_имя: [альтернативные]}
   const [notes, setNotes] = useState({});      // {маркировка: "комментарий"}
+  const [subcategories, setSubcategories] = useState({});  // {категория: {подкатегория: [маркировки]}}
 
   // форма записи
   const [category, setCategory] = useState("Автомобильные");
@@ -1165,6 +1166,56 @@ export default function App(){
     };
   }, []);
 
+  // ── Подкатегории: создать / удалить / добавить маркировку / убрать ──
+  async function createSubcategory(cat, subName){
+    subName = (subName||"").trim();
+    if(!subName) return {ok:false, text:"Введите название"};
+    const subs = ensureObj(safeSubcategories[cat]);
+    if(subs[subName]) return {ok:false, text:"Такая подкатегория уже есть"};
+    const next = {...safeSubcategories, [cat]: {...subs, [subName]: []}};
+    setSubcategories(next);
+    await sSet("subcategories", next);
+    return {ok:true, text:`Подкатегория «${subName}» создана`};
+  }
+
+  async function deleteSubcategory(cat, subName){
+    if(!confirm(`Удалить подкатегорию «${subName}»?`)) return;
+    const subs = ensureObj(safeSubcategories[cat]);
+    const nextSubs = {...subs};
+    delete nextSubs[subName];
+    const next = {...safeSubcategories, [cat]: nextSubs};
+    setSubcategories(next);
+    await sSet("subcategories", next);
+  }
+
+  async function addMarkerToSubcategory(cat, subName, markerName){
+    const subs = ensureObj(safeSubcategories[cat]);
+    const existing = subs[subName] || [];
+    if(existing.includes(markerName)) return {ok:false, text:"Уже в подкатегории"};
+    // Убираем из других подкатегорий этой категории
+    const nextSubs = {};
+    for(const [sn, ms] of Object.entries(subs)){
+      if(sn === subName){
+        nextSubs[sn] = [...ms, markerName];
+      } else {
+        nextSubs[sn] = ms.filter(m => m !== markerName);
+      }
+    }
+    const next = {...safeSubcategories, [cat]: nextSubs};
+    setSubcategories(next);
+    await sSet("subcategories", next);
+    return {ok:true, text:`«${markerName}» → ${subName}`};
+  }
+
+  async function removeMarkerFromSubcategory(cat, subName, markerName){
+    const subs = ensureObj(safeSubcategories[cat]);
+    const nextSubs = {...subs};
+    nextSubs[subName] = (nextSubs[subName]||[]).filter(m => m !== markerName);
+    const next = {...safeSubcategories, [cat]: nextSubs};
+    setSubcategories(next);
+    await sSet("subcategories", next);
+  }
+
   // переименование маркировки
   const [renameModal, setRenameModal] = useState(null); // {cat, oldName}
   // алиасы — модалка
@@ -1173,6 +1224,8 @@ export default function App(){
   const [noteModal, setNoteModal] = useState(null); // {markerName}
   // фото — модалка просмотра в полном размере
   const [photoModal, setPhotoModal] = useState(null); // {url, markerName}
+  // создание подкатегории — ввод названия
+  const [newSubInput, setNewSubInput] = useState({});
   // текущее время (тикает каждую минуту)
   const [nowTime, setNowTime] = useState(new Date());
   useEffect(() => {
@@ -1196,10 +1249,10 @@ export default function App(){
       setPwdLoaded(true);
 
       // Загружаем остальные данные
-      const [r,p,sm,sS,sCfg,sm2,al,nt] = await Promise.all([
+      const [r,p,sm,sS,sCfg,sm2,al,nt,sub] = await Promise.all([
         sGet("records"), sGet("prices"),
         sGet("stock:main"), Promise.all(WORKSHOPS.map(w=>sGet(`stock:ws:${w}`))),
-        sGet("stock:cfg"), sGet("custom:markers"), sGet("marker-aliases"), sGet("marker-notes"),
+        sGet("stock:cfg"), sGet("custom:markers"), sGet("marker-aliases"), sGet("marker-notes"), sGet("subcategories"),
       ]);
       // Защита: гарантируем, что у нас правильные типы (массив/объект),
       // иначе рендер упадёт с белым экраном
@@ -1216,6 +1269,7 @@ export default function App(){
       if(sm2 && typeof sm2 === "object" && !Array.isArray(sm2)) setMarkers(sm2);
       if(al && typeof al === "object" && !Array.isArray(al)) setAliases(al);
       if(nt && typeof nt === "object" && !Array.isArray(nt)) setNotes(nt);
+      if(sub && typeof sub === "object" && !Array.isArray(sub)) setSubcategories(sub);
 
       // Проверяем сохранённую авторизацию
       try{
@@ -2073,8 +2127,26 @@ export default function App(){
   const safeMarkers = markers && typeof markers === "object" ? markers : DEFAULT_MARKERS;
   const safeAliases = ensureObj(aliases);
   const safeNotes = ensureObj(notes);
+  const safeSubcategories = ensureObj(subcategories);
 
-  // Получить комментарий для маркировки
+  // Получить подкатегории для категории
+  function getSubcategories(cat){
+    return ensureObj(safeSubcategories[cat]);
+  }
+
+  // Проверить, есть ли маркировка в какой-то подкатегории
+  function getMarkerSubcategory(cat, markerName){
+    const subs = getSubcategories(cat);
+    for(const [subName, markers] of Object.entries(subs)){
+      if(markers.includes(markerName)) return subName;
+    }
+    return null;
+  }
+
+  // Получить все имена маркировки (основное + алиасы)
+  function getAllNames(markerName){
+    return [markerName, ...getAliases(markerName)];
+  }
   function getNote(markerName){
     return safeNotes[markerName] || "";
   }
@@ -2523,65 +2595,88 @@ export default function App(){
                   </div>
                   {expanded&&(
                     <div style={{borderTop:`1px solid ${C.border}`}}>
-                      {filtered.map(m=>{
-                        const mAliases = getAliases(m);
-                        const mNote = getNote(m);
-                        const cachedPhoto = photoCache[m];
-                        return (
-                        <div key={m} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
-                          padding:"8px 14px",borderBottom:`1px solid ${C.border}22`,gap:8,flexWrap:"wrap"}}>
-                          {/* Фото маркировки (слева) */}
-                          <MarkerPhotoThumb markerName={m} photo={cachedPhoto} onPhotoLoaded={(url)=>setPhotoCache(p=>({...p,[m]:url}))} onPhotoClick={()=>cachedPhoto && setPhotoModal({url: cachedPhoto, markerName: m})}/>
-                          <div style={{flex:1,minWidth:80}}>
-                            <div style={{fontSize:13,color:C.text}}>{m}</div>
-                            {mAliases.length > 0 && (
-                              <div style={{fontSize:10,color:C.textDim,marginTop:2}}>
-                                = {mAliases.join(", ")}
+                      {/* Подкатегории */}
+                      {(() => {
+                        const catSubs = getSubcategories(cat);
+                        const subNames = Object.keys(catSubs);
+                        if(subNames.length === 0) return null;
+                        return subNames.map(subName => {
+                          const subMarkers = (catSubs[subName]||[]).filter(m => filtered.includes(m));
+                          if(subMarkers.length === 0) return null;
+                          return (
+                            <div key={subName} style={{borderBottom:`1px solid ${C.border}`,background:C.bgSection}}>
+                              <div style={{padding:"6px 14px",fontSize:11,fontWeight:800,color:C.text,textTransform:"uppercase",letterSpacing:"1px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                                <span>📁 {subName}</span>
+                                <button onClick={()=>deleteSubcategory(cat, subName)} title="Удалить подкатегорию"
+                                  style={{fontSize:10,color:C.danger,background:"transparent",border:"none",cursor:"pointer"}}>✕</button>
                               </div>
-                            )}
-                            {mNote && (
-                              <div style={{fontSize:10,color:C.warn,marginTop:2,lineHeight:1.3,fontStyle:"italic"}}>
-                                💬 {mNote}
-                              </div>
-                            )}
+                              {subMarkers.map(m => {
+                                const mAliases = getAliases(m);
+                                const mNote = getNote(m);
+                                const cachedPhoto = photoCache[m];
+                                return (
+                                  <div key={m} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+                                    padding:"8px 14px 8px 28px",borderBottom:`1px solid ${C.border}22`,gap:8,flexWrap:"wrap",background:C.bgCard}}>
+                                    <MarkerPhotoThumb markerName={m} photo={cachedPhoto} onPhotoLoaded={(url)=>setPhotoCache(p=>({...p,[m]:url}))} onPhotoClick={()=>cachedPhoto && setPhotoModal({url: cachedPhoto, markerName: m})}/>
+                                    <div style={{flex:1,minWidth:80}}>
+                                      <div style={{fontSize:13,color:C.text}}>{m}</div>
+                                      {mAliases.length > 0 && <div style={{fontSize:10,color:C.textDim,marginTop:2}}>= {mAliases.join(", ")}</div>}
+                                      {mNote && <div style={{fontSize:10,color:C.warn,marginTop:2,fontStyle:"italic"}}>💬 {mNote}</div>}
+                                    </div>
+                                    <div style={{display:"flex",alignItems:"center",gap:6}}>
+                                      <StepperInput value={safePrices[m]||0} onChange={async (val) => { const np = {...safePrices}; if(val > 0) np[m] = val; else delete np[m]; setPrices(np); debouncedSave("prices", np); }} step={10} />
+                                      <span style={{fontSize:12,color:C.textSub,whiteSpace:"nowrap"}}>р/шт</span>
+                                      <button onClick={()=>setNoteModal({markerName:m})} title="Комментарий" style={{...s.btn(),padding:"5px 8px",fontSize:11,borderColor:mNote?C.warn+"66":C.border,color:mNote?C.warn:C.textSub}}>💬</button>
+                                      <button onClick={()=>setAliasesModal({cat, markerName:m})} title="Алиасы" style={{...s.btn(),padding:"5px 8px",fontSize:11,borderColor:mAliases.length>0?C.brand+"66":C.border,color:mAliases.length>0?C.brand:C.textSub}}>≡</button>
+                                      <button onClick={()=>setRenameModal({cat, oldName:m})} title="Переименовать" style={{...s.btn(),padding:"5px 8px",fontSize:11}}>✎</button>
+                                      <button onClick={()=>removeMarkerFromSubcategory(cat, subName, m)} title="Убрать из подкатегории" style={{...s.btn(),padding:"5px 8px",fontSize:11}}>↩</button>
+                                      <button onClick={()=>deleteMarker(cat,m)} title="Удалить" style={{...s.btn("danger"),padding:"5px 8px",fontSize:11}}>✕</button>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          );
+                        });
+                      })()}
+                      {/* Маркировки без подкатегории */}
+                      {(() => {
+                        const catSubs = getSubcategories(cat);
+                        const allSubMarkers = new Set();
+                        Object.values(catSubs).forEach(ms => ms.forEach(m => allSubMarkers.add(m)));
+                        const noSub = filtered.filter(m => !allSubMarkers.has(m));
+                        if(noSub.length === 0) return null;
+                        return noSub.map(m=>{
+                          const mAliases = getAliases(m);
+                          const mNote = getNote(m);
+                          const cachedPhoto = photoCache[m];
+                          const mSub = getMarkerSubcategory(cat, m);
+                          return (
+                          <div key={m} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+                            padding:"8px 14px",borderBottom:`1px solid ${C.border}22`,gap:8,flexWrap:"wrap"}}>
+                            <MarkerPhotoThumb markerName={m} photo={cachedPhoto} onPhotoLoaded={(url)=>setPhotoCache(p=>({...p,[m]:url}))} onPhotoClick={()=>cachedPhoto && setPhotoModal({url: cachedPhoto, markerName: m})}/>
+                            <div style={{flex:1,minWidth:80}}>
+                              <div style={{fontSize:13,color:C.text}}>{m}</div>
+                              {mAliases.length > 0 && <div style={{fontSize:10,color:C.textDim,marginTop:2}}>= {mAliases.join(", ")}</div>}
+                              {mNote && <div style={{fontSize:10,color:C.warn,marginTop:2,fontStyle:"italic"}}>💬 {mNote}</div>}
+                            </div>
+                            <div style={{display:"flex",alignItems:"center",gap:6}}>
+                              <StepperInput value={safePrices[m]||0} onChange={async (val) => { const np = {...safePrices}; if(val > 0) np[m] = val; else delete np[m]; setPrices(np); debouncedSave("prices", np); }} step={10} />
+                              <span style={{fontSize:12,color:C.textSub,whiteSpace:"nowrap"}}>р/шт</span>
+                              <button onClick={()=>setNoteModal({markerName:m})} title="Комментарий" style={{...s.btn(),padding:"5px 8px",fontSize:11,borderColor:mNote?C.warn+"66":C.border,color:mNote?C.warn:C.textSub}}>💬</button>
+                              <button onClick={()=>setAliasesModal({cat, markerName:m})} title="Алиасы" style={{...s.btn(),padding:"5px 8px",fontSize:11,borderColor:mAliases.length>0?C.brand+"66":C.border,color:mAliases.length>0?C.brand:C.textSub}}>≡</button>
+                              <button onClick={()=>setRenameModal({cat, oldName:m})} title="Переименовать" style={{...s.btn(),padding:"5px 8px",fontSize:11}}>✎</button>
+                              <button onClick={()=>deleteMarker(cat,m)} title="Удалить" style={{...s.btn("danger"),padding:"5px 8px",fontSize:11}}>✕</button>
+                            </div>
                           </div>
-                          <div style={{display:"flex",alignItems:"center",gap:6}}>
-                            <StepperInput
-                              value={safePrices[m]||0}
-                              onChange={async (val) => {
-                                const np = {...safePrices};
-                                if(val > 0) np[m] = val;
-                                else delete np[m];
-                                setPrices(np);
-                                debouncedSave("prices", np);
-                              }}
-                              step={10}
-                              />
-                            <span style={{fontSize:12,color:C.textSub,whiteSpace:"nowrap"}}>р/шт</span>
-                            <button onClick={()=>setNoteModal({markerName:m})} title="Комментарий"
-                              style={{
-                                ...s.btn(),
-                                padding:"5px 8px",
-                                fontSize:11,
-                                borderColor: mNote ? C.warn+"66" : C.border,
-                                color: mNote ? C.warn : C.textSub,
-                              }}>💬</button>
-                            <button onClick={()=>setAliasesModal({cat, markerName:m})} title="Алиасы"
-                              style={{
-                                ...s.btn(),
-                                padding:"5px 8px",
-                                fontSize:11,
-                                borderColor: mAliases.length > 0 ? C.brand+"66" : C.border,
-                                color: mAliases.length > 0 ? C.brand : C.textSub,
-                              }}>≡</button>
-                            <button onClick={()=>setRenameModal({cat, oldName:m})} title="Переименовать"
-                              style={{...s.btn(),padding:"5px 8px",fontSize:11}}>✎</button>
-                            <button onClick={()=>deleteMarker(cat,m)} title="Удалить"
-                              style={{...s.btn("danger"),padding:"5px 8px",fontSize:11}}>✕</button>
-                          </div>
-                        </div>
-                        );
-                      })}
+                          );
+                        });
+                      })()}
+                      {/* Кнопка создания подкатегории */}
+                      <div style={{padding:"8px 14px",display:"flex",gap:8,alignItems:"center",background:C.bgSection,borderTop:`1px solid ${C.border}`}}>
+                        <input value={newSubInput[cat]||""} onChange={e=>setNewSubInput(p=>({...p,[cat]:e.target.value}))} placeholder="Новая подкатегория..." style={{...s.input,fontSize:12}} onKeyDown={e=>{if(e.key==="Enter"&&(newSubInput[cat]||"").trim()){createSubcategory(cat,newSubInput[cat]).then(r=>{if(r.ok)setNewSubInput(p=>({...p,[cat]:""}));});}}}/>
+                        <button onClick={()=>{const v=(newSubInput[cat]||"").trim(); if(v){createSubcategory(cat,v).then(r=>{if(r.ok)setNewSubInput(p=>({...p,[cat]:""}));});}}} style={{...s.btn(),fontSize:11,whiteSpace:"nowrap"}}>+ Подкатегория</button>
+                      </div>
                     </div>
                   )}
                 </div>
