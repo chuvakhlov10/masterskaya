@@ -248,7 +248,7 @@ function MarkerPicker({ markers, value, onChange, extraLabel }){
           ? <div style={{padding:"10px 14px",fontSize:13,color:C.textDim}}>Ничего не найдено</div>
           : Object.entries(grouped).map(([cat,ms])=>(
             <div key={cat}>
-              <div style={{padding:"5px 12px",fontSize:11,fontWeight:700,color:C.textDim,background:"#13161f",
+              <div style={{padding:"5px 12px",fontSize:11,fontWeight:700,color:C.textDim,background:C.bgSection,
                 borderBottom:`1px solid ${C.border}`,textTransform:"uppercase"}}>{cat}</div>
               {ms.map(m=>(
                 <div key={m} onClick={()=>{onChange(m);setSearch("");}}
@@ -376,7 +376,7 @@ function StatsBreakdown({ data, totalAmt, totalQty }){
             </div>
             <div style={{display:"flex",alignItems:"center",gap:10}}>
               <div style={{textAlign:"right"}}>
-                <div style={{color:d.amount>=0?C.brand:C.refund,fontWeight:700,fontSize:13}}>{fmt(d.amount)} р</div>
+                <div style={{color:d.amount>=0?C.text:C.refund,fontWeight:700,fontSize:13}}>{fmt(d.amount)} р</div>
                 <div style={{fontSize:11,color:C.textSub}}>{fmt(d.qty)} шт · {totalAmt>0?(Math.abs(d.amount)/Math.abs(totalAmt)*100).toFixed(0):0}%</div>
               </div>
               <span style={{color:C.textDim,fontSize:12}}>{expanded[cat]?"▲":"▼"}</span>
@@ -389,7 +389,7 @@ function StatsBreakdown({ data, totalAmt, totalQty }){
                   padding:"7px 14px",borderBottom:`1px solid ${C.border}22`,fontSize:13}}>
                   <span style={{color:C.textSub}}>{mk}</span>
                   <div style={{textAlign:"right"}}>
-                    <div style={{color:md.amount>=0?C.brand:C.refund}}>{fmt(md.amount)} р</div>
+                    <div style={{color:md.amount>=0?C.text:C.refund}}>{fmt(md.amount)} р</div>
                     <div style={{fontSize:11,color:C.textDim}}>{fmt(md.qty)} шт{md.defect?` · брак ${md.defect}`:""}</div>
                   </div>
                 </div>
@@ -1781,7 +1781,7 @@ export default function App(){
           </div>
         </div>
         {expanded && (
-          <div style={{borderTop:`1px solid ${C.border}`,padding:"6px 14px",display:"flex",gap:5,flexWrap:"wrap",alignItems:"center",background:"#13161f",borderBottom:`1px solid ${C.border}`}}>
+          <div style={{borderTop:`1px solid ${C.border}`,padding:"6px 14px",display:"flex",gap:5,flexWrap:"wrap",alignItems:"center",background:C.bgSection,borderBottom:`1px solid ${C.border}`}}>
             <span style={{fontSize:10,color:C.textDim,marginRight:4}}>Фильтр:</span>
             {catFilterBtn("all","Все",C.brand)}
             {catFilterBtn("with-stock","С остатком",C.success)}
@@ -1798,7 +1798,7 @@ export default function App(){
         {expanded&&(
           <div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 150px 36px",gap:6,
-              padding:"6px 14px",fontSize:11,color:C.textDim,borderBottom:`1px solid ${C.border}`,background:"#13161f"}}>
+              padding:"6px 14px",fontSize:11,color:C.textDim,borderBottom:`1px solid ${C.border}`,background:C.bgSection}}>
               <span>Маркировка</span><span style={{textAlign:"center"}}>Кол-во</span><span></span>
             </div>
             {filteredMs.map(m=>{
@@ -2140,7 +2140,7 @@ export default function App(){
                 return days[d.getDay()];
               })()}
             </span>
-            <span style={{fontSize:12,color:C.textSub}}>
+            <span style={{fontSize:13,color:C.text,fontWeight:700,letterSpacing:"0.3px"}}>
               {`${String(nowTime.getDate()).padStart(2,"0")}.${String(nowTime.getMonth()+1).padStart(2,"0")}.${nowTime.getFullYear()}`}
             </span>
             <span style={{fontSize:13,color:C.brand,fontWeight:800,fontVariantNumeric:"tabular-nums"}}>
@@ -2483,7 +2483,7 @@ export default function App(){
             <input value={priceSearch} onChange={e=>setPriceSearch(e.target.value)} placeholder="Поиск маркировки..." style={{...s.input,marginBottom:14}}/>
 
             {sortedCategoryEntries(safeMarkers).map(([cat,ms])=>{
-              const filtered = ms.filter(m=>m.toLowerCase().includes(priceSearch.toLowerCase()));
+              const filtered = ms.filter(m=>matchesSearch(m, priceSearch));
               if(filtered.length===0) return null;
               const expanded = priceExpandedCats[cat]!==false;
               const withPrice = filtered.filter(m=>safePrices[m]).length;
