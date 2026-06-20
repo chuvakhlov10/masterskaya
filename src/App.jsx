@@ -1817,7 +1817,7 @@ export default function App(){
         )}
         {expanded&&(
           <div>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 150px 36px",gap:6,
+            <div style={{display:"grid",gridTemplateColumns:"1fr auto 36px",gap:6,
               padding:"6px 14px",fontSize:11,color:C.textDim,borderBottom:`1px solid ${C.border}`,background:C.bgSection}}>
               <span>Маркировка</span><span style={{textAlign:"center"}}>Кол-во</span><span style={{textAlign:"center"}}>💬</span>
             </div>
@@ -1826,7 +1826,7 @@ export default function App(){
               const mAliases = getAliases(m);
               const mNote = getNote(m);
               return (
-                <div key={m} style={{display:"grid",gridTemplateColumns:"1fr 150px 36px",gap:6,
+                <div key={m} style={{display:"grid",gridTemplateColumns:"1fr auto 36px",gap:6,
                   padding:"7px 14px",borderBottom:`1px solid ${C.border}22`,alignItems:"center",
                   background:q===0?C.dangerDim:q>0&&cfg.threshold>0&&q<=cfg.threshold?C.warnDim:"transparent"}}>
                   <div>
@@ -2248,7 +2248,7 @@ export default function App(){
               <div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:8,maxHeight:showAllMarkers?400:200,overflowY:"auto",padding:4,background:C.bgInput,border:`1px solid ${C.border}`}}>
                 {(() => {
                   const isService = category === "Прочие услуги";
-                  const allMarkers = safeMarkers[category] || [];
+                  const allMarkers = (safeMarkers[category] || []).slice().sort((a,b)=>a.localeCompare(b,"ru"));
 
                   // Для услуг — показываем все сразу (без топа)
                   if(isService){
