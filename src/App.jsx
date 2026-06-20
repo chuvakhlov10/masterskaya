@@ -1244,6 +1244,7 @@ export default function App(){
   // склад
   const [stockTab, setStockTab] = useState("ws");
   const [expandedCats, setExpandedCats] = useState({});
+  const [expandedSubcats, setExpandedSubcats] = useState({}); // {"cat|subName": true/false}
   const [stockSort, setStockSort] = useState("alpha"); // alpha | qty-desc | qty-asc | empty-first
   const [stockFilter, setStockFilter] = useState("all"); // all | with-stock | empty | low
   const [catFilter, setCatFilter] = useState({}); // {категория: "all" | "with-stock" | "empty"}
@@ -2074,10 +2075,12 @@ export default function App(){
                     if(subMarkers.length === 0) return null;
                     return (
                       <div key={sn}>
-                        <div style={{padding:"4px 14px 4px 20px",fontSize:10,fontWeight:800,color:C.text,background:C.bgSection,borderTop:`1px solid ${C.border}`,borderBottom:`1px solid ${C.border}`,textTransform:"uppercase",letterSpacing:"1px"}}>
-                          📁 {sn} ({subMarkers.length})
+                        <div onClick={()=>setExpandedSubcats(p=>({...p,[`${cat}|${sn}`]:!p[`${cat}|${sn}`]}))}
+                          style={{padding:"4px 14px 4px 20px",fontSize:10,fontWeight:800,color:C.text,background:C.bgSection,borderTop:`1px solid ${C.border}`,borderBottom:`1px solid ${C.border}`,textTransform:"uppercase",letterSpacing:"1px",cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                          <span>📁 {sn} ({subMarkers.length})</span>
+                          <span style={{fontSize:11}}>{expandedSubcats[`${cat}|${sn}`]===false ? "▼" : "▲"}</span>
                         </div>
-                        {subMarkers.map(m => renderStockRow(m, true))}
+                        {expandedSubcats[`${cat}|${sn}`]!==false && subMarkers.map(m => renderStockRow(m, true))}
                       </div>
                     );
                   })}
@@ -2813,12 +2816,16 @@ export default function App(){
                           if(subMarkers.length === 0) return null;
                           return (
                             <div key={subName} style={{borderBottom:`1px solid ${C.border}`,background:C.bgSection}}>
-                              <div style={{padding:"6px 14px",fontSize:11,fontWeight:800,color:C.text,textTransform:"uppercase",letterSpacing:"1px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                              <div onClick={()=>setExpandedSubcats(p=>({...p,[`${cat}|${subName}`]:!p[`${cat}|${subName}`]}))}
+                                style={{padding:"6px 14px",fontSize:11,fontWeight:800,color:C.text,textTransform:"uppercase",letterSpacing:"1px",display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer"}}>
                                 <span>📁 {subName}</span>
-                                <button onClick={()=>deleteSubcategory(cat, subName)} title="Удалить подкатегорию"
-                                  style={{fontSize:10,color:C.danger,background:"transparent",border:"none",cursor:"pointer"}}>✕</button>
+                                <div style={{display:"flex",alignItems:"center",gap:6}}>
+                                  <button onClick={(e)=>{e.stopPropagation();deleteSubcategory(cat, subName);}} title="Удалить подкатегорию"
+                                    style={{fontSize:10,color:C.danger,background:"transparent",border:"none",cursor:"pointer"}}>✕</button>
+                                  <span style={{fontSize:11}}>{expandedSubcats[`${cat}|${subName}`]===false ? "▼" : "▲"}</span>
+                                </div>
                               </div>
-                              {subMarkers.map(m => {
+                              {expandedSubcats[`${cat}|${subName}`]!==false && subMarkers.map(m => {
                                 const mAliases = getAliases(m);
                                 const mNote = getNote(m);
                                 const cachedPhoto = photoCache[m];
