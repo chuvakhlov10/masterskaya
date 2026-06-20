@@ -783,6 +783,141 @@ function PhotoViewModal({ photo, markerName, onClose }){
   );
 }
 
+// ── Модалка управления подкатегориями ──
+function SubcategoryModal({ cat, markers, subcategories, onCreate, onDelete, onRename, onAssign, onUnassign, onClose }){
+  const [newName, setNewName] = useState("");
+  const [msg, setMsg] = useState(null);
+  const [renaming, setRenaming] = useState(null); // {oldName, newName}
+  const [assigning, setAssigning] = useState(null); // markerName being assigned
+
+  const catSubs = ensureObj(subcategories[cat]);
+  const subNames = Object.keys(catSubs);
+  const allCatMarkers = markers[cat] || [];
+
+  function showMsg(r){
+    setMsg(r);
+    setTimeout(()=>setMsg(null), 2000);
+  }
+
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.75)",zIndex:100,display:"flex",alignItems:"flex-end",justifyContent:"center"}}
+      onClick={e=>{if(e.target===e.currentTarget)onClose();}}>
+      <div style={{background:C.bgCard,borderRadius:"16px 16px 0 0",border:`1px solid ${C.border}`,padding:20,
+        width:"100%",maxWidth:600,maxHeight:"90vh",overflowY:"auto"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+          <div>
+            <div style={{fontWeight:700,fontSize:16}}>📁 Подкатегории</div>
+            <div style={{fontSize:11,color:C.textSub,marginTop:2}}>Категория: {cat}</div>
+          </div>
+          <button onClick={onClose} style={{...s.btn(),padding:"4px 10px",fontSize:12}}>✕</button>
+        </div>
+
+        {/* Создать новую */}
+        <label style={s.label}>Создать подкатегорию</label>
+        <div style={{display:"flex",gap:8,marginBottom:16}}>
+          <input value={newName} onChange={e=>setNewName(e.target.value)} placeholder="Например: ВАЗ, BMW, Toyota..."
+            style={s.input} onKeyDown={e=>{if(e.key==="Enter"&&newName.trim()){onCreate(cat,newName).then(showMsg);setNewName("");}}}/>
+          <button onClick={()=>{if(newName.trim()){onCreate(cat,newName).then(showMsg);setNewName("");}}}
+            style={{...s.btn("accent"),whiteSpace:"nowrap",padding:"8px 16px"}}>+ Создать</button>
+        </div>
+
+        {/* Список существующих подкатегорий */}
+        {subNames.length > 0 && (
+          <div style={{marginBottom:20}}>
+            <div style={{...s.label,marginBottom:8}}>Существующие подкатегории ({subNames.length})</div>
+            {subNames.map(sn => {
+              const subMarkers = catSubs[sn]||[];
+              return (
+                <div key={sn} style={{...s.card,padding:"10px 12px",marginBottom:8}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                    {renaming && renaming.oldName === sn ? (
+                      <div style={{display:"flex",gap:6,flex:1}}>
+                        <input value={renaming.newName} onChange={e=>setRenaming({oldName:sn,newName:e.target.value})}
+                          style={{...s.input,fontSize:13}} autoFocus onKeyDown={e=>{
+                            if(e.key==="Enter"){onRename(cat,sn,renaming.newName).then(showMsg);setRenaming(null);}
+                            if(e.key==="Escape") setRenaming(null);
+                          }}/>
+                        <button onClick={()=>{onRename(cat,sn,renaming.newName).then(showMsg);setRenaming(null);}}
+                          style={{...s.btn("accent"),padding:"6px 10px",fontSize:11}}>✓</button>
+                        <button onClick={()=>setRenaming(null)} style={{...s.btn(),padding:"6px 10px",fontSize:11}}>✕</button>
+                      </div>
+                    ) : (
+                      <div style={{display:"flex",alignItems:"center",gap:8}}>
+                        <span style={{fontWeight:700,fontSize:14}}>{sn}</span>
+                        <span style={{fontSize:11,color:C.textDim}}>{subMarkers.length} шт</span>
+                      </div>
+                    )}
+                    {!(renaming && renaming.oldName === sn) && (
+                      <div style={{display:"flex",gap:4}}>
+                        <button onClick={()=>setRenaming({oldName:sn,newName:sn})}
+                          style={{...s.btn(),padding:"4px 8px",fontSize:11}} title="Переименовать">✎</button>
+                        <button onClick={()=>{if(confirm(`Удалить «${sn}»?`)){onDelete(cat,sn);}}}
+                          style={{...s.btn("danger"),padding:"4px 8px",fontSize:11}} title="Удалить">✕</button>
+                      </div>
+                    )}
+                  </div>
+                  {/* Маркировки в подкатегории */}
+                  {subMarkers.length > 0 && (
+                    <div style={{display:"flex",flexWrap:"wrap",gap:4,marginTop:6}}>
+                      {subMarkers.map(m => (
+                        <span key={m} style={{display:"inline-flex",alignItems:"center",gap:4,background:C.bgSection,padding:"3px 8px",borderRadius:0,fontSize:12,border:`1px solid ${C.border}`}}>
+                          {m}
+                          <button onClick={()=>onUnassign(cat,sn,m)} style={{background:"transparent",border:"none",color:C.danger,cursor:"pointer",fontSize:11,padding:0}}>✕</button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Назначить маркировку в подкатегорию */}
+        {subNames.length > 0 && (
+          <div style={{marginBottom:16}}>
+            <div style={{...s.label,marginBottom:8}}>Назначить маркировку</div>
+            <div style={{maxHeight:300,overflowY:"auto",border:`1px solid ${C.border}`,background:C.bgCard}}>
+              {allCatMarkers.sort((a,b)=>a.localeCompare(b,"ru")).map(m => {
+                const currentSub = getMarkerSubcategoryStatic(catSubs, m);
+                return (
+                  <div key={m} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+                    padding:"6px 12px",borderBottom:`1px solid ${C.border}22`,fontSize:12}}>
+                    <span style={{color:C.text,fontWeight:600}}>{m}</span>
+                    <select value={currentSub||""} onChange={e=>{
+                      if(e.target.value){
+                        onAssign(cat, e.target.value, m);
+                      } else if(currentSub){
+                        onUnassign(cat, currentSub, m);
+                      }
+                    }} style={{...s.input,padding:"4px 8px",fontSize:11,width:120}}>
+                      <option value="">— без подкатегории —</option>
+                      {subNames.map(sn => <option key={sn} value={sn}>{sn}</option>)}
+                    </select>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {msg && <div style={{fontSize:12,marginBottom:10,color:msg.ok?C.success:C.danger,fontWeight:700}}>{msg.text}</div>}
+        <div style={{fontSize:11,color:C.textDim,lineHeight:1.5}}>
+          💡 Подкатегории помогают группировать маркировки внутри категории.<br/>
+          Например: «ВАЗ», «BMW», «Toyota» внутри «Автомобильных».
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function getMarkerSubcategoryStatic(catSubs, markerName){
+  for(const [subName, markers] of Object.entries(catSubs)){
+    if(markers.includes(markerName)) return subName;
+  }
+  return null;
+}
+
 // ── Модалка комментария к маркировке ──
 function NoteModal({ markerName, currentNote, onSave, onClose }){
   const [text, setText] = useState(currentNote || "");
@@ -1216,6 +1351,23 @@ export default function App(){
     await sSet("subcategories", next);
   }
 
+  async function renameSubcategory(cat, oldName, newName){
+    newName = (newName||"").trim();
+    if(!newName) return {ok:false, text:"Введите название"};
+    if(oldName === newName) return {ok:false, text:"Имя не изменилось"};
+    const subs = ensureObj(safeSubcategories[cat]);
+    if(subs[newName]) return {ok:false, text:"Такая подкатегория уже есть"};
+    const nextSubs = {};
+    for(const [sn, ms] of Object.entries(subs)){
+      if(sn === oldName) nextSubs[newName] = ms;
+      else nextSubs[sn] = ms;
+    }
+    const next = {...safeSubcategories, [cat]: nextSubs};
+    setSubcategories(next);
+    await sSet("subcategories", next);
+    return {ok:true, text:`«${oldName}» → «${newName}»`};
+  }
+
   // переименование маркировки
   const [renameModal, setRenameModal] = useState(null); // {cat, oldName}
   // алиасы — модалка
@@ -1226,6 +1378,8 @@ export default function App(){
   const [photoModal, setPhotoModal] = useState(null); // {url, markerName}
   // создание подкатегории — ввод названия
   const [newSubInput, setNewSubInput] = useState({});
+  // модалка управления подкатегориями
+  const [subModal, setSubModal] = useState(null); // {cat}
   // текущее время (тикает каждую минуту)
   const [nowTime, setNowTime] = useState(new Date());
   useEffect(() => {
@@ -1879,50 +2033,62 @@ export default function App(){
               padding:"6px 14px",fontSize:11,color:C.textDim,borderBottom:`1px solid ${C.border}`,background:C.bgSection}}>
               <span>Маркировка</span><span style={{textAlign:"center"}}>Кол-во</span><span style={{textAlign:"center"}}>💬</span>
             </div>
-            {filteredMs.map(m=>{
-              const q=stockObj[m]||0,cfg=stockCfg[m]||{};
-              const mAliases = getAliases(m);
-              const mNote = getNote(m);
-              return (
-                <div key={m} style={{display:"grid",gridTemplateColumns:"1fr auto 36px",gap:6,
-                  padding:"7px 14px",borderBottom:`1px solid ${C.border}22`,alignItems:"center",
-                  background:q===0?C.dangerDim:q>0&&cfg.threshold>0&&q<=cfg.threshold?C.warnDim:"transparent"}}>
-                  <div>
-                    <div style={{fontSize:13,color:q===0?C.textDim:C.text,fontWeight:600}}>{m}</div>
-                    {mAliases.length > 0 && (
-                      <div style={{fontSize:10,color:C.textDim,marginTop:2,lineHeight:1.3}}>
-                        = {mAliases.join(", ")}
-                      </div>
-                    )}
-                    {mNote && (
-                      <div style={{fontSize:10,color:C.warn,marginTop:2,lineHeight:1.3,fontStyle:"italic"}}>
-                        💬 {mNote}
-                      </div>
-                    )}
+            {(() => {
+              // Группировка по подкатегориям
+              const catSubs = getSubcategories(cat);
+              const subNames = Object.keys(catSubs);
+              const allSubMarkers = new Set();
+              Object.values(catSubs).forEach(ms => ms.forEach(m => allSubMarkers.add(m)));
+              const renderStockRow = (m, indent) => {
+                const q=stockObj[m]||0,cfg=stockCfg[m]||{};
+                const mAliases = getAliases(m);
+                const mNote = getNote(m);
+                return (
+                  <div key={m} style={{display:"grid",gridTemplateColumns:"1fr auto 36px",gap:6,
+                    padding:`7px 14px ${indent?"7px 14px 7px 28px":""}`,borderBottom:`1px solid ${C.border}22`,alignItems:"center",
+                    background:q===0?C.dangerDim:q>0&&cfg.threshold>0&&q<=cfg.threshold?C.warnDim:"transparent"}}>
+                    <div>
+                      <div style={{fontSize:13,color:q===0?C.textDim:C.text,fontWeight:600}}>{m}</div>
+                      {mAliases.length > 0 && <div style={{fontSize:10,color:C.textDim,marginTop:2,lineHeight:1.3}}>= {mAliases.join(", ")}</div>}
+                      {mNote && <div style={{fontSize:10,color:C.warn,marginTop:2,lineHeight:1.3,fontStyle:"italic"}}>💬 {mNote}</div>}
+                    </div>
+                    <StepperInput value={q} onChange={async nq=>{
+                      const ns={...stockObj,[m]:nq};
+                      if(isWS){setStockWS(p=>({...p,[workshop]:ns}));debouncedSave(`stock:ws:${workshop}`,ns);}
+                      else{setStockMain(ns);debouncedSave("stock:main",ns);}
+                    }} inputStyle={{color:q===0?C.danger:cfg.threshold>0&&q<=cfg.threshold?C.warn:C.success}}/>
+                    <button onClick={()=>setNoteModal({markerName:m})} title="Комментарий"
+                      style={{...s.btn(),padding:"5px 6px",fontSize:11,borderColor:mNote?C.warn+"66":C.border,color:mNote?C.warn:C.textSub}}>💬</button>
                   </div>
-                  <StepperInput value={q} onChange={async nq=>{
-                    const ns={...stockObj,[m]:nq};
-                    if(isWS){
-                      setStockWS(p=>({...p,[workshop]:ns}));
-                      debouncedSave(`stock:ws:${workshop}`, ns);
-                    } else {
-                      setStockMain(ns);
-                      debouncedSave("stock:main", ns);
-                    }
-                  }} inputStyle={{
-                    color:q===0?C.danger:cfg.threshold>0&&q<=cfg.threshold?C.warn:C.success
-                  }}/>
-                  <button onClick={()=>setNoteModal({markerName:m})} title="Комментарий"
-                    style={{
-                      ...s.btn(),
-                      padding:"5px 6px",
-                      fontSize:11,
-                      borderColor: mNote ? C.warn+"66" : C.border,
-                      color: mNote ? C.warn : C.textSub,
-                    }}>💬</button>
-                </div>
+                );
+              };
+
+              if(subNames.length === 0){
+                return filteredMs.map(m => renderStockRow(m, false));
+              }
+
+              return (
+                <>
+                  {subNames.map(sn => {
+                    const subMarkers = (catSubs[sn]||[]).filter(m => filteredMs.includes(m));
+                    if(subMarkers.length === 0) return null;
+                    return (
+                      <div key={sn}>
+                        <div style={{padding:"4px 14px 4px 20px",fontSize:10,fontWeight:800,color:C.text,background:C.bgSection,borderTop:`1px solid ${C.border}`,borderBottom:`1px solid ${C.border}`,textTransform:"uppercase",letterSpacing:"1px"}}>
+                          📁 {sn} ({subMarkers.length})
+                        </div>
+                        {subMarkers.map(m => renderStockRow(m, true))}
+                      </div>
+                    );
+                  })}
+                  {(() => {
+                    const noSub = filteredMs.filter(m => !allSubMarkers.has(m));
+                    if(noSub.length === 0) return null;
+                    return noSub.map(m => renderStockRow(m, false));
+                  })()}
+                </>
               );
-            })}
+            })()}
           </div>
         )}
       </div>
@@ -2204,6 +2370,10 @@ export default function App(){
         aliases={getAliases(aliasesModal.markerName)}
         onAdd={addAlias} onRemove={removeAlias} onPromote={promoteAlias}
         onClose={()=>setAliasesModal(null)}/>}
+      {subModal&&<SubcategoryModal cat={subModal.cat} markers={safeMarkers} subcategories={safeSubcategories}
+        onCreate={createSubcategory} onDelete={deleteSubcategory} onRename={renameSubcategory}
+        onAssign={addMarkerToSubcategory} onUnassign={removeMarkerFromSubcategory}
+        onClose={()=>setSubModal(null)}/>}
       {noteModal&&<NoteModal markerName={noteModal.markerName} currentNote={getNote(noteModal.markerName)}
         onSave={saveNote} onClose={()=>setNoteModal(null)}/>}
       {photoModal&&<PhotoViewModal photo={photoModal.url} markerName={photoModal.markerName}
@@ -2341,7 +2511,40 @@ export default function App(){
                     const search = markerSearch.toLowerCase();
                     const list = search ? inStock.filter(m => matchesSearch(m, markerSearch)) : inStock;
                     if(list.length === 0) return <div style={{padding:"8px",color:C.textDim,fontSize:12}}>Ничего не найдено. Возможно, остаток на складе 0 — пополните в разделе «Склад».</div>;
-                    return list.map(m => renderMarkerButton(m, isService));
+                    // Группировка по подкатегориям
+                    const catSubs = getSubcategories(category);
+                    const subNames = Object.keys(catSubs);
+                    if(subNames.length === 0) return list.map(m => renderMarkerButton(m, isService));
+                    const allSubMarkers = new Set();
+                    Object.values(catSubs).forEach(ms => ms.forEach(m => allSubMarkers.add(m)));
+                    return (
+                      <>
+                        {subNames.map(sn => {
+                          const subInList = (catSubs[sn]||[]).filter(m => list.includes(m));
+                          if(subInList.length === 0) return null;
+                          return (
+                            <div key={sn} style={{width:"100%",marginBottom:4}}>
+                              <div style={{fontSize:9,fontWeight:800,color:C.textSub,textTransform:"uppercase",letterSpacing:"1px",padding:"2px 4px"}}>📁 {sn}</div>
+                              <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
+                                {subInList.map(m => renderMarkerButton(m, isService))}
+                              </div>
+                            </div>
+                          );
+                        })}
+                        {(() => {
+                          const noSub = list.filter(m => !allSubMarkers.has(m));
+                          if(noSub.length === 0) return null;
+                          return (
+                            <div style={{width:"100%",marginBottom:4}}>
+                              {subNames.length > 0 && <div style={{fontSize:9,fontWeight:800,color:C.textSub,textTransform:"uppercase",letterSpacing:"1px",padding:"2px 4px"}}>Остальные</div>}
+                              <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
+                                {noSub.map(m => renderMarkerButton(m, isService))}
+                              </div>
+                            </div>
+                          );
+                        })()}
+                      </>
+                    );
                   }
 
                   // Иначе — топ-20 за год для этой категории (только из тех, что есть в наличии)
@@ -2588,6 +2791,11 @@ export default function App(){
                     style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 14px",
                       cursor:"pointer",background:expanded?C.bgCard:C.bgSection,borderBottom:expanded?`1px solid ${C.border}`:"none"}}>
                     <span style={{fontWeight:700,fontSize:13,color:C.text}}>{cat}</span>
+                    {Object.keys(getSubcategories(cat)).length > 0 && (
+                      <span style={{fontSize:10,color:C.brand,fontWeight:700,background:C.brandDim,padding:"2px 6px",border:`1px solid ${C.brand}44`}}>{Object.keys(getSubcategories(cat)).length} подк.</span>
+                    )}
+                    <button onClick={(e)=>{e.stopPropagation();setSubModal({cat});}} title="Управление подкатегориями"
+                      style={{fontSize:12,padding:"3px 8px",background:"transparent",border:`1px solid ${C.border}`,color:C.textSub,cursor:"pointer",borderRadius:0,fontWeight:700}}>📁 Подкатегории</button>
                     <div style={{display:"flex",alignItems:"center",gap:10}}>
                       <span style={{fontSize:11,color:C.textDim,fontWeight:600,textTransform:"uppercase",letterSpacing:"0.5px"}}>{withPrice}/{filtered.length} с ценой</span>
                       <span style={{color:C.textDim,fontSize:12}}>{expanded?"▲":"▼"}</span>
