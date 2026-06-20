@@ -66,7 +66,11 @@ function sortedCategories(markers){
   return Object.keys(markers).sort((a,b)=>a.localeCompare(b,"ru"));
 }
 function sortedCategoryEntries(markers){
-  return sortedCategories(markers).map(cat=>[cat, markers[cat]]);
+  // Каждую категорию сортируем внутри по алфавиту
+  return sortedCategories(markers).map(cat=>{
+    const sortedList = [...(markers[cat]||[])].sort((a,b)=>a.localeCompare(b,"ru"));
+    return [cat, sortedList];
+  });
 }
 
 function NumInput({ value, onChange, style, min="0", placeholder="" }) {
@@ -167,7 +171,7 @@ const C = {
   begemotDim:"#f3e8ff",
   // Типы записей
   refund:"#f97316",      // возврат — оранжевый
-  refundDim:"#fff7ed",
+  dangerDim:"#fff7ed",
 };
 
 const s = {
@@ -176,9 +180,9 @@ const s = {
   label:{ fontSize:10, color:C.textSub, marginBottom:6, display:"block", fontWeight:700, textTransform:"uppercase", letterSpacing:"1px" },
   input:{ background:C.bgInput, border:`1px solid ${C.border}`, borderRadius:0, color:C.text, padding:"8px 12px", fontSize:14, width:"100%", boxSizing:"border-box", outline:"none", fontFamily:"inherit" },
   btn:(v="default")=>({
-    background:v==="accent"?C.brand:v==="danger"?C.dangerDim:v==="warn"?C.warnDim:v==="refund"?C.refundDim:v==="success"?C.success:v==="dark"?C.text:C.bgCard,
-    color:v==="accent"?"#fff":v==="danger"?C.danger:v==="warn"?C.warn:v==="refund"?C.refund:v==="success"?"#fff":v==="dark"?"#fff":C.text,
-    border:`1px solid ${v==="accent"?C.brand:v==="danger"?C.danger:v==="warn"?C.warn:v==="refund"?C.refund:v==="success"?C.success:v==="dark"?C.text:C.border}`,
+    background:v==="accent"?C.brand:v==="danger"?C.dangerDim:v==="warn"?C.warnDim:v==="refund"?C.dangerDim:v==="success"?C.success:v==="dark"?C.text:C.bgCard,
+    color:v==="accent"?"#fff":v==="danger"?C.danger:v==="warn"?C.warn:v==="refund"?C.danger:v==="success"?"#fff":v==="dark"?"#fff":C.text,
+    border:`1px solid ${v==="accent"?C.brand:v==="danger"?C.danger:v==="warn"?C.warn:v==="refund"?C.danger:v==="success"?C.success:v==="dark"?C.text:C.border}`,
     borderRadius:0, padding:"8px 14px", fontSize:13, cursor:"pointer", fontWeight:700, textTransform:"uppercase", letterSpacing:"0.5px",
   }),
   tag:(color)=>({ background:color+"22", color, border:`1px solid ${color}44`, borderRadius:0, padding:"2px 8px", fontSize:11, display:"inline-block", fontWeight:700, textTransform:"uppercase", letterSpacing:"0.5px" }),
@@ -227,7 +231,7 @@ function StockBadge({ qty, threshold }){
 
 // Бейдж типа записи
 function TypeBadge({ recordType }){
-  if(recordType === "refund") return <span style={{...s.tag(C.refund), fontSize:10}}>↩ Возврат</span>;
+  if(recordType === "refund") return <span style={{...s.tag(C.danger), fontSize:10}}>↩ Возврат</span>;
   return null;
 }
 
@@ -237,33 +241,35 @@ function MarkerPicker({ markers, value, onChange, extraLabel }){
   const filtered = search.trim()
     ? allM.filter(({cat,m})=>m.toLowerCase().includes(search.toLowerCase())||cat.toLowerCase().includes(search.toLowerCase()))
     : allM;
+  // Сортируем по категориям и внутри по алфавиту
   const grouped = {};
   filtered.forEach(({cat,m})=>{ if(!grouped[cat]) grouped[cat]=[]; grouped[cat].push(m); });
+  Object.keys(grouped).forEach(cat => grouped[cat].sort((a,b)=>a.localeCompare(b,"ru")));
   return (
     <div>
       <input value={search} onChange={e=>setSearch(e.target.value)}
         placeholder="Поиск маркировки..." style={{...s.input,marginBottom:8}}/>
-      <div style={{maxHeight:200,overflowY:"auto",border:`1px solid ${C.border}`,borderRadius:8,background:C.bgInput}}>
-        {Object.entries(grouped).length===0
+      <div style={{maxHeight:240,overflowY:"auto",border:`1px solid ${C.border}`,background:C.bgCard}}>
+        {Object.entries(grouped).sort((a,b)=>a[0].localeCompare(b[0],"ru")).length===0
           ? <div style={{padding:"10px 14px",fontSize:13,color:C.textDim}}>Ничего не найдено</div>
-          : Object.entries(grouped).map(([cat,ms])=>(
+          : Object.entries(grouped).sort((a,b)=>a[0].localeCompare(b[0],"ru")).map(([cat,ms])=>(
             <div key={cat}>
-              <div style={{padding:"5px 12px",fontSize:11,fontWeight:700,color:C.textDim,background:C.bgSection,
-                borderBottom:`1px solid ${C.border}`,textTransform:"uppercase"}}>{cat}</div>
+              <div style={{padding:"6px 12px",fontSize:11,fontWeight:800,color:C.text,background:C.bgSection,
+                borderBottom:`1px solid ${C.border}`,textTransform:"uppercase",letterSpacing:"1px"}}>{cat}</div>
               {ms.map(m=>(
                 <div key={m} onClick={()=>{onChange(m);setSearch("");}}
                   style={{padding:"8px 14px",fontSize:13,cursor:"pointer",display:"flex",justifyContent:"space-between",
                     background:value===m?C.brandDim:"transparent",color:value===m?C.brand:C.text,
                     borderBottom:`1px solid ${C.border}22`}}>
                   <span>{m}</span>
-                  {extraLabel&&<span style={{color:C.textDim,fontSize:12}}>{extraLabel(m)}</span>}
+                  {extraLabel&&<span style={{color:C.text,fontSize:12,fontWeight:600}}>{extraLabel(m)}</span>}
                 </div>
               ))}
             </div>
           ))
         }
       </div>
-      {value&&<div style={{marginTop:6,fontSize:12,color:C.brand}}>Выбрано: <b>{value}</b></div>}
+      {value&&<div style={{marginTop:6,fontSize:12,color:C.brand,fontWeight:700}}>Выбрано: <b>{value}</b></div>}
     </div>
   );
 }
@@ -292,9 +298,9 @@ function EditModal({ record, idx, markers, onSave, onDelete, onClose }){
           {[["sale","Продажа"],["refund","Возврат от клиента"]].map(([id,label])=>(
             <button key={id} type="button" onClick={()=>setRecordType(id)} style={{
               flex:1,padding:"7px 0",fontSize:12,fontWeight:600,borderRadius:8,cursor:"pointer",
-              border:`1px solid ${recordType===id?(id==="refund"?C.refund:C.brand):C.border}`,
-              background:recordType===id?(id==="refund"?C.refundDim:C.brandDim):C.bgInput,
-              color:recordType===id?(id==="refund"?C.refund:C.brand):C.textSub
+              border:`1px solid ${recordType===id?(id==="refund"?C.danger:C.brand):C.border}`,
+              background:recordType===id?(id==="refund"?C.dangerDim:C.brandDim):C.bgInput,
+              color:recordType===id?(id==="refund"?C.danger:C.brand):C.textSub
             }}>{label}</button>
           ))}
         </div>
@@ -315,7 +321,7 @@ function EditModal({ record, idx, markers, onSave, onDelete, onClose }){
         </div>
         <input value={mrk} onChange={e=>setMrk(e.target.value)} style={{...s.input,marginBottom:10}} placeholder="или своя маркировка"/>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
-          <div><label style={s.label}>Изготовлено</label><StepperInput value={qty} onChange={setQty} style={{width:"100%"}} inputStyle={{width:"100%"}}/></div>
+          <div><label style={s.label}>Количество</label><StepperInput value={qty} onChange={setQty} style={{width:"100%"}} inputStyle={{width:"100%"}}/></div>
           <div><label style={s.label}>Брак</label><StepperInput value={defect} onChange={setDefect} style={{width:"100%"}} inputStyle={{width:"100%"}}/></div>
         </div>
         {recordType==="sale"&&qty>0&&defect>0&&(
@@ -323,7 +329,7 @@ function EditModal({ record, idx, markers, onSave, onDelete, onClose }){
             Всего изготовлено: <b>{qty+defect} шт</b> · Списание со склада: <b>{qty+defect} шт</b> · Сумма: <b>{qty} шт</b> × цена
           </div>
         )}
-        <label style={s.label}>Сумма, руб {recordType==="refund"&&<span style={{color:C.refund}}>(будет вычтена)</span>}</label>
+        <label style={s.label}>Сумма, руб {recordType==="refund"&&<span style={{color:C.danger}}>(будет вычтена)</span>}</label>
         <NumInput value={amount} onChange={setAmount} min="0" style={{...s.input,marginBottom:10}}/>
         <label style={s.label}>Комментарий</label>
         <textarea value={comment} onChange={e=>setComment(e.target.value)} rows={2} style={{...s.input,resize:"vertical",marginBottom:16}}/>
@@ -348,15 +354,17 @@ function StatsBreakdown({ data, totalAmt, totalQty }){
   const byCategory = {};
   data.forEach(r=>{
     const sign = signOf(r);
-    if(!byCategory[r.category]) byCategory[r.category]={qty:0,defect:0,amount:0,markers:{}};
+    if(!byCategory[r.category]) byCategory[r.category]={qty:0,defect:0,amount:0,refundQty:0,markers:{}};
     byCategory[r.category].qty += r.qty * sign;
     byCategory[r.category].defect += r.defect;
     byCategory[r.category].amount += r.amount * sign;
+    if(r.recordType === "refund") byCategory[r.category].refundQty = (byCategory[r.category].refundQty||0) + r.qty;
     const mk=r.marker;
-    if(!byCategory[r.category].markers[mk]) byCategory[r.category].markers[mk]={qty:0,defect:0,amount:0};
+    if(!byCategory[r.category].markers[mk]) byCategory[r.category].markers[mk]={qty:0,defect:0,amount:0,refundQty:0};
     byCategory[r.category].markers[mk].qty += r.qty * sign;
     byCategory[r.category].markers[mk].defect += r.defect;
     byCategory[r.category].markers[mk].amount += r.amount * sign;
+    if(r.recordType === "refund") byCategory[r.category].markers[mk].refundQty = (byCategory[r.category].markers[mk].refundQty||0) + r.qty;
   });
   if(Object.keys(byCategory).length===0) return <div style={{fontSize:13,color:C.textDim}}>Нет данных</div>;
   return (
@@ -370,13 +378,14 @@ function StatsBreakdown({ data, totalAmt, totalQty }){
         <div key={cat} style={{...s.card,padding:0,overflow:"hidden",marginBottom:8}}>
           <div onClick={()=>setExpanded(p=>({...p,[cat]:!p[cat]}))}
             style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 14px",cursor:"pointer"}}>
-            <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
               <span style={{fontWeight:700,fontSize:13}}>{cat}</span>
-              {d.defect>0&&<span style={s.tag(C.warn)}>{d.defect} брак</span>}
+              {d.defect>0&&<span style={s.tag(C.danger)}>{d.defect} брак</span>}
+              {d.refundQty>0&&<span style={s.tag(C.danger)}>{d.refundQty} возврат</span>}
             </div>
             <div style={{display:"flex",alignItems:"center",gap:10}}>
               <div style={{textAlign:"right"}}>
-                <div style={{color:d.amount>=0?C.text:C.refund,fontWeight:700,fontSize:13}}>{fmt(d.amount)} р</div>
+                <div style={{color:d.amount>=0?C.text:C.danger,fontWeight:700,fontSize:13}}>{fmt(d.amount)} р</div>
                 <div style={{fontSize:11,color:C.textSub}}>{fmt(d.qty)} шт · {totalAmt>0?(Math.abs(d.amount)/Math.abs(totalAmt)*100).toFixed(0):0}%</div>
               </div>
               <span style={{color:C.textDim,fontSize:12}}>{expanded[cat]?"▲":"▼"}</span>
@@ -389,8 +398,8 @@ function StatsBreakdown({ data, totalAmt, totalQty }){
                   padding:"7px 14px",borderBottom:`1px solid ${C.border}22`,fontSize:13}}>
                   <span style={{color:C.textSub}}>{mk}</span>
                   <div style={{textAlign:"right"}}>
-                    <div style={{color:md.amount>=0?C.text:C.refund}}>{fmt(md.amount)} р</div>
-                    <div style={{fontSize:11,color:C.textDim}}>{fmt(md.qty)} шт{md.defect?` · брак ${md.defect}`:""}</div>
+                    <div style={{color:md.amount>=0?C.text:C.danger}}>{fmt(md.amount)} р</div>
+                    <div style={{fontSize:11,color:C.textDim}}>{fmt(md.qty)} шт{md.defect?` · брак ${md.defect}`:""}{md.refundQty?` · возврат ${md.refundQty}`:""}</div>
                   </div>
                 </div>
               ))}
@@ -481,11 +490,11 @@ function DayRecordsList({ dayRecs, records, onEditRecord }){
             const isOnlyDefect = !isRefund && r.qty === 0 && r.defect > 0;
             return (
               <div key={i} onClick={()=>onEditRecord({record:r,globalIdx})}
-                style={{...s.card,cursor:"pointer",borderLeft:`3px solid ${isRefund?C.refund:isOnlyDefect?C.warn:C.brand+"88"}`}}>
+                style={{...s.card,cursor:"pointer",borderLeft:`3px solid ${isRefund?C.danger:isOnlyDefect?C.warn:C.brand+"88"}`}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                   <div style={{display:"flex",alignItems:"center",gap:8}}>
                     {isRefund
-                      ? <span style={{color:C.refund,fontWeight:700,fontSize:16}}>↩</span>
+                      ? <span style={{color:C.danger,fontWeight:700,fontSize:16}}>↩</span>
                       : isOnlyDefect
                         ? <span style={{color:C.warn,fontWeight:700,fontSize:16}}>⚠</span>
                         : <span style={{color:C.success,fontWeight:700,fontSize:16}}>↑</span>}
@@ -494,8 +503,8 @@ function DayRecordsList({ dayRecs, records, onEditRecord }){
                     {isOnlyDefect&&<span style={{...s.tag(C.warn),fontSize:10}}>только брак</span>}
                   </div>
                   <div style={{display:"flex",gap:8,alignItems:"center"}}>
-                    <span style={{fontSize:12,color:isRefund?C.refund:isOnlyDefect?C.warn:C.textSub}}>
-                      {isRefund?"−":""}{r.qty} шт{r.defect>0?` · брак ${r.defect}`:""} · {fmt(r.amount)} р
+                    <span style={{fontSize:12,color:isRefund?C.danger:isOnlyDefect?C.warn:C.textSub}}>
+                      {isRefund?"−":""}{r.qty} шт{r.defect>0?` · брак ${r.defect}`:""}{isRefund?` · возврат`:""} · {fmt(r.amount)} р
                     </span>
                     <span style={{fontSize:11,color:C.brand}}>✎</span>
                   </div>
@@ -567,7 +576,7 @@ function YearMonthCard({ monthKey, monthData, monthName, workshop, onEditRecord,
         </div>
         <div style={{display:"flex",alignItems:"center",gap:10}}>
           <div style={{textAlign:"right"}}>
-            <div style={{color:monthData.amount>=0?C.brand:C.refund,fontWeight:700,fontSize:14}}>{fmt(monthData.amount)} р</div>
+            <div style={{color:monthData.amount>=0?C.text:C.danger,fontWeight:700,fontSize:14}}>{fmt(monthData.amount)} р</div>
             <div style={{fontSize:11,color:C.textSub}}>{fmt(monthData.qty)} шт · {monthData.days.size} дн.</div>
           </div>
           <span style={{color:C.textDim,fontSize:14}}>{expanded?"▲":"▼"}</span>
@@ -621,8 +630,8 @@ function DayRow({ dateLabel, dayData, workshop, onEditRecord, allRecords }){
         style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 12px",cursor:"pointer",background:C.bgInput}}>
         <span style={{color:C.textSub,fontSize:12}}>{dateLabel}</span>
         <div style={{display:"flex",gap:10,alignItems:"center",fontSize:12}}>
-          <span style={{color:dayData.amount>=0?C.brand:C.refund,fontWeight:600}}>{fmt(dayData.amount)} р</span>
-          <span style={{color:C.textDim}}>{dayData.qty} шт{dayData.defect>0?` · брак ${dayData.defect}`:""}</span>
+          <span style={{color:dayData.amount>=0?C.text:C.danger,fontWeight:600}}>{fmt(dayData.amount)} р</span>
+          <span style={{color:C.textDim}}>{dayData.qty} шт{dayData.defect>0?` · брак ${dayData.defect}`:""}{dayData.records.some(r=>r.recordType==="refund")?` · возврат ${dayData.records.filter(r=>r.recordType==="refund").reduce((s,r)=>s+r.qty,0)}`:""}</span>
           <span style={{color:C.textDim,fontSize:10}}>{expanded?"▲":"▼"}</span>
         </div>
       </div>
@@ -637,16 +646,16 @@ function DayRow({ dateLabel, dayData, workshop, onEditRecord, allRecords }){
                 style={{display:"flex",justifyContent:"space-between",alignItems:"center",
                   padding:"5px 0",cursor:"pointer",borderBottom:`1px solid ${C.border}22`}}>
                 <div style={{display:"flex",alignItems:"center",gap:6,fontSize:12}}>
-                  <span style={{color:isRefund?C.refund:isOnlyDefect?C.warn:C.success}}>
+                  <span style={{color:isRefund?C.danger:isOnlyDefect?C.warn:C.success}}>
                     {isRefund?"↩":isOnlyDefect?"⚠":"↑"}
                   </span>
                   <span style={{color:C.text}}>{r.marker}</span>
-                  {isRefund && <span style={{...s.tag(C.refund),fontSize:9,padding:"1px 5px"}}>возврат</span>}
+                  {isRefund && <span style={{...s.tag(C.danger),fontSize:9,padding:"1px 5px"}}>возврат</span>}
                   {isOnlyDefect && <span style={{...s.tag(C.warn),fontSize:9,padding:"1px 5px"}}>брак</span>}
                 </div>
                 <div style={{display:"flex",gap:6,fontSize:11,color:C.textSub}}>
                   <span>{isRefund?"−":""}{r.qty} шт{r.defect>0?`/${r.defect}`:""}</span>
-                  <span style={{color:isRefund?C.refund:C.brand}}>{fmt(r.amount)} р</span>
+                  <span style={{color:isRefund?C.danger:C.brand}}>{fmt(r.amount)} р</span>
                   <span style={{color:C.brand}}>✎</span>
                 </div>
               </div>
@@ -1076,7 +1085,7 @@ export default function App(){
   const [notes, setNotes] = useState({});      // {маркировка: "комментарий"}
 
   // форма записи
-  const [category, setCategory] = useState("Домофонные");
+  const [category, setCategory] = useState("Автомобильные");
   const [marker, setMarker] = useState("");
   const [qty, setQty] = useState(0);
   const [defect, setDefect] = useState(0);
@@ -1627,27 +1636,37 @@ export default function App(){
 
   // ── Панель управления складом: поиск + сортировка + фильтры ──
   function StockControls({ search, setSearch, sort, setSort, filter, setFilter }){
+    // Локальный state для поля поиска — решает проблему потери фокуса
+    const [localSearch, setLocalSearch] = useState(search);
+    const searchTimer = useRef(null);
+    useEffect(() => { setLocalSearch(search); }, [search]);
+    const onSearchChange = (v) => {
+      setLocalSearch(v);
+      if(searchTimer.current) clearTimeout(searchTimer.current);
+      searchTimer.current = setTimeout(() => setSearch(v), 250);
+    };
     const filterBtn = (id, label, color) => (
       <button type="button" onClick={()=>setFilter(id)} style={{
-        padding:"5px 10px",fontSize:11,fontWeight:600,borderRadius:6,cursor:"pointer",
+        padding:"5px 10px",fontSize:11,fontWeight:700,borderRadius:0,cursor:"pointer",
         border:`1px solid ${filter===id?(color||C.brand):C.border}`,
-        background:filter===id?((color||C.brand)+"22"):C.bgInput,
+        background:filter===id?((color||C.brand)+"22"):C.bgCard,
         color:filter===id?(color||C.brand):C.textSub,
+        textTransform:"uppercase",letterSpacing:"0.5px",
       }}>{label}</button>
     );
     return (
       <div style={{marginBottom:12}}>
-        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="🔍 Поиск по маркировке..." style={{...s.input,marginBottom:8}}/>
+        <input value={localSearch} onChange={e=>onSearchChange(e.target.value)} placeholder="🔍 Поиск по маркировке..." style={{...s.input,marginBottom:8}} autoFocus/>
         <div style={{display:"flex",gap:6,marginBottom:8,flexWrap:"wrap"}}>
           {filterBtn("all","Все",C.brand)}
           {filterBtn("with-stock","С остатком",C.success)}
           {filterBtn("empty","Пустые",C.danger)}
-          {filterBtn("low","⚠ Мало",C.warn)}
         </div>
         <div style={{display:"flex",gap:6,alignItems:"center",fontSize:11,color:C.textSub,marginBottom:8}}>
-          <span>Сорт.:</span>
-          <select value={sort} onChange={e=>setSort(e.target.value)} style={{...s.input,padding:"4px 8px",fontSize:11,flex:1}}>
+          <span style={{fontWeight:700,textTransform:"uppercase",letterSpacing:"0.5px"}}>Сорт.:</span>
+          <select value={sort} onChange={e=>setSort(e.target.value)} style={{...s.input,padding:"6px 8px",fontSize:11,flex:1}}>
             <option value="alpha">По алфавиту (А→Я)</option>
+            <option value="alpha-desc">По алфавиту (Я→А)</option>
             <option value="qty-desc">По остатку (больше → меньше)</option>
             <option value="qty-asc">По остатку (меньше → больше)</option>
             <option value="empty-first">Сначала пустые</option>
@@ -1725,6 +1744,8 @@ export default function App(){
     filtered = filtered.map((m, idx) => ({ m, idx }));
     if(stockSort === "alpha"){
       filtered.sort((a,b) => a.m.localeCompare(b.m, "ru"));
+    } else if(stockSort === "alpha-desc"){
+      filtered.sort((a,b) => b.m.localeCompare(a.m, "ru"));
     } else if(stockSort === "qty-desc"){
       filtered.sort((a,b) => (stockObj[b.m]||0) - (stockObj[a.m]||0));
     } else if(stockSort === "qty-asc"){
@@ -1782,14 +1803,13 @@ export default function App(){
         </div>
         {expanded && (
           <div style={{borderTop:`1px solid ${C.border}`,padding:"6px 14px",display:"flex",gap:5,flexWrap:"wrap",alignItems:"center",background:C.bgSection,borderBottom:`1px solid ${C.border}`}}>
-            <span style={{fontSize:10,color:C.textDim,marginRight:4}}>Фильтр:</span>
+            <span style={{fontSize:10,color:C.textDim,marginRight:4,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.5px"}}>Фильтр:</span>
             {catFilterBtn("all","Все",C.brand)}
             {catFilterBtn("with-stock","С остатком",C.success)}
             {catFilterBtn("empty","Пустые",C.danger)}
-            {hasLow && catFilterBtn("low","⚠ Мало",C.warn)}
             {activeCatFilter !== "all" && (
               <button type="button" onClick={(e)=>{e.stopPropagation();setCatFilter(p=>{const n={...p};delete n[cat];return n;});}} style={{
-                padding:"2px 7px",fontSize:10,borderRadius:5,cursor:"pointer",
+                padding:"2px 7px",fontSize:10,borderRadius:0,cursor:"pointer",
                 border:`1px solid ${C.border}`,background:"transparent",color:C.textSub,
               }}>✕ Сбросить</button>
             )}
@@ -1799,7 +1819,7 @@ export default function App(){
           <div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 150px 36px",gap:6,
               padding:"6px 14px",fontSize:11,color:C.textDim,borderBottom:`1px solid ${C.border}`,background:C.bgSection}}>
-              <span>Маркировка</span><span style={{textAlign:"center"}}>Кол-во</span><span></span>
+              <span>Маркировка</span><span style={{textAlign:"center"}}>Кол-во</span><span style={{textAlign:"center"}}>💬</span>
             </div>
             {filteredMs.map(m=>{
               const q=stockObj[m]||0,cfg=stockCfg[m]||{};
@@ -1871,7 +1891,7 @@ export default function App(){
             <StatCard label="Общая сумма" value={fmt(totalAmt)+" р"} color={C.success}/>
             <StatCard label="Брак" value={fmt(totalDef)} color={totalDef>0?C.warn:undefined}/>
             <StatCard label="% брака" value={totalQty>0?(totalDef/Math.abs(totalQty)*100).toFixed(1)+"%":"0%"} color={totalDef>0?C.warn:undefined}/>
-            {totalRefundQty > 0 && <StatCard label={`Возвратов: ${totalRefundQty} шт`} value={"−"+fmt(totalRefundAmt)+" р"} color={C.refund}/>}
+            {totalRefundQty > 0 && <StatCard label={`Возвратов: ${totalRefundQty} шт`} value={"−"+fmt(totalRefundAmt)+" р"} color={C.danger}/>}
             {workshop==="SMART"&&<StatCard label="Доход 40%" value={fmt(totalAmt*INCOME_PCT)+" р"} color={C.success}/>}
           </div>
           <div style={{fontSize:10,fontWeight:700,color:C.textSub,marginBottom:8,textTransform:"uppercase",letterSpacing:"1px"}}>ПО КАТЕГОРИЯМ</div>
@@ -1905,7 +1925,7 @@ export default function App(){
             <StatCard label="% брака" value={totalQty>0?(totalDef/Math.abs(totalQty)*100).toFixed(1)+"%":"0%"} color={totalDef>0?C.warn:undefined}/>
             <StatCard label="Рабочих дней" value={workDays} sub="дней с записями"/>
             <StatCard label="Среднее/день" value={fmt(avgPerDay)+" р"} sub="по рабочим дням"/>
-            {totalRefundQty > 0 && <StatCard label={`Возвратов: ${totalRefundQty} шт`} value={"−"+fmt(totalRefundAmt)+" р"} color={C.refund}/>}
+            {totalRefundQty > 0 && <StatCard label={`Возвратов: ${totalRefundQty} шт`} value={"−"+fmt(totalRefundAmt)+" р"} color={C.danger}/>}
             {workshop==="SMART"&&<StatCard label="Доход 40%" value={fmt(totalAmt*INCOME_PCT)+" р"} color={C.success}/>}
           </div>
           <div style={{fontSize:10,fontWeight:700,color:C.textSub,marginBottom:8,textTransform:"uppercase",letterSpacing:"1px"}}>ПО КАТЕГОРИЯМ</div>
@@ -1918,8 +1938,8 @@ export default function App(){
               <div key={dk} style={{display:"flex",justifyContent:"space-between",padding:"7px 0",borderBottom:`1px solid ${C.border}`,fontSize:13}}>
                 <span style={{color:C.textSub}}>{label}</span>
                 <div style={{textAlign:"right"}}>
-                  <span style={{color:d.amount>=0?C.brand:C.refund,marginRight:12}}>{fmt(d.amount)} р</span>
-                  <span style={{color:C.textSub,fontSize:12}}>{d.qty} шт{d.defect?` · брак ${d.defect}`:""}</span>
+                  <span style={{color:d.amount>=0?C.text:C.danger,marginRight:12,fontWeight:700}}>{fmt(d.amount)} р</span>
+                  <span style={{color:C.textSub,fontSize:12}}>{d.qty} шт{d.defect?` · брак ${d.defect}`:""}{(() => { const refundCount = data.filter(r=>dateOf(r.timestamp)===dk && r.recordType==="refund").reduce((s,r)=>s+r.qty,0); return refundCount > 0 ? ` · возврат ${refundCount}` : ""; })()}</span>
                 </div>
               </div>
             );
@@ -1954,7 +1974,7 @@ export default function App(){
             <StatCard label="Общая сумма" value={fmt(totalAmt)+" р"} color={C.success}/>
             <StatCard label="Брак" value={fmt(totalDef)} color={totalDef>0?C.warn:undefined}/>
             <StatCard label="% брака" value={totalQty>0?(totalDef/Math.abs(totalQty)*100).toFixed(1)+"%":"0%"} color={totalDef>0?C.warn:undefined}/>
-            {totalRefundQty > 0 && <StatCard label={`Возвратов: ${totalRefundQty} шт`} value={"−"+fmt(totalRefundAmt)+" р"} color={C.refund}/>}
+            {totalRefundQty > 0 && <StatCard label={`Возвратов: ${totalRefundQty} шт`} value={"−"+fmt(totalRefundAmt)+" р"} color={C.danger}/>}
             {workshop==="SMART"&&<StatCard label="Доход 40%" value={fmt(totalAmt*INCOME_PCT)+" р"} color={C.success}/>}
           </div>
           <div style={{fontSize:10,fontWeight:700,color:C.textSub,marginBottom:8,textTransform:"uppercase",letterSpacing:"1px"}}>ПО МЕСЯЦАМ — нажмите для раскрытия по дням</div>
@@ -2181,14 +2201,14 @@ export default function App(){
                     }
                   }} style={{
                     flex:1,padding:"8px 0",fontSize:12,fontWeight:600,borderRadius:8,cursor:"pointer",
-                    border:`1px solid ${recordType===id?(id==="refund"?C.refund:C.brand):C.border}`,
-                    background:recordType===id?(id==="refund"?C.refundDim:C.brandDim):C.bgInput,
-                    color:recordType===id?(id==="refund"?C.refund:C.brand):C.textSub
+                    border:`1px solid ${recordType===id?(id==="refund"?C.danger:C.brand):C.border}`,
+                    background:recordType===id?(id==="refund"?C.dangerDim:C.brandDim):C.bgInput,
+                    color:recordType===id?(id==="refund"?C.danger:C.brand):C.textSub
                   }}>{label}</button>
                 ))}
               </div>
               {recordType==="refund"&&(
-                <div style={{fontSize:11,color:C.refund,marginTop:4,lineHeight:1.5}}>
+                <div style={{fontSize:11,color:C.danger,marginTop:4,lineHeight:1.5}}>
                   ↩ Сумма будет вычтена из статистики. Заготовка на склад не возвращается.
                 </div>
               )}
@@ -2297,7 +2317,7 @@ export default function App(){
             )}
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
               <div>
-                <label style={s.label}>Изготовлено</label>
+                <label style={s.label}>Количество</label>
                 <StepperInput value={qty} onChange={setQty} style={{width:"100%"}} inputStyle={{width:"100%"}}/>
               </div>
               <div>
@@ -2333,7 +2353,7 @@ export default function App(){
               <NumInput value={amount} onChange={v=>{if(manualAmount||recordType==="refund"||!prices[marker])setAmount(v);}}
                 style={{...s.input,opacity:(!manualAmount&&recordType!=="refund"&&!!prices[marker])?.6:1}}/>
               {recordType==="refund"
-                ? <div style={{fontSize:11,color:C.refund,marginTop:3}}>Возврат: сумма вводится вручную</div>
+                ? <div style={{fontSize:11,color:C.danger,marginTop:3}}>Возврат: сумма вводится вручную</div>
                 : prices[marker]&&!manualAmount && <div style={{fontSize:11,color:C.textDim,marginTop:3}}>Цена за ед.: {fmt(prices[marker])} р · авто</div>}
             </div>
             <div style={{marginBottom:16}}>
@@ -2351,15 +2371,15 @@ export default function App(){
                 {records.map((r,gi)=>r.workshop===workshop?{r,gi}:null).filter(Boolean).slice(-5).reverse().map(({r,gi})=>{
                   const isRefund = r.recordType==="refund";
                   return (
-                    <div key={gi} style={{...s.card,cursor:"pointer",borderLeft:`3px solid ${isRefund?C.refund:C.brand+"88"}`}} onClick={()=>setEditRec({record:r,globalIdx:gi})}>
+                    <div key={gi} style={{...s.card,cursor:"pointer",borderLeft:`3px solid ${isRefund?C.danger:C.brand+"88"}`}} onClick={()=>setEditRec({record:r,globalIdx:gi})}>
                       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                         <div style={{display:"flex",alignItems:"center",gap:8}}>
-                          <span style={{color:isRefund?C.refund:C.success,fontWeight:700,fontSize:16}}>{isRefund?"↩":"↑"}</span>
+                          <span style={{color:isRefund?C.danger:C.success,fontWeight:700,fontSize:16}}>{isRefund?"↩":"↑"}</span>
                           <span style={{fontWeight:600}}>{r.marker}</span>
                           {isRefund&&<TypeBadge recordType="refund"/>}
                         </div>
                         <div style={{display:"flex",gap:8,alignItems:"center"}}>
-                          <span style={{fontSize:12,color:isRefund?C.refund:C.textSub}}>{isRefund?"−":""}{r.qty} шт · {fmt(r.amount)} р</span>
+                          <span style={{fontSize:12,color:isRefund?C.danger:C.textSub}}>{isRefund?"−":""}{r.qty} шт · {fmt(r.amount)} р</span>
                           <span style={{fontSize:11,color:C.brand}}>✎</span>
                         </div>
                       </div>
