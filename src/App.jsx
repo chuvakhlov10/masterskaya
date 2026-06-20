@@ -32,6 +32,17 @@ async function sha256(text){
 
 function fmt(n){ return new Intl.NumberFormat("ru-RU").format(Math.round((n||0)*100)/100); }
 function todayStr(){ const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; }
+function todayFullStr(){
+  const d = new Date();
+  const days = ["Воскресенье","Понедельник","Вторник","Среда","Четверг","Пятница","Суббота"];
+  const dayName = days[d.getDay()];
+  const time = `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`;
+  return `${dayName}, ${todayStr()} · ${time}`;
+}
+function todayTimeStr(){
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`;
+}
 function dateOf(ts){ const d=new Date(ts); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; }
 function monthOf(ts){ const d=new Date(ts); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`; }
 const MONTH_NAMES = ["Январь","Февраль","Март","Апрель","Май","Июнь","Июль","Август","Сентябрь","Октябрь","Ноябрь","Декабрь"];
@@ -175,17 +186,24 @@ const s = {
 
 function Tabs({ tabs, active, onChange }){
   return (
-    <div style={{display:"flex",gap:0,marginBottom:24}}>
-      {tabs.map(t=>(
-        <button key={t.id} onClick={()=>onChange(t.id)} style={{
-          flex:1,padding:"10px 4px",fontSize:11,fontWeight:700,border:"none",cursor:"pointer",
-          background:"transparent",
-          color:active===t.id?C.brand:C.textDim,
-          borderTop:`2px solid ${active===t.id?C.brand:"transparent"}`,
-          textTransform:"uppercase",letterSpacing:"1px",
-          transition:"all .15s",
-        }}>{t.label}</button>
-      ))}
+    <div style={{display:"flex",gap:1,marginBottom:24,background:C.border,padding:1}}>
+      {tabs.map(t=>{
+        const isActive = active === t.id;
+        return (
+          <button key={t.id} onClick={()=>onChange(t.id)} style={{
+            flex:1,padding:"12px 4px",fontSize:11,fontWeight:700,border:"none",cursor:"pointer",
+            background:isActive?C.bgCard:C.bgSection,
+            color:isActive?C.brand:C.textSub,
+            borderTop:`3px solid ${isActive?C.brand:"transparent"}`,
+            textTransform:"uppercase",letterSpacing:"0.8px",
+            transition:"all .15s",
+            display:"flex",flexDirection:"column",alignItems:"center",gap:4,
+          }}>
+            <span style={{fontSize:16}}>{t.icon}</span>
+            <span>{t.label}</span>
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -297,8 +315,8 @@ function EditModal({ record, idx, markers, onSave, onDelete, onClose }){
         </div>
         <input value={mrk} onChange={e=>setMrk(e.target.value)} style={{...s.input,marginBottom:10}} placeholder="или своя маркировка"/>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
-          <div><label style={s.label}>Готовых <span style={{color:C.textDim,fontSize:10}}>(годные)</span></label><StepperInput value={qty} onChange={setQty} style={{width:"100%"}} inputStyle={{width:"100%"}}/></div>
-          <div><label style={s.label}>Брак <span style={{color:C.textDim,fontSize:10}}>(испорченные)</span></label><StepperInput value={defect} onChange={setDefect} style={{width:"100%"}} inputStyle={{width:"100%"}}/></div>
+          <div><label style={s.label}>Изготовлено</label><StepperInput value={qty} onChange={setQty} style={{width:"100%"}} inputStyle={{width:"100%"}}/></div>
+          <div><label style={s.label}>Брак</label><StepperInput value={defect} onChange={setDefect} style={{width:"100%"}} inputStyle={{width:"100%"}}/></div>
         </div>
         {recordType==="sale"&&qty>0&&defect>0&&(
           <div style={{fontSize:11,color:C.textDim,marginBottom:10,lineHeight:1.5}}>
@@ -566,7 +584,7 @@ function YearMonthCard({ monthKey, monthData, monthName, workshop, onEditRecord,
           {/* ПОЛНАЯ СТАТИСТИКА — как во вкладке "Месяц" */}
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
             <StatCard label="Всего ключей" value={fmt(monthData.qty)}/>
-            <StatCard label="Общая сумма" value={fmt(monthData.amount)+" р"}/>
+            <StatCard label="Общая сумма" value={fmt(monthData.amount)+" р"} color={C.success}/>
             <StatCard label="Брак" value={fmt(monthData.defect)} color={monthData.defect>0?C.warn:undefined}/>
             <StatCard label="% брака" value={monthData.qty>0?(monthData.defect/Math.abs(monthData.qty)*100).toFixed(1)+"%":"0%"} color={monthData.defect>0?C.warn:undefined}/>
             <StatCard label="Рабочих дней" value={monthData.days.size} sub="дней с записями"/>
@@ -1142,6 +1160,12 @@ export default function App(){
   const [noteModal, setNoteModal] = useState(null); // {markerName}
   // фото — модалка просмотра в полном размере
   const [photoModal, setPhotoModal] = useState(null); // {url, markerName}
+  // текущее время (тикает каждую минуту)
+  const [nowTime, setNowTime] = useState(new Date());
+  useEffect(() => {
+    const t = setInterval(() => setNowTime(new Date()), 60000);
+    return () => clearInterval(t);
+  }, []);
 
   // ── загрузка при старте ──
   useEffect(()=>{
@@ -1741,7 +1765,7 @@ export default function App(){
     return (
       <div key={cat} style={{...s.card,padding:0,overflow:"hidden",marginBottom:8}}>
         <div onClick={()=>setExpandedCats(p=>({...p,[cat]:!expanded}))}
-          style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 14px",cursor:"pointer",background:expanded?C.bgCard:"#141826"}}>
+          style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 14px",cursor:"pointer",background:expanded?C.bgCard:C.bgSection,borderBottom:expanded?`1px solid ${C.border}`:"none"}}>
           <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
             <span style={{fontWeight:700,fontSize:13}}>{cat}</span>
             <span style={{fontSize:11,color:C.textDim}}>
@@ -1784,7 +1808,7 @@ export default function App(){
               return (
                 <div key={m} style={{display:"grid",gridTemplateColumns:"1fr 150px 36px",gap:6,
                   padding:"7px 14px",borderBottom:`1px solid ${C.border}22`,alignItems:"center",
-                  background:q===0?"#16111a":q>0&&cfg.threshold>0&&q<=cfg.threshold?"#1f1a0e":"transparent"}}>
+                  background:q===0?C.dangerDim:q>0&&cfg.threshold>0&&q<=cfg.threshold?C.warnDim:"transparent"}}>
                   <div>
                     <div style={{fontSize:13,color:q===0?C.textDim:C.text,fontWeight:600}}>{m}</div>
                     {mAliases.length > 0 && (
@@ -1837,18 +1861,22 @@ export default function App(){
       const totalQty = data.reduce((s,r)=>s+r.qty*signOf(r),0);
       const totalDef = data.reduce((s,r)=>s+r.defect,0);
       const totalAmt = data.reduce((s,r)=>s+r.amount*signOf(r),0);
+      const refundRecs = data.filter(r=>r.recordType==="refund");
+      const totalRefundQty = refundRecs.reduce((s,r)=>s+r.qty,0);
+      const totalRefundAmt = refundRecs.reduce((s,r)=>s+r.amount,0);
       return (
         <div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
             <StatCard label="Всего ключей" value={fmt(totalQty)}/>
-            <StatCard label="Общая сумма" value={fmt(totalAmt)+" р"}/>
+            <StatCard label="Общая сумма" value={fmt(totalAmt)+" р"} color={C.success}/>
             <StatCard label="Брак" value={fmt(totalDef)} color={totalDef>0?C.warn:undefined}/>
             <StatCard label="% брака" value={totalQty>0?(totalDef/Math.abs(totalQty)*100).toFixed(1)+"%":"0%"} color={totalDef>0?C.warn:undefined}/>
+            {totalRefundQty > 0 && <StatCard label={`Возвратов: ${totalRefundQty} шт`} value={"−"+fmt(totalRefundAmt)+" р"} color={C.refund}/>}
             {workshop==="SMART"&&<StatCard label="Доход 40%" value={fmt(totalAmt*INCOME_PCT)+" р"} color={C.success}/>}
           </div>
-          <div style={{fontSize:13,fontWeight:700,color:C.textSub,marginBottom:8}}>ПО КАТЕГОРИЯМ</div>
+          <div style={{fontSize:10,fontWeight:700,color:C.textSub,marginBottom:8,textTransform:"uppercase",letterSpacing:"1px"}}>ПО КАТЕГОРИЯМ</div>
           <StatsBreakdown data={data} totalAmt={totalAmt} totalQty={totalQty}/>
-          <div style={{fontSize:13,fontWeight:700,color:C.textSub,marginBottom:8,marginTop:16}}>ОТЧЁТ ДНЯ · СКЛАД</div>
+          <div style={{fontSize:10,fontWeight:700,color:C.textSub,marginBottom:8,marginTop:16,textTransform:"uppercase",letterSpacing:"1px"}}>ОТЧЁТ ДНЯ · СКЛАД</div>
           <DayReport records={records} workshop={workshop} wsStock={stockWS[workshop]||{}}
             stockCfg={stockCfg} dateStr={dateOf(new Date(y,m-1,d).getTime())}
             onEditRecord={setEditRec}/>
@@ -1865,20 +1893,24 @@ export default function App(){
       const avgPerDay = workDays>0 ? totalAmt/workDays : 0;
       const byDay = {};
       data.forEach(r=>{ const dk=dateOf(r.timestamp); if(!byDay[dk]) byDay[dk]={qty:0,amount:0,defect:0}; const s=signOf(r); byDay[dk].qty+=r.qty*s; byDay[dk].amount+=r.amount*s; byDay[dk].defect+=r.defect; });
+      const refundRecs = data.filter(r=>r.recordType==="refund");
+      const totalRefundQty = refundRecs.reduce((s,r)=>s+r.qty,0);
+      const totalRefundAmt = refundRecs.reduce((s,r)=>s+r.amount,0);
       return (
         <div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
             <StatCard label="Всего ключей" value={fmt(totalQty)}/>
-            <StatCard label="Общая сумма" value={fmt(totalAmt)+" р"}/>
+            <StatCard label="Общая сумма" value={fmt(totalAmt)+" р"} color={C.success}/>
             <StatCard label="Брак" value={fmt(totalDef)} color={totalDef>0?C.warn:undefined}/>
             <StatCard label="% брака" value={totalQty>0?(totalDef/Math.abs(totalQty)*100).toFixed(1)+"%":"0%"} color={totalDef>0?C.warn:undefined}/>
             <StatCard label="Рабочих дней" value={workDays} sub="дней с записями"/>
             <StatCard label="Среднее/день" value={fmt(avgPerDay)+" р"} sub="по рабочим дням"/>
+            {totalRefundQty > 0 && <StatCard label={`Возвратов: ${totalRefundQty} шт`} value={"−"+fmt(totalRefundAmt)+" р"} color={C.refund}/>}
             {workshop==="SMART"&&<StatCard label="Доход 40%" value={fmt(totalAmt*INCOME_PCT)+" р"} color={C.success}/>}
           </div>
-          <div style={{fontSize:13,fontWeight:700,color:C.textSub,marginBottom:8}}>ПО КАТЕГОРИЯМ</div>
+          <div style={{fontSize:10,fontWeight:700,color:C.textSub,marginBottom:8,textTransform:"uppercase",letterSpacing:"1px"}}>ПО КАТЕГОРИЯМ</div>
           <StatsBreakdown data={data} totalAmt={totalAmt} totalQty={totalQty}/>
-          <div style={{fontSize:13,fontWeight:700,color:C.textSub,marginBottom:8,marginTop:16}}>ПО ДНЯМ</div>
+          <div style={{fontSize:10,fontWeight:700,color:C.textSub,marginBottom:8,marginTop:16,textTransform:"uppercase",letterSpacing:"1px"}}>ПО ДНЯМ</div>
           {Object.entries(byDay).sort((a,b)=>a[0].localeCompare(b[0])).map(([dk,d])=>{
             const parts = dk.split("-");
             const label = `${parts[2]}.${parts[1]}`;
@@ -1901,6 +1933,9 @@ export default function App(){
       const totalQty = data.reduce((s,r)=>s+r.qty*signOf(r),0);
       const totalDef = data.reduce((s,r)=>s+r.defect,0);
       const totalAmt = data.reduce((s,r)=>s+r.amount*signOf(r),0);
+      const refundRecs = data.filter(r=>r.recordType==="refund");
+      const totalRefundQty = refundRecs.reduce((s,r)=>s+r.qty,0);
+      const totalRefundAmt = refundRecs.reduce((s,r)=>s+r.amount,0);
       const byMonth = {};
       data.forEach(r=>{
         const mk = monthOf(r.timestamp);
@@ -1916,12 +1951,13 @@ export default function App(){
         <div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
             <StatCard label="Всего ключей" value={fmt(totalQty)}/>
-            <StatCard label="Общая сумма" value={fmt(totalAmt)+" р"}/>
+            <StatCard label="Общая сумма" value={fmt(totalAmt)+" р"} color={C.success}/>
             <StatCard label="Брак" value={fmt(totalDef)} color={totalDef>0?C.warn:undefined}/>
             <StatCard label="% брака" value={totalQty>0?(totalDef/Math.abs(totalQty)*100).toFixed(1)+"%":"0%"} color={totalDef>0?C.warn:undefined}/>
+            {totalRefundQty > 0 && <StatCard label={`Возвратов: ${totalRefundQty} шт`} value={"−"+fmt(totalRefundAmt)+" р"} color={C.refund}/>}
             {workshop==="SMART"&&<StatCard label="Доход 40%" value={fmt(totalAmt*INCOME_PCT)+" р"} color={C.success}/>}
           </div>
-          <div style={{fontSize:13,fontWeight:700,color:C.textSub,marginBottom:8}}>ПО МЕСЯЦАМ — нажмите для раскрытия по дням</div>
+          <div style={{fontSize:10,fontWeight:700,color:C.textSub,marginBottom:8,textTransform:"uppercase",letterSpacing:"1px"}}>ПО МЕСЯЦАМ — нажмите для раскрытия по дням</div>
           {Object.entries(byMonth).sort((a,b)=>b[0].localeCompare(a[0])).map(([mk,d])=>{
             const mn = parseInt(mk.split("-")[1],10)-1;
             return (
@@ -2055,10 +2091,10 @@ export default function App(){
   }
   const wsStock = ensureObj(safeStockWS[workshop]);
   const tabs = [
-    {id:"record",label:"📝 Запись"},
-    {id:"stats",label:"📊 Статистика"},
-    {id:"stock",label:"📦 Склад"},
-    {id:"prices",label:"🏷️ Маркировки"}
+    {id:"record",icon:"📝",label:"Запись"},
+    {id:"stats",icon:"📊",label:"Статистика"},
+    {id:"stock",icon:"📦",label:"Склад"},
+    {id:"prices",icon:"🏷️",label:"Маркировки"}
   ];
 
   return (
@@ -2088,16 +2124,28 @@ export default function App(){
             </div>
           </div>
           <div style={{display:"flex",gap:6,alignItems:"center"}}>
-            <button onClick={()=>setPwdModalOpen(true)} style={{background:"transparent",color:C.textSub,border:`1px solid ${C.border}`,padding:"5px 10px",fontSize:11,cursor:"pointer",borderRadius:0,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.5px"}}>🔑</button>
-            <button onClick={handleLogout} style={{background:"transparent",color:C.textSub,border:`1px solid ${C.border}`,padding:"5px 10px",fontSize:11,cursor:"pointer",borderRadius:0,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.5px"}}>Сменить</button>
-            <button onClick={handleTokenLogout} style={{background:"transparent",color:C.danger,border:`1px solid ${C.danger}`,padding:"5px 10px",fontSize:11,cursor:"pointer",borderRadius:0,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.5px"}}>Выйти</button>
+            <button onClick={()=>setPwdModalOpen(true)} title="Сменить пароль" style={{background:"transparent",color:C.textSub,border:`1px solid ${C.border}`,padding:"6px 10px",fontSize:10,cursor:"pointer",borderRadius:0,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.5px"}}>🔑 Пароль</button>
+            <button onClick={handleLogout} title="Переключиться на другую мастерскую" style={{background:"transparent",color:C.textSub,border:`1px solid ${C.border}`,padding:"6px 10px",fontSize:10,cursor:"pointer",borderRadius:0,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.5px"}}>🔄 Мастерская</button>
+            <button onClick={handleTokenLogout} title="Полный выход из приложения" style={{background:"transparent",color:C.danger,border:`1px solid ${C.danger}`,padding:"6px 10px",fontSize:10,cursor:"pointer",borderRadius:0,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.5px"}}>🚪 Выйти</button>
           </div>
         </div>
         {/* Строка с мастерской + датой + статусом */}
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16,padding:"0 4px"}}>
-          <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
             <span style={{background:wsColor,color:"#fff",padding:"4px 12px",borderRadius:0,fontWeight:700,fontSize:11,letterSpacing:"1px",textTransform:"uppercase"}}>{workshop}</span>
-            <span style={{fontSize:12,color:C.textDim}}>{todayStr()}</span>
+            <span style={{fontSize:13,color:C.text,fontWeight:700}}>
+              {(() => {
+                const days = ["Воскресенье","Понедельник","Вторник","Среда","Четверг","Пятница","Суббота"];
+                const d = nowTime;
+                return days[d.getDay()];
+              })()}
+            </span>
+            <span style={{fontSize:12,color:C.textSub}}>
+              {`${String(nowTime.getDate()).padStart(2,"0")}.${String(nowTime.getMonth()+1).padStart(2,"0")}.${nowTime.getFullYear()}`}
+            </span>
+            <span style={{fontSize:13,color:C.brand,fontWeight:800,fontVariantNumeric:"tabular-nums"}}>
+              {`${String(nowTime.getHours()).padStart(2,"0")}:${String(nowTime.getMinutes()).padStart(2,"0")}`}
+            </span>
             {/* Индикатор статуса сохранения */}
             {Object.entries(saveStatus).map(([key, status]) => (
               <span key={key} style={{
@@ -2108,7 +2156,7 @@ export default function App(){
                 border: `1px solid ${status === "saving" ? C.warn : status === "error" ? C.danger : C.success}44`,
                 fontWeight: 700,
               }}>
-                {status === "saving" ? "⏳" : status === "error" ? "⚠" : "✓"}
+                {status === "saving" ? "⏳ Сохранение..." : status === "error" ? "⚠ Ошибка" : "✓ Сохранено"}
               </span>
             ))}
           </div>
@@ -2158,14 +2206,26 @@ export default function App(){
               </select>
             </div>
             <div style={{marginBottom:12}}>
-              <label style={s.label}>Маркировка {showAllMarkers ? "(все)" : "(топ-20 за год)"}</label>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                <label style={{...s.label,marginBottom:0}}>Маркировка</label>
+                {/* Кнопка переключения "Показать все" / "Только топ" — скрываем для услуг */}
+                {category !== "Прочие услуги" && (
+                  <button type="button" onClick={()=>setShowAllMarkers(v=>!v)} style={{
+                    ...s.btn(),
+                    padding:"4px 8px",
+                    fontSize:10,
+                  }}>
+                    {showAllMarkers ? "⭐ Топ-20" : `📋 Все (${(safeMarkers[category]||[]).length})`}
+                  </button>
+                )}
+              </div>
 
-              {/* Поле поиска — показываем только в режиме "Показать все" */}
-              {showAllMarkers && (
+              {/* Поле поиска — показываем только в режиме "Показать все" или для услуг */}
+              {(showAllMarkers || category === "Прочие услуги") && (
                 <input value={markerSearch} onChange={e=>setMarkerSearch(e.target.value)} placeholder="🔍 Поиск..." style={{...s.input,marginBottom:8}}/>
               )}
 
-              <div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:8,maxHeight:showAllMarkers?400:200,overflowY:"auto",padding:4,background:C.bgInput,borderRadius:8,border:`1px solid ${C.border}`}}>
+              <div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:8,maxHeight:showAllMarkers?400:200,overflowY:"auto",padding:4,background:C.bgInput,border:`1px solid ${C.border}`}}>
                 {(() => {
                   const isService = category === "Прочие услуги";
                   const allMarkers = safeMarkers[category] || [];
@@ -2178,15 +2238,18 @@ export default function App(){
                     return list.map(m => renderMarkerButton(m, isService));
                   }
 
+                  // Для не-услуг — скрываем маркировки без остатка в этой мастерской
+                  const inStock = allMarkers.filter(m => (wsStock[m]||0) > 0);
+
                   // Если показываем все — применяем поиск
                   if(showAllMarkers){
                     const search = markerSearch.toLowerCase();
-                    const list = search ? allMarkers.filter(m => matchesSearch(m, markerSearch)) : allMarkers;
-                    if(list.length === 0) return <div style={{padding:"8px",color:C.textDim,fontSize:12}}>Ничего не найдено</div>;
+                    const list = search ? inStock.filter(m => matchesSearch(m, markerSearch)) : inStock;
+                    if(list.length === 0) return <div style={{padding:"8px",color:C.textDim,fontSize:12}}>Ничего не найдено. Возможно, остаток на складе 0 — пополните в разделе «Склад».</div>;
                     return list.map(m => renderMarkerButton(m, isService));
                   }
 
-                  // Иначе — топ-20 за год для этой категории
+                  // Иначе — топ-20 за год для этой категории (только из тех, что есть в наличии)
                   const now = new Date();
                   const yearAgo = now.getTime() - 365 * 24 * 60 * 60 * 1000;
                   const counts = {};
@@ -2200,33 +2263,15 @@ export default function App(){
                   const top = Object.entries(counts)
                     .sort((a,b) => b[1] - a[1])
                     .slice(0, 20)
-                    .filter(([m,c]) => c > 0);
+                    .filter(([m,c]) => c > 0 && (wsStock[m]||0) > 0);
 
                   if(top.length === 0){
-                    return <div style={{padding:"8px",color:C.textDim,fontSize:12}}>⭐ Топ-20 появится после первых продаж. Нажмите «Показать все» ниже.</div>;
+                    return <div style={{padding:"8px",color:C.textDim,fontSize:12}}>⭐ Топ-20 появится после первых продаж. Нажмите «📋 Все» выше, чтобы увидеть все маркировки в наличии.</div>;
                   }
 
                   return top.map(([m, c]) => renderMarkerButton(m, isService, c));
                 })()}
               </div>
-
-              {/* Кнопка переключения "Показать все" / "Только топ" — скрываем для услуг */}
-              {category !== "Прочие услуги" && (
-                <button type="button" onClick={()=>setShowAllMarkers(v=>!v)} style={{
-                  ...s.btn(),
-                  padding:"5px 10px",
-                  fontSize:11,
-                  width:"100%",
-                  marginBottom:8,
-                }}>
-                  {showAllMarkers ? "⭐ Показать только топ-20" : `📋 Показать все маркировки (${(safeMarkers[category]||[]).length})`}
-                </button>
-              )}
-
-              {/* Для услуг — поле поиска (раз уж мы не показываем кнопку "Показать все") */}
-              {category === "Прочие услуги" && (
-                <input value={markerSearch} onChange={e=>setMarkerSearch(e.target.value)} placeholder="🔍 Поиск услуги..." style={{...s.input,marginBottom:8}}/>
-              )}
 
               <input value={marker} onChange={e=>setMarker(e.target.value)} placeholder="Или введите свою маркировку" style={s.input}/>
             </div>
@@ -2234,23 +2279,10 @@ export default function App(){
               <div style={{marginBottom:12}}>
                 <label style={s.label}>Фото заготовки (нажмите, чтобы увеличить)</label>
                 <img src={markerPhoto} alt="" onClick={()=>setPhotoModal({url: markerPhoto, markerName: marker})}
-                  style={{maxWidth:110,maxHeight:110,borderRadius:8,border:`1px solid ${C.border}`,display:"block",cursor:"pointer"}}/>
+                  style={{maxWidth:140,maxHeight:140,border:`1px solid ${C.border}`,display:"block",cursor:"pointer"}}/>
+                <div style={{fontSize:10,color:C.textDim,marginTop:4}}>Загрузить/изменить фото можно в разделе «Маркировки»</div>
               </div>
             )}
-            <div style={{marginBottom:12}}>
-              <label style={s.label}>Фото для этой маркировки</label>
-              <input type="file" accept="image/*" style={{...s.input,padding:"6px"}} onChange={async e=>{
-                const f=e.target.files[0]; if(!f||!marker) return;
-                const reader=new FileReader();
-                reader.onload=async()=>{
-                  const url=reader.result;
-                  await photoSet(marker.trim(),url);
-                  setPhotoCache(p=>({...p,[marker.trim()]:url})); setMarkerPhoto(url);
-                  setSubmitMsg({ok:true,text:"Фото сохранено"}); setTimeout(()=>setSubmitMsg(null),2000);
-                };
-                reader.readAsDataURL(f);
-              }}/>
-            </div>
             {marker && category !== "Прочие услуги" && (
               <div style={{...s.card,padding:"8px 12px",marginBottom:12,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                 <span style={{fontSize:12,color:C.textSub}}>Остаток в {workshop}</span>
@@ -2265,18 +2297,18 @@ export default function App(){
             )}
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
               <div>
-                <label style={s.label}>Готовых {recordType==="sale"&&<span style={{color:C.textDim,fontSize:10}}>(годные ключи)</span>}</label>
+                <label style={s.label}>Изготовлено</label>
                 <StepperInput value={qty} onChange={setQty} style={{width:"100%"}} inputStyle={{width:"100%"}}/>
               </div>
               <div>
-                <label style={s.label}>Брак {recordType==="sale"&&<span style={{color:C.textDim,fontSize:10}}>(испорченные)</span>}</label>
+                <label style={s.label}>Брак</label>
                 <StepperInput value={defect} onChange={setDefect} style={{width:"100%"}} inputStyle={{width:"100%"}}/>
               </div>
             </div>
             {recordType==="sale"&&qty>0&&defect>0&&(
               <div style={{...s.card,padding:"8px 12px",marginBottom:10,background:C.warnDim,borderColor:C.warn+"44"}}>
                 <div style={{fontSize:12,color:C.warn,lineHeight:1.5}}>
-                  ⚠ Всего изготовлено: <b>{qty+defect} шт</b> ({qty} готовых + {defect} брак)<br/>
+                  ⚠ Всего изготовлено: <b>{qty+defect} шт</b> ({qty} годных + {defect} брак)<br/>
                   Списания со склада: <b>{qty+defect} шт</b><br/>
                   Сумма: <b>{qty} шт</b> × цена (только годные)
                 </div>
@@ -2459,10 +2491,10 @@ export default function App(){
                 <div key={cat} style={{...s.card,padding:0,overflow:"hidden",marginBottom:8}}>
                   <div onClick={()=>setPriceExpandedCats(p=>({...p,[cat]:!expanded}))}
                     style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 14px",
-                      cursor:"pointer",background:expanded?C.bgCard:"#141826"}}>
-                    <span style={{fontWeight:700,fontSize:13}}>{cat}</span>
+                      cursor:"pointer",background:expanded?C.bgCard:C.bgSection,borderBottom:expanded?`1px solid ${C.border}`:"none"}}>
+                    <span style={{fontWeight:700,fontSize:13,color:C.text}}>{cat}</span>
                     <div style={{display:"flex",alignItems:"center",gap:10}}>
-                      <span style={{fontSize:12,color:C.textSub}}>{withPrice}/{filtered.length} с ценой</span>
+                      <span style={{fontSize:11,color:C.textDim,fontWeight:600,textTransform:"uppercase",letterSpacing:"0.5px"}}>{withPrice}/{filtered.length} с ценой</span>
                       <span style={{color:C.textDim,fontSize:12}}>{expanded?"▲":"▼"}</span>
                     </div>
                   </div>
