@@ -610,6 +610,118 @@ function DayRow({ dateLabel, dayData, workshop, onEditRecord, allRecords }){
   );
 }
 
+// ── Мини-фото маркировки для раздела «Маркировки» ──
+// Показывает текущее фото (кликабельное) или кнопку загрузки
+function MarkerPhotoThumb({ markerName, photo, onPhotoLoaded, onPhotoClick }){
+  const [loading, setLoading] = useState(false);
+  const [msg, setMsg] = useState(null);
+
+  // Если фото ещё не загружено — попробуем загрузить (один раз)
+  useEffect(() => {
+    if(photo === undefined && markerName){
+      photoGet(markerName).then(url => {
+        onPhotoLoaded(url);
+      });
+    }
+  }, [markerName]);
+
+  async function handleFile(e){
+    const f = e.target.files[0];
+    if(!f) return;
+    setLoading(true);
+    setMsg(null);
+    try {
+      const reader = new FileReader();
+      reader.onload = async () => {
+        const url = reader.result;
+        await photoSet(markerName, url);
+        onPhotoLoaded(url);
+        setLoading(false);
+        setMsg({ok:true, text:"Фото сохранено"});
+        setTimeout(()=>setMsg(null), 1500);
+      };
+      reader.readAsDataURL(f);
+    } catch(e) {
+      setLoading(false);
+      setMsg({ok:false, text:"Ошибка загрузки"});
+    }
+  }
+
+  async function handleDelete(e){
+    e.stopPropagation();
+    if(!confirm("Удалить фото?")) return;
+    setLoading(true);
+    await photoDelete(markerName);
+    onPhotoLoaded(null);
+    setLoading(false);
+  }
+
+  // Стили
+  const thumbSize = 48;
+  const containerStyle = {
+    width: thumbSize,
+    height: thumbSize,
+    flexShrink: 0,
+    borderRadius: 8,
+    border: `1px solid ${C.border}`,
+    overflow: "hidden",
+    position: "relative",
+    cursor: photo ? "pointer" : "default",
+    background: C.bgInput,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+  };
+
+  if(loading){
+    return (
+      <div style={{...containerStyle, cursor:"wait"}}>
+        <span style={{fontSize:10,color:C.textSub}}>⏳</span>
+      </div>
+    );
+  }
+
+  if(photo){
+    return (
+      <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
+        <div style={containerStyle} onClick={onPhotoClick} title="Нажмите, чтобы увеличить">
+          <img src={photo} alt={markerName} style={{width:"100%",height:"100%",objectFit:"cover"}}/>
+        </div>
+        <button onClick={handleDelete} title="Удалить фото"
+          style={{fontSize:9,padding:"1px 4px",borderRadius:4,cursor:"pointer",
+            background:"transparent",color:C.danger,border:`1px solid ${C.danger}44`}}>✕</button>
+      </div>
+    );
+  }
+
+  // Нет фото — кнопка загрузки
+  return (
+    <label style={{...containerStyle, cursor:"pointer"}} title="Загрузить фото">
+      <input type="file" accept="image/*" style={{display:"none"}} onChange={handleFile}/>
+      <span style={{fontSize:18,color:C.textSub}}>📷</span>
+    </label>
+  );
+}
+
+// ── Модалка просмотра фото в полном размере ──
+function PhotoViewModal({ photo, markerName, onClose }){
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.95)",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",padding:20}}
+      onClick={onClose}>
+      <div style={{position:"absolute",top:16,right:16,display:"flex",gap:8,alignItems:"center"}}>
+        <span style={{color:"#fff",fontSize:13,opacity:.7}}>{markerName}</span>
+        <button onClick={onClose} style={{
+          background:"rgba(255,255,255,.1)",color:"#fff",border:"1px solid rgba(255,255,255,.2)",
+          borderRadius:8,padding:"6px 12px",cursor:"pointer",fontSize:14,
+        }}>✕</button>
+      </div>
+      <img src={photo} alt={markerName}
+        style={{maxWidth:"95%",maxHeight:"85vh",borderRadius:8,boxShadow:"0 8px 32px rgba(0,0,0,.5)"}}/>
+      <div style={{color:"#fff",fontSize:11,opacity:.5,marginTop:12}}>Кликните в любом месте, чтобы закрыть</div>
+    </div>
+  );
+}
+
 // ── Модалка комментария к маркировке ──
 function NoteModal({ markerName, currentNote, onSave, onClose }){
   const [text, setText] = useState(currentNote || "");
@@ -998,6 +1110,8 @@ export default function App(){
   const [aliasesModal, setAliasesModal] = useState(null); // {cat, markerName}
   // комментарий — модалка
   const [noteModal, setNoteModal] = useState(null); // {markerName}
+  // фото — модалка просмотра в полном размере
+  const [photoModal, setPhotoModal] = useState(null); // {url, markerName}
 
   // ── загрузка при старте ──
   useEffect(()=>{
@@ -1929,6 +2043,8 @@ export default function App(){
         onClose={()=>setAliasesModal(null)}/>}
       {noteModal&&<NoteModal markerName={noteModal.markerName} currentNote={getNote(noteModal.markerName)}
         onSave={saveNote} onClose={()=>setNoteModal(null)}/>}
+      {photoModal&&<PhotoViewModal photo={photoModal.url} markerName={photoModal.markerName}
+        onClose={()=>setPhotoModal(null)}/>}
       <div style={{maxWidth:600,margin:"0 auto",padding:"12px 12px 40px"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
           <div style={{display:"flex",alignItems:"center",gap:8}}>
@@ -2073,8 +2189,9 @@ export default function App(){
             </div>
             {markerPhoto&&(
               <div style={{marginBottom:12}}>
-                <label style={s.label}>Фото заготовки</label>
-                <img src={markerPhoto} alt="" style={{maxWidth:110,maxHeight:110,borderRadius:8,border:`1px solid ${C.border}`,display:"block"}}/>
+                <label style={s.label}>Фото заготовки (нажмите, чтобы увеличить)</label>
+                <img src={markerPhoto} alt="" onClick={()=>setPhotoModal({url: markerPhoto, markerName: marker})}
+                  style={{maxWidth:110,maxHeight:110,borderRadius:8,border:`1px solid ${C.border}`,display:"block",cursor:"pointer"}}/>
               </div>
             )}
             <div style={{marginBottom:12}}>
@@ -2311,9 +2428,12 @@ export default function App(){
                       {filtered.map(m=>{
                         const mAliases = getAliases(m);
                         const mNote = getNote(m);
+                        const cachedPhoto = photoCache[m];
                         return (
                         <div key={m} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
                           padding:"8px 14px",borderBottom:`1px solid ${C.border}22`,gap:8,flexWrap:"wrap"}}>
+                          {/* Фото маркировки (слева) */}
+                          <MarkerPhotoThumb markerName={m} photo={cachedPhoto} onPhotoLoaded={(url)=>setPhotoCache(p=>({...p,[m]:url}))} onPhotoClick={()=>cachedPhoto && setPhotoModal({url: cachedPhoto, markerName: m})}/>
                           <div style={{flex:1,minWidth:80}}>
                             <div style={{fontSize:13,color:C.text}}>{m}</div>
                             {mAliases.length > 0 && (
