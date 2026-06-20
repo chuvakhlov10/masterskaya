@@ -395,11 +395,16 @@ function StatsBreakdown({ data, totalAmt, totalQty }){
             <div style={{borderTop:`1px solid ${C.border}`}}>
               {Object.entries(d.markers).sort((a,b)=>b[1].qty-a[1].qty).map(([mk,md])=>(
                 <div key={mk} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
-                  padding:"7px 14px",borderBottom:`1px solid ${C.border}22`,fontSize:13}}>
-                  <span style={{color:C.textSub}}>{mk}</span>
+                  padding:"7px 14px",borderBottom:`1px solid ${C.border}22`,fontSize:13,
+                  background:md.defect>0?C.dangerDim+"55":"transparent"}}>
+                  <span style={{color:C.text,fontWeight:600}}>{mk}</span>
                   <div style={{textAlign:"right"}}>
-                    <div style={{color:md.amount>=0?C.text:C.danger}}>{fmt(md.amount)} р</div>
-                    <div style={{fontSize:11,color:C.textDim}}>{fmt(md.qty)} шт{md.defect?` · брак ${md.defect}`:""}{md.refundQty?` · возврат ${md.refundQty}`:""}</div>
+                    <div style={{color:md.amount>=0?C.text:C.danger,fontWeight:700}}>{fmt(md.amount)} р</div>
+                    <div style={{fontSize:12,color:C.text,fontWeight:600}}>
+                      {fmt(md.qty)} шт
+                      {md.defect>0&&<span style={{color:C.danger,fontWeight:700,marginLeft:6}}>· брак {md.defect}</span>}
+                      {md.refundQty>0&&<span style={{color:C.danger,fontWeight:700,marginLeft:6}}>· возврат {md.refundQty}</span>}
+                    </div>
                   </div>
                 </div>
               ))}
@@ -594,10 +599,9 @@ function YearMonthCard({ monthKey, monthData, monthName, workshop, onEditRecord,
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
             <StatCard label="Всего ключей" value={fmt(monthData.qty)}/>
             <StatCard label="Общая сумма" value={fmt(monthData.amount)+" р"} color={C.success}/>
-            <StatCard label="Брак" value={fmt(monthData.defect)} color={monthData.defect>0?C.warn:undefined}/>
-            <StatCard label="% брака" value={monthData.qty>0?(monthData.defect/Math.abs(monthData.qty)*100).toFixed(1)+"%":"0%"} color={monthData.defect>0?C.warn:undefined}/>
+            <StatCard label="Брак" value={fmt(monthData.defect)} color={monthData.defect>0?C.danger:undefined}/>
+            <StatCard label="% брака" value={monthData.qty>0?(monthData.defect/Math.abs(monthData.qty)*100).toFixed(1)+"%":"0%"} color={monthData.defect>0?C.danger:undefined}/>
             <StatCard label="Рабочих дней" value={monthData.days.size} sub="дней с записями"/>
-            <StatCard label="Среднее/день" value={fmt(avgPerDay)+" р"} sub="по рабочим дням"/>
             {workshop==="SMART"&&<StatCard label="Доход 40%" value={fmt(monthData.amount*INCOME_PCT)+" р"} color={C.success}/>}
           </div>
 
@@ -1889,8 +1893,8 @@ export default function App(){
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
             <StatCard label="Всего ключей" value={fmt(totalQty)}/>
             <StatCard label="Общая сумма" value={fmt(totalAmt)+" р"} color={C.success}/>
-            <StatCard label="Брак" value={fmt(totalDef)} color={totalDef>0?C.warn:undefined}/>
-            <StatCard label="% брака" value={totalQty>0?(totalDef/Math.abs(totalQty)*100).toFixed(1)+"%":"0%"} color={totalDef>0?C.warn:undefined}/>
+            <StatCard label="Брак" value={fmt(totalDef)} color={totalDef>0?C.danger:undefined}/>
+            <StatCard label="% брака" value={totalQty>0?(totalDef/Math.abs(totalQty)*100).toFixed(1)+"%":"0%"} color={totalDef>0?C.danger:undefined}/>
             {totalRefundQty > 0 && <StatCard label={`Возвратов: ${totalRefundQty} шт`} value={"−"+fmt(totalRefundAmt)+" р"} color={C.danger}/>}
             {workshop==="SMART"&&<StatCard label="Доход 40%" value={fmt(totalAmt*INCOME_PCT)+" р"} color={C.success}/>}
           </div>
@@ -1921,10 +1925,9 @@ export default function App(){
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
             <StatCard label="Всего ключей" value={fmt(totalQty)}/>
             <StatCard label="Общая сумма" value={fmt(totalAmt)+" р"} color={C.success}/>
-            <StatCard label="Брак" value={fmt(totalDef)} color={totalDef>0?C.warn:undefined}/>
-            <StatCard label="% брака" value={totalQty>0?(totalDef/Math.abs(totalQty)*100).toFixed(1)+"%":"0%"} color={totalDef>0?C.warn:undefined}/>
+            <StatCard label="Брак" value={fmt(totalDef)} color={totalDef>0?C.danger:undefined}/>
+            <StatCard label="% брака" value={totalQty>0?(totalDef/Math.abs(totalQty)*100).toFixed(1)+"%":"0%"} color={totalDef>0?C.danger:undefined}/>
             <StatCard label="Рабочих дней" value={workDays} sub="дней с записями"/>
-            <StatCard label="Среднее/день" value={fmt(avgPerDay)+" р"} sub="по рабочим дням"/>
             {totalRefundQty > 0 && <StatCard label={`Возвратов: ${totalRefundQty} шт`} value={"−"+fmt(totalRefundAmt)+" р"} color={C.danger}/>}
             {workshop==="SMART"&&<StatCard label="Доход 40%" value={fmt(totalAmt*INCOME_PCT)+" р"} color={C.success}/>}
           </div>
@@ -1972,8 +1975,8 @@ export default function App(){
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
             <StatCard label="Всего ключей" value={fmt(totalQty)}/>
             <StatCard label="Общая сумма" value={fmt(totalAmt)+" р"} color={C.success}/>
-            <StatCard label="Брак" value={fmt(totalDef)} color={totalDef>0?C.warn:undefined}/>
-            <StatCard label="% брака" value={totalQty>0?(totalDef/Math.abs(totalQty)*100).toFixed(1)+"%":"0%"} color={totalDef>0?C.warn:undefined}/>
+            <StatCard label="Брак" value={fmt(totalDef)} color={totalDef>0?C.danger:undefined}/>
+            <StatCard label="% брака" value={totalQty>0?(totalDef/Math.abs(totalQty)*100).toFixed(1)+"%":"0%"} color={totalDef>0?C.danger:undefined}/>
             {totalRefundQty > 0 && <StatCard label={`Возвратов: ${totalRefundQty} шт`} value={"−"+fmt(totalRefundAmt)+" р"} color={C.danger}/>}
             {workshop==="SMART"&&<StatCard label="Доход 40%" value={fmt(totalAmt*INCOME_PCT)+" р"} color={C.success}/>}
           </div>
