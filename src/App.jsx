@@ -90,27 +90,31 @@ function StepperInput({ value, onChange, step = 1, min = 0, style, inputStyle })
     onChange(v);
   };
   const btnStyle = {
-    width: 32,
-    height: 36,
-    background: C.bgInput,
-    border: `1px solid ${C.border}`,
-    color: C.text,
+    width: 30,
+    height: 30,
+    background: C.bgSection,
+    border: "none",
+    color: C.textSub,
     cursor: "pointer",
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: 700,
-    borderRadius: 6,
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
     padding: 0,
     userSelect: "none",
     flexShrink: 0,
+    transition: "all .15s",
   };
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 4, ...style }}>
-      <button type="button" onClick={dec} style={{ ...btnStyle, opacity: (value||0) <= min ? 0.4 : 1 }}>−</button>
-      <NumInput value={value} onChange={onChange} min={String(min)} style={{ textAlign: "center", width: 60, padding: "6px 4px", fontSize: 13, ...inputStyle }}/>
-      <button type="button" onClick={inc} style={btnStyle}>+</button>
+    <div style={{ display: "inline-flex", alignItems: "center", gap: 0, background: C.bgCard, border: `1px solid ${C.border}`, ...style }}>
+      <button type="button" onClick={dec} style={{ ...btnStyle, opacity: (value||0) <= min ? 0.4 : 1 }}
+        onMouseEnter={e=>{if((value||0)>min){e.target.style.background=C.brand;e.target.style.color="#fff";}}}
+        onMouseLeave={e=>{e.target.style.background=C.bgSection;e.target.style.color=C.textSub;}}>−</button>
+      <NumInput value={value} onChange={onChange} min={String(min)} style={{ textAlign: "center", width: 50, padding: "6px 4px", fontSize: 14, fontWeight: 700, border: "none", borderLeft: `1px solid ${C.border}`, borderRight: `1px solid ${C.border}`, background: C.bgCard, fontVariantNumeric: "tabular-nums", ...inputStyle }}/>
+      <button type="button" onClick={inc} style={btnStyle}
+        onMouseEnter={e=>{e.target.style.background=C.brand;e.target.style.color="#fff";}}
+        onMouseLeave={e=>{e.target.style.background=C.bgSection;e.target.style.color=C.textSub;}}>+</button>
     </div>
   );
 }
@@ -124,36 +128,62 @@ function ensureObj(v){ return (v && typeof v === "object" && !Array.isArray(v)) 
 // Защита: получить массив из любого значения (для records)
 function ensureArr(v){ return Array.isArray(v) ? v : []; }
 
+// ── Палитра «Простое Решение» (красно-белая + семантические цвета) ──
 const C = {
-  bg:"#0f1117", bgCard:"#181c27", bgInput:"#1e2333",
-  border:"#2a3048", accent:"#4f8ef7", accentDim:"#1d3a6b",
-  warn:"#f59e0b", warnDim:"#3d2a00", danger:"#ef4444", dangerDim:"#3b0f0f",
-  success:"#22c55e", successDim:"#0a2e14",
-  text:"#e2e8f0", textSub:"#8892a4", textDim:"#525d72",
-  smart:"#4f8ef7", begemot:"#a78bfa",
-  refund:"#f97316", refundDim:"#3d1f00",
+  // Фирменные
+  bg:"#fafafa",          // основной фон — почти белый
+  bgCard:"#ffffff",      // карточки — чисто белый
+  bgInput:"#ffffff",     // инпуты — белые с границей
+  bgSection:"#f8f9fa",   // секции — чуть серее
+  border:"#e0e0e0",      // тонкие границы
+  borderStrong:"#1a1a1a",// чёрная граница (для акцента)
+  brand:"#C70000",       // фирменный красный (как вывеска)
+  brandDim:"#fff5f5",    // светлый красный фон
+  // Семантические
+  text:"#1a1a1a",        // основной текст — чёрный
+  textSub:"#666666",     // вторичный — серый
+  textDim:"#999999",     // подсказки — светло-серый
+  success:"#2e7d32",     // успех, доход
+  successDim:"#e8f5e9",
+  warn:"#e65100",        // предупреждение, брак, мало
+  warnDim:"#fff3e0",
+  danger:"#c62828",      // ошибка, 0 шт
+  dangerDim:"#ffebee",
+  // Мастерские
+  smart:"#1976d2",       // SMART — синий
+  smartDim:"#e3f2fd",
+  begemot:"#7c3aed",     // Бегемот — фиолетовый
+  begemotDim:"#f3e8ff",
+  // Типы записей
+  refund:"#f97316",      // возврат — оранжевый
+  refundDim:"#fff7ed",
 };
+
 const s = {
-  app:{ background:C.bg, minHeight:"100vh", color:C.text, fontFamily:"'Inter',system-ui,sans-serif", fontSize:14 },
-  card:{ background:C.bgCard, borderRadius:12, border:`1px solid ${C.border}`, padding:"14px 16px", marginBottom:10 },
-  label:{ fontSize:12, color:C.textSub, marginBottom:4, display:"block" },
-  input:{ background:C.bgInput, border:`1px solid ${C.border}`, borderRadius:8, color:C.text, padding:"8px 12px", fontSize:14, width:"100%", boxSizing:"border-box", outline:"none" },
+  app:{ background:C.bg, minHeight:"100vh", color:C.text, fontFamily:"-apple-system,system-ui,'Segoe UI',Roboto,sans-serif", fontSize:14, fontVariantNumeric:"tabular-nums" },
+  card:{ background:C.bgCard, border:`1px solid ${C.border}`, borderRadius:0, padding:"14px 16px", marginBottom:10 },
+  label:{ fontSize:10, color:C.textSub, marginBottom:6, display:"block", fontWeight:700, textTransform:"uppercase", letterSpacing:"1px" },
+  input:{ background:C.bgInput, border:`1px solid ${C.border}`, borderRadius:0, color:C.text, padding:"8px 12px", fontSize:14, width:"100%", boxSizing:"border-box", outline:"none", fontFamily:"inherit" },
   btn:(v="default")=>({
-    background:v==="accent"?C.accent:v==="danger"?C.dangerDim:v==="warn"?C.warnDim:v==="refund"?C.refundDim:C.bgInput,
-    color:v==="accent"?"#fff":v==="danger"?C.danger:v==="warn"?C.warn:v==="refund"?C.refund:C.text,
-    border:`1px solid ${v==="accent"?C.accent:v==="danger"?C.danger:v==="warn"?C.warn:v==="refund"?C.refund:C.border}`,
-    borderRadius:8, padding:"8px 14px", fontSize:13, cursor:"pointer", fontWeight:500,
+    background:v==="accent"?C.brand:v==="danger"?C.dangerDim:v==="warn"?C.warnDim:v==="refund"?C.refundDim:v==="success"?C.success:v==="dark"?C.text:C.bgCard,
+    color:v==="accent"?"#fff":v==="danger"?C.danger:v==="warn"?C.warn:v==="refund"?C.refund:v==="success"?"#fff":v==="dark"?"#fff":C.text,
+    border:`1px solid ${v==="accent"?C.brand:v==="danger"?C.danger:v==="warn"?C.warn:v==="refund"?C.refund:v==="success"?C.success:v==="dark"?C.text:C.border}`,
+    borderRadius:0, padding:"8px 14px", fontSize:13, cursor:"pointer", fontWeight:700, textTransform:"uppercase", letterSpacing:"0.5px",
   }),
-  tag:(color)=>({ background:color+"22", color, border:`1px solid ${color}44`, borderRadius:6, padding:"2px 8px", fontSize:12, display:"inline-block" }),
+  tag:(color)=>({ background:color+"22", color, border:`1px solid ${color}44`, borderRadius:0, padding:"2px 8px", fontSize:11, display:"inline-block", fontWeight:700, textTransform:"uppercase", letterSpacing:"0.5px" }),
 };
 
 function Tabs({ tabs, active, onChange }){
   return (
-    <div style={{display:"flex",gap:4,marginBottom:16,background:C.bgCard,borderRadius:10,padding:4,border:`1px solid ${C.border}`}}>
+    <div style={{display:"flex",gap:0,marginBottom:24}}>
       {tabs.map(t=>(
         <button key={t.id} onClick={()=>onChange(t.id)} style={{
-          flex:1,padding:"7px 4px",fontSize:12,fontWeight:600,borderRadius:8,border:"none",cursor:"pointer",
-          background:active===t.id?C.accent:"transparent",color:active===t.id?"#fff":C.textSub,transition:"all .15s"
+          flex:1,padding:"10px 4px",fontSize:11,fontWeight:700,border:"none",cursor:"pointer",
+          background:"transparent",
+          color:active===t.id?C.brand:C.textDim,
+          borderTop:`2px solid ${active===t.id?C.brand:"transparent"}`,
+          textTransform:"uppercase",letterSpacing:"1px",
+          transition:"all .15s",
         }}>{t.label}</button>
       ))}
     </div>
@@ -162,10 +192,10 @@ function Tabs({ tabs, active, onChange }){
 
 function StatCard({ label, value, sub, color }){
   return (
-    <div style={{...s.card,padding:"12px 14px"}}>
-      <div style={{fontSize:11,color:C.textSub,marginBottom:2}}>{label}</div>
-      <div style={{fontSize:20,fontWeight:700,color:color||C.text}}>{value}</div>
-      {sub&&<div style={{fontSize:11,color:C.textDim,marginTop:2}}>{sub}</div>}
+    <div style={{background:C.bgCard,padding:16,border:`1px solid ${C.border}`}}>
+      <div style={{fontSize:10,color:C.textDim,marginBottom:6,textTransform:"uppercase",letterSpacing:"1px",fontWeight:700}}>{label}</div>
+      <div style={{fontSize:26,fontWeight:800,color:color||C.text,letterSpacing:"-0.5px",fontVariantNumeric:"tabular-nums"}}>{value}</div>
+      {sub&&<div style={{fontSize:11,color:C.textDim,marginTop:4}}>{sub}</div>}
     </div>
   );
 }
@@ -205,7 +235,7 @@ function MarkerPicker({ markers, value, onChange, extraLabel }){
               {ms.map(m=>(
                 <div key={m} onClick={()=>{onChange(m);setSearch("");}}
                   style={{padding:"8px 14px",fontSize:13,cursor:"pointer",display:"flex",justifyContent:"space-between",
-                    background:value===m?C.accentDim:"transparent",color:value===m?C.accent:C.text,
+                    background:value===m?C.brandDim:"transparent",color:value===m?C.brand:C.text,
                     borderBottom:`1px solid ${C.border}22`}}>
                   <span>{m}</span>
                   {extraLabel&&<span style={{color:C.textDim,fontSize:12}}>{extraLabel(m)}</span>}
@@ -215,7 +245,7 @@ function MarkerPicker({ markers, value, onChange, extraLabel }){
           ))
         }
       </div>
-      {value&&<div style={{marginTop:6,fontSize:12,color:C.accent}}>Выбрано: <b>{value}</b></div>}
+      {value&&<div style={{marginTop:6,fontSize:12,color:C.brand}}>Выбрано: <b>{value}</b></div>}
     </div>
   );
 }
@@ -244,9 +274,9 @@ function EditModal({ record, idx, markers, onSave, onDelete, onClose }){
           {[["sale","Продажа"],["refund","Возврат от клиента"]].map(([id,label])=>(
             <button key={id} type="button" onClick={()=>setRecordType(id)} style={{
               flex:1,padding:"7px 0",fontSize:12,fontWeight:600,borderRadius:8,cursor:"pointer",
-              border:`1px solid ${recordType===id?(id==="refund"?C.refund:C.accent):C.border}`,
-              background:recordType===id?(id==="refund"?C.refundDim:C.accentDim):C.bgInput,
-              color:recordType===id?(id==="refund"?C.refund:C.accent):C.textSub
+              border:`1px solid ${recordType===id?(id==="refund"?C.refund:C.brand):C.border}`,
+              background:recordType===id?(id==="refund"?C.refundDim:C.brandDim):C.bgInput,
+              color:recordType===id?(id==="refund"?C.refund:C.brand):C.textSub
             }}>{label}</button>
           ))}
         </div>
@@ -260,8 +290,8 @@ function EditModal({ record, idx, markers, onSave, onDelete, onClose }){
           {(markers[cat]||[]).map(m=>(
             <button key={m} type="button" onClick={()=>setMrk(m)} style={{
               fontSize:11,padding:"4px 8px",borderRadius:6,cursor:"pointer",
-              background:mrk===m?C.accentDim:C.bgInput,
-              border:`1px solid ${mrk===m?C.accent:C.border}`,color:mrk===m?C.accent:C.text
+              background:mrk===m?C.brandDim:C.bgInput,
+              border:`1px solid ${mrk===m?C.brand:C.border}`,color:mrk===m?C.brand:C.text
             }}>{m}</button>
           ))}
         </div>
@@ -328,7 +358,7 @@ function StatsBreakdown({ data, totalAmt, totalQty }){
             </div>
             <div style={{display:"flex",alignItems:"center",gap:10}}>
               <div style={{textAlign:"right"}}>
-                <div style={{color:d.amount>=0?C.accent:C.refund,fontWeight:700,fontSize:13}}>{fmt(d.amount)} р</div>
+                <div style={{color:d.amount>=0?C.brand:C.refund,fontWeight:700,fontSize:13}}>{fmt(d.amount)} р</div>
                 <div style={{fontSize:11,color:C.textSub}}>{fmt(d.qty)} шт · {totalAmt>0?(Math.abs(d.amount)/Math.abs(totalAmt)*100).toFixed(0):0}%</div>
               </div>
               <span style={{color:C.textDim,fontSize:12}}>{expanded[cat]?"▲":"▼"}</span>
@@ -341,7 +371,7 @@ function StatsBreakdown({ data, totalAmt, totalQty }){
                   padding:"7px 14px",borderBottom:`1px solid ${C.border}22`,fontSize:13}}>
                   <span style={{color:C.textSub}}>{mk}</span>
                   <div style={{textAlign:"right"}}>
-                    <div style={{color:md.amount>=0?C.accent:C.refund}}>{fmt(md.amount)} р</div>
+                    <div style={{color:md.amount>=0?C.brand:C.refund}}>{fmt(md.amount)} р</div>
                     <div style={{fontSize:11,color:C.textDim}}>{fmt(md.qty)} шт{md.defect?` · брак ${md.defect}`:""}</div>
                   </div>
                 </div>
@@ -433,7 +463,7 @@ function DayRecordsList({ dayRecs, records, onEditRecord }){
             const isOnlyDefect = !isRefund && r.qty === 0 && r.defect > 0;
             return (
               <div key={i} onClick={()=>onEditRecord({record:r,globalIdx})}
-                style={{...s.card,cursor:"pointer",borderLeft:`3px solid ${isRefund?C.refund:isOnlyDefect?C.warn:C.accent+"88"}`}}>
+                style={{...s.card,cursor:"pointer",borderLeft:`3px solid ${isRefund?C.refund:isOnlyDefect?C.warn:C.brand+"88"}`}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                   <div style={{display:"flex",alignItems:"center",gap:8}}>
                     {isRefund
@@ -449,7 +479,7 @@ function DayRecordsList({ dayRecs, records, onEditRecord }){
                     <span style={{fontSize:12,color:isRefund?C.refund:isOnlyDefect?C.warn:C.textSub}}>
                       {isRefund?"−":""}{r.qty} шт{r.defect>0?` · брак ${r.defect}`:""} · {fmt(r.amount)} р
                     </span>
-                    <span style={{fontSize:11,color:C.accent}}>✎</span>
+                    <span style={{fontSize:11,color:C.brand}}>✎</span>
                   </div>
                 </div>
                 <div style={{fontSize:12,color:C.textDim,marginTop:2}}>
@@ -519,7 +549,7 @@ function YearMonthCard({ monthKey, monthData, monthName, workshop, onEditRecord,
         </div>
         <div style={{display:"flex",alignItems:"center",gap:10}}>
           <div style={{textAlign:"right"}}>
-            <div style={{color:monthData.amount>=0?C.accent:C.refund,fontWeight:700,fontSize:14}}>{fmt(monthData.amount)} р</div>
+            <div style={{color:monthData.amount>=0?C.brand:C.refund,fontWeight:700,fontSize:14}}>{fmt(monthData.amount)} р</div>
             <div style={{fontSize:11,color:C.textSub}}>{fmt(monthData.qty)} шт · {monthData.days.size} дн.</div>
           </div>
           <span style={{color:C.textDim,fontSize:14}}>{expanded?"▲":"▼"}</span>
@@ -573,7 +603,7 @@ function DayRow({ dateLabel, dayData, workshop, onEditRecord, allRecords }){
         style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 12px",cursor:"pointer",background:C.bgInput}}>
         <span style={{color:C.textSub,fontSize:12}}>{dateLabel}</span>
         <div style={{display:"flex",gap:10,alignItems:"center",fontSize:12}}>
-          <span style={{color:dayData.amount>=0?C.accent:C.refund,fontWeight:600}}>{fmt(dayData.amount)} р</span>
+          <span style={{color:dayData.amount>=0?C.brand:C.refund,fontWeight:600}}>{fmt(dayData.amount)} р</span>
           <span style={{color:C.textDim}}>{dayData.qty} шт{dayData.defect>0?` · брак ${dayData.defect}`:""}</span>
           <span style={{color:C.textDim,fontSize:10}}>{expanded?"▲":"▼"}</span>
         </div>
@@ -598,8 +628,8 @@ function DayRow({ dateLabel, dayData, workshop, onEditRecord, allRecords }){
                 </div>
                 <div style={{display:"flex",gap:6,fontSize:11,color:C.textSub}}>
                   <span>{isRefund?"−":""}{r.qty} шт{r.defect>0?`/${r.defect}`:""}</span>
-                  <span style={{color:isRefund?C.refund:C.accent}}>{fmt(r.amount)} р</span>
-                  <span style={{color:C.accent}}>✎</span>
+                  <span style={{color:isRefund?C.refund:C.brand}}>{fmt(r.amount)} р</span>
+                  <span style={{color:C.brand}}>✎</span>
                 </div>
               </div>
             );
@@ -840,9 +870,9 @@ function AliasesModal({ cat, markerName, aliases, onAdd, onRemove, onPromote, on
         </div>
 
         {/* Основное имя */}
-        <div style={{...s.card,padding:"10px 12px",marginBottom:14,background:C.bgInput,borderColor:C.accent+"66"}}>
+        <div style={{...s.card,padding:"10px 12px",marginBottom:14,background:C.bgInput,borderColor:C.brand+"66"}}>
           <div style={{fontSize:11,color:C.textSub}}>Основное имя (выделено в списках)</div>
-          <div style={{fontSize:15,fontWeight:700,color:C.accent}}>{markerName}</div>
+          <div style={{fontSize:15,fontWeight:700,color:C.brand}}>{markerName}</div>
         </div>
 
         {/* Список алиасов */}
@@ -924,7 +954,7 @@ function RenameMarkerModal({ cat, oldName, onRename, onClose }){
           <div style={{fontSize:11,color:C.textSub}}>Категория</div>
           <div style={{fontSize:13,fontWeight:600}}>{cat}</div>
           <div style={{fontSize:11,color:C.textSub,marginTop:6}}>Текущее название</div>
-          <div style={{fontSize:13,fontWeight:600,color:C.accent}}>{oldName}</div>
+          <div style={{fontSize:13,fontWeight:600,color:C.brand}}>{oldName}</div>
         </div>
         <label style={s.label}>Новое название</label>
         <input value={newName} onChange={e=>setNewName(e.target.value)}
@@ -1576,16 +1606,16 @@ export default function App(){
     const filterBtn = (id, label, color) => (
       <button type="button" onClick={()=>setFilter(id)} style={{
         padding:"5px 10px",fontSize:11,fontWeight:600,borderRadius:6,cursor:"pointer",
-        border:`1px solid ${filter===id?(color||C.accent):C.border}`,
-        background:filter===id?((color||C.accent)+"22"):C.bgInput,
-        color:filter===id?(color||C.accent):C.textSub,
+        border:`1px solid ${filter===id?(color||C.brand):C.border}`,
+        background:filter===id?((color||C.brand)+"22"):C.bgInput,
+        color:filter===id?(color||C.brand):C.textSub,
       }}>{label}</button>
     );
     return (
       <div style={{marginBottom:12}}>
         <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="🔍 Поиск по маркировке..." style={{...s.input,marginBottom:8}}/>
         <div style={{display:"flex",gap:6,marginBottom:8,flexWrap:"wrap"}}>
-          {filterBtn("all","Все",C.accent)}
+          {filterBtn("all","Все",C.brand)}
           {filterBtn("with-stock","С остатком",C.success)}
           {filterBtn("empty","Пустые",C.danger)}
           {filterBtn("low","⚠ Мало",C.warn)}
@@ -1631,8 +1661,8 @@ export default function App(){
       <button key={m} type="button" onClick={()=>setMarker(m)} title={titleParts.join(" · ")}
         style={{
           fontSize:11, padding:"4px 8px", borderRadius:6, cursor:"pointer",
-          background: isSelected ? C.accent : (empty ? C.dangerDim : low ? C.warnDim : C.bgCard),
-          border: `1px solid ${isSelected ? C.accent : (empty ? C.danger+"88" : low ? C.warn+"88" : C.border)}`,
+          background: isSelected ? C.brand : (empty ? C.dangerDim : low ? C.warnDim : C.bgCard),
+          border: `1px solid ${isSelected ? C.brand : (empty ? C.danger+"88" : low ? C.warn+"88" : C.border)}`,
           color: isSelected ? "#fff" : (empty ? C.danger : low ? C.warn : C.text),
           display:"flex", alignItems:"center", gap:4, maxWidth:"100%",
         }}>
@@ -1701,9 +1731,9 @@ export default function App(){
           setCatFilter(p => ({...p, [cat]: id}));
         }} style={{
           padding:"2px 7px",fontSize:10,fontWeight:600,borderRadius:5,cursor:"pointer",
-          border:`1px solid ${isActive?(color||C.accent):C.border+"88"}`,
-          background:isActive?((color||C.accent)+"22"):"transparent",
-          color:isActive?(color||C.accent):C.textSub,
+          border:`1px solid ${isActive?(color||C.brand):C.border+"88"}`,
+          background:isActive?((color||C.brand)+"22"):"transparent",
+          color:isActive?(color||C.brand):C.textSub,
         }}>{label}</button>
       );
     };
@@ -1729,7 +1759,7 @@ export default function App(){
         {expanded && (
           <div style={{borderTop:`1px solid ${C.border}`,padding:"6px 14px",display:"flex",gap:5,flexWrap:"wrap",alignItems:"center",background:"#13161f",borderBottom:`1px solid ${C.border}`}}>
             <span style={{fontSize:10,color:C.textDim,marginRight:4}}>Фильтр:</span>
-            {catFilterBtn("all","Все",C.accent)}
+            {catFilterBtn("all","Все",C.brand)}
             {catFilterBtn("with-stock","С остатком",C.success)}
             {catFilterBtn("empty","Пустые",C.danger)}
             {hasLow && catFilterBtn("low","⚠ Мало",C.warn)}
@@ -1856,7 +1886,7 @@ export default function App(){
               <div key={dk} style={{display:"flex",justifyContent:"space-between",padding:"7px 0",borderBottom:`1px solid ${C.border}`,fontSize:13}}>
                 <span style={{color:C.textSub}}>{label}</span>
                 <div style={{textAlign:"right"}}>
-                  <span style={{color:d.amount>=0?C.accent:C.refund,marginRight:12}}>{fmt(d.amount)} р</span>
+                  <span style={{color:d.amount>=0?C.brand:C.refund,marginRight:12}}>{fmt(d.amount)} р</span>
                   <span style={{color:C.textSub,fontSize:12}}>{d.qty} шт{d.defect?` · брак ${d.defect}`:""}</span>
                 </div>
               </div>
@@ -1911,16 +1941,15 @@ export default function App(){
   if(!tokenOk) return (
     <div style={{...s.app,display:"flex",alignItems:"center",justifyContent:"center",minHeight:"100vh"}}>
       <div style={{width:"100%",maxWidth:380,padding:24}}>
-        <div style={{textAlign:"center",marginBottom:24}}>
-          <div style={{fontSize:32,marginBottom:8}}>🔑</div>
-          <div style={{fontSize:22,fontWeight:700}}>Мастерская</div>
-          <div style={{fontSize:13,color:C.textSub,marginTop:4}}>Подключение к хранилищу</div>
+        <div style={{textAlign:"center",marginBottom:32}}>
+          <div style={{width:64,height:64,background:C.brand,borderRadius:12,display:"flex",alignItems:"center",justifyContent:"center",fontSize:32,margin:"0 auto 16px"}}>🔑</div>
+          <div style={{fontSize:22,fontWeight:800,letterSpacing:"-0.3px"}}>Мастерская</div>
+          <div style={{fontSize:10,fontWeight:700,color:C.brand,letterSpacing:"1px",textTransform:"uppercase",marginTop:4}}>Простое Решение</div>
+          <div style={{fontSize:13,color:C.textSub,marginTop:8}}>Подключение к хранилищу</div>
         </div>
-        <div style={{...s.card,marginBottom:16,background:C.bgInput,padding:"10px 12px"}}>
-          <div style={{fontSize:11,color:C.textSub,lineHeight:1.5}}>
-            📦 Данные хранятся в GitHub (приватный репозиторий).<br/>
-            Введите Personal Access Token от вашего GitHub.
-          </div>
+        <div style={{background:C.brandDim,border:`1px solid ${C.brand}44`,padding:"10px 12px",marginBottom:16,fontSize:11,color:C.textSub,lineHeight:1.5}}>
+          📦 Данные хранятся в GitHub (приватный репозиторий).<br/>
+          Введите Personal Access Token от вашего GitHub.
         </div>
         <label style={s.label}>GitHub Personal Access Token</label>
         <input type="password" value={tokenInput}
@@ -1928,15 +1957,15 @@ export default function App(){
           onKeyDown={e=>{if(e.key==="Enter"&&!tokenChecking)handleTokenSubmit();}}
           placeholder="ghp_xxxxxxxxxxxx"
           style={{...s.input,marginBottom:10,fontSize:13}}/>
-        {tokenError&&<div style={{fontSize:12,color:C.danger,marginBottom:10}}>{tokenError}</div>}
+        {tokenError&&<div style={{fontSize:12,color:C.danger,marginBottom:10,fontWeight:700}}>{tokenError}</div>}
         <button onClick={handleTokenSubmit} disabled={tokenChecking}
-          style={{...s.btn("accent"),width:"100%",padding:"12px 0",fontSize:15,fontWeight:700,opacity:tokenChecking?.6:1}}>
+          style={{...s.btn("accent"),width:"100%",padding:"14px 0",fontSize:14,opacity:tokenChecking?.6:1}}>
           {tokenChecking ? "Проверка..." : "Подключиться"}
         </button>
-        <div style={{fontSize:11,color:C.textDim,marginTop:12,lineHeight:1.5}}>
+        <div style={{fontSize:11,color:C.textDim,marginTop:16,lineHeight:1.6}}>
           Токен создаётся в:<br/>
           GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic) → Generate new token (classic)<br/>
-          Нужны права: <b>repo</b> (полный доступ к репозиториям).
+          Нужны права: <b style={{color:C.textSub}}>repo</b> (полный доступ к репозиториям).
         </div>
       </div>
     </div>
@@ -1944,7 +1973,10 @@ export default function App(){
 
   if(loading || !pwdLoaded) return (
     <div style={{...s.app,display:"flex",alignItems:"center",justifyContent:"center",minHeight:"100vh"}}>
-      <div style={{textAlign:"center"}}><div style={{fontSize:32,marginBottom:12}}>🔑</div><div style={{fontSize:14,color:C.textSub}}>Загрузка...</div></div>
+      <div style={{textAlign:"center"}}>
+        <div style={{width:64,height:64,background:C.brand,borderRadius:12,display:"flex",alignItems:"center",justifyContent:"center",fontSize:32,margin:"0 auto 16px"}}>🔑</div>
+        <div style={{fontSize:14,color:C.textSub,fontWeight:700,textTransform:"uppercase",letterSpacing:"1px"}}>Загрузка...</div>
+      </div>
     </div>
   );
 
@@ -1953,9 +1985,9 @@ export default function App(){
     <div style={{...s.app,display:"flex",alignItems:"center",justifyContent:"center",minHeight:"100vh"}}>
       <div style={{width:"100%",maxWidth:320,padding:24}}>
         <div style={{textAlign:"center",marginBottom:32}}>
-          <div style={{fontSize:32,marginBottom:8}}>🔑</div>
-          <div style={{fontSize:22,fontWeight:700}}>Мастерская</div>
-          <div style={{fontSize:13,color:C.textSub,marginTop:4}}>Простое Решение</div>
+          <div style={{width:64,height:64,background:C.brand,borderRadius:12,display:"flex",alignItems:"center",justifyContent:"center",fontSize:32,margin:"0 auto 16px"}}>🔑</div>
+          <div style={{fontSize:22,fontWeight:800,letterSpacing:"-0.3px"}}>Мастерская</div>
+          <div style={{fontSize:10,fontWeight:700,color:C.brand,letterSpacing:"1px",textTransform:"uppercase",marginTop:4}}>Простое Решение</div>
         </div>
         <label style={s.label}>Введите пароль</label>
         <input type="password" value={passwordInput}
@@ -1963,9 +1995,9 @@ export default function App(){
           onKeyDown={e=>{if(e.key==="Enter")handleLogin();}}
           placeholder="Пароль"
           style={{...s.input,marginBottom:12,textAlign:"center",fontSize:16,letterSpacing:2}}/>
-        {authError&&<div style={{fontSize:12,color:C.danger,marginBottom:10,textAlign:"center"}}>{authError}</div>}
-        <button onClick={handleLogin} style={{...s.btn("accent"),width:"100%",padding:"14px 0",fontSize:16,fontWeight:700}}>Войти</button>
-        <div style={{fontSize:11,color:C.textDim,textAlign:"center",marginTop:12,lineHeight:1.5}}>
+        {authError&&<div style={{fontSize:12,color:C.danger,marginBottom:10,textAlign:"center",fontWeight:700}}>{authError}</div>}
+        <button onClick={handleLogin} style={{...s.btn("accent"),width:"100%",padding:"14px 0",fontSize:14}}>Войти</button>
+        <div style={{fontSize:11,color:C.textDim,textAlign:"center",marginTop:16,lineHeight:1.6}}>
           Пароль определяет мастерскую<br/>
           (по умолчанию: smart123 / begemot123)
         </div>
@@ -2046,28 +2078,39 @@ export default function App(){
       {photoModal&&<PhotoViewModal photo={photoModal.url} markerName={photoModal.markerName}
         onClose={()=>setPhotoModal(null)}/>}
       <div style={{maxWidth:600,margin:"0 auto",padding:"12px 12px 40px"}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+        {/* Шапка с логотипом */}
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"12px 16px",background:C.bgCard,borderBottom:`3px solid ${C.brand}`,marginBottom:16}}>
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
+            <div style={{width:32,height:32,background:C.brand,borderRadius:6,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>🔑</div>
+            <div style={{lineHeight:1.1}}>
+              <div style={{fontWeight:800,fontSize:15,color:C.text,letterSpacing:"-0.3px"}}>Мастерская</div>
+              <div style={{fontSize:9,fontWeight:700,color:C.brand,letterSpacing:"1px",textTransform:"uppercase"}}>Простое Решение</div>
+            </div>
+          </div>
+          <div style={{display:"flex",gap:6,alignItems:"center"}}>
+            <button onClick={()=>setPwdModalOpen(true)} style={{background:"transparent",color:C.textSub,border:`1px solid ${C.border}`,padding:"5px 10px",fontSize:11,cursor:"pointer",borderRadius:0,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.5px"}}>🔑</button>
+            <button onClick={handleLogout} style={{background:"transparent",color:C.textSub,border:`1px solid ${C.border}`,padding:"5px 10px",fontSize:11,cursor:"pointer",borderRadius:0,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.5px"}}>Сменить</button>
+            <button onClick={handleTokenLogout} style={{background:"transparent",color:C.danger,border:`1px solid ${C.danger}`,padding:"5px 10px",fontSize:11,cursor:"pointer",borderRadius:0,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.5px"}}>Выйти</button>
+          </div>
+        </div>
+        {/* Строка с мастерской + датой + статусом */}
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16,padding:"0 4px"}}>
           <div style={{display:"flex",alignItems:"center",gap:8}}>
-            <span style={{...s.tag(wsColor),fontSize:13,fontWeight:700}}>{workshop}</span>
+            <span style={{background:wsColor,color:"#fff",padding:"4px 12px",borderRadius:0,fontWeight:700,fontSize:11,letterSpacing:"1px",textTransform:"uppercase"}}>{workshop}</span>
             <span style={{fontSize:12,color:C.textDim}}>{todayStr()}</span>
             {/* Индикатор статуса сохранения */}
             {Object.entries(saveStatus).map(([key, status]) => (
               <span key={key} style={{
                 fontSize:10,
                 padding:"2px 6px",
-                borderRadius:4,
                 background: status === "saving" ? C.warnDim : status === "error" ? C.dangerDim : C.successDim,
                 color: status === "saving" ? C.warn : status === "error" ? C.danger : C.success,
                 border: `1px solid ${status === "saving" ? C.warn : status === "error" ? C.danger : C.success}44`,
+                fontWeight: 700,
               }}>
-                {status === "saving" ? "⏳ Сохранение..." : status === "error" ? "⚠ Ошибка" : "✓ Сохранено"}
+                {status === "saving" ? "⏳" : status === "error" ? "⚠" : "✓"}
               </span>
             ))}
-          </div>
-          <div style={{display:"flex",gap:6}}>
-            <button onClick={()=>setPwdModalOpen(true)} style={{...s.btn(),padding:"5px 10px",fontSize:12}}>🔑 Пароль</button>
-            <button onClick={handleLogout} style={{...s.btn(),padding:"5px 10px",fontSize:12}}>Сменить мастерскую</button>
-            <button onClick={handleTokenLogout} style={{...s.btn("danger"),padding:"5px 10px",fontSize:12}}>Отключить хранилище</button>
           </div>
         </div>
         <Tabs tabs={tabs} active={tab} onChange={setTab}/>
@@ -2090,9 +2133,9 @@ export default function App(){
                     }
                   }} style={{
                     flex:1,padding:"8px 0",fontSize:12,fontWeight:600,borderRadius:8,cursor:"pointer",
-                    border:`1px solid ${recordType===id?(id==="refund"?C.refund:C.accent):C.border}`,
-                    background:recordType===id?(id==="refund"?C.refundDim:C.accentDim):C.bgInput,
-                    color:recordType===id?(id==="refund"?C.refund:C.accent):C.textSub
+                    border:`1px solid ${recordType===id?(id==="refund"?C.refund:C.brand):C.border}`,
+                    background:recordType===id?(id==="refund"?C.refundDim:C.brandDim):C.bgInput,
+                    color:recordType===id?(id==="refund"?C.refund:C.brand):C.textSub
                   }}>{label}</button>
                 ))}
               </div>
@@ -2276,7 +2319,7 @@ export default function App(){
                 {records.map((r,gi)=>r.workshop===workshop?{r,gi}:null).filter(Boolean).slice(-5).reverse().map(({r,gi})=>{
                   const isRefund = r.recordType==="refund";
                   return (
-                    <div key={gi} style={{...s.card,cursor:"pointer",borderLeft:`3px solid ${isRefund?C.refund:C.accent+"88"}`}} onClick={()=>setEditRec({record:r,globalIdx:gi})}>
+                    <div key={gi} style={{...s.card,cursor:"pointer",borderLeft:`3px solid ${isRefund?C.refund:C.brand+"88"}`}} onClick={()=>setEditRec({record:r,globalIdx:gi})}>
                       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                         <div style={{display:"flex",alignItems:"center",gap:8}}>
                           <span style={{color:isRefund?C.refund:C.success,fontWeight:700,fontSize:16}}>{isRefund?"↩":"↑"}</span>
@@ -2285,7 +2328,7 @@ export default function App(){
                         </div>
                         <div style={{display:"flex",gap:8,alignItems:"center"}}>
                           <span style={{fontSize:12,color:isRefund?C.refund:C.textSub}}>{isRefund?"−":""}{r.qty} шт · {fmt(r.amount)} р</span>
-                          <span style={{fontSize:11,color:C.accent}}>✎</span>
+                          <span style={{fontSize:11,color:C.brand}}>✎</span>
                         </div>
                       </div>
                       <div style={{fontSize:12,color:C.textDim,marginTop:2}}>{r.category}{r.defect>0?` · брак ${r.defect}`:""}{r.comment&&` · ${r.comment}`}</div>
@@ -2304,9 +2347,9 @@ export default function App(){
               {[["day","День"],["month","Месяц"],["year","Год"]].map(([id,label])=>(
                 <button key={id} onClick={()=>setStatsPeriod(id)} style={{
                   flex:1,padding:"7px 0",fontSize:12,fontWeight:600,borderRadius:8,
-                  border:`1px solid ${statsPeriod===id?C.accent:C.border}`,
-                  background:statsPeriod===id?C.accentDim:C.bgInput,
-                  color:statsPeriod===id?C.accent:C.textSub,cursor:"pointer"
+                  border:`1px solid ${statsPeriod===id?C.brand:C.border}`,
+                  background:statsPeriod===id?C.brandDim:C.bgInput,
+                  color:statsPeriod===id?C.brand:C.textSub,cursor:"pointer"
                 }}>{label}</button>
               ))}
             </div>
@@ -2331,9 +2374,9 @@ export default function App(){
               {[["ws","Мастерская"],["main","Общий склад"],["move","Перемещение"]].map(([id,label])=>(
                 <button key={id} onClick={()=>setStockTab(id)} style={{
                   flex:1,padding:"6px 4px",fontSize:12,fontWeight:600,borderRadius:8,
-                  border:`1px solid ${stockTab===id?C.accent:C.border}`,
-                  background:stockTab===id?C.accentDim:C.bgInput,
-                  color:stockTab===id?C.accent:C.textSub,cursor:"pointer"
+                  border:`1px solid ${stockTab===id?C.brand:C.border}`,
+                  background:stockTab===id?C.brandDim:C.bgInput,
+                  color:stockTab===id?C.brand:C.textSub,cursor:"pointer"
                 }}>{label}</button>
               ))}
             </div>
@@ -2389,8 +2432,8 @@ export default function App(){
         {/* ══ МАРКИРОВКИ (Цены + Алиасы + Комментарии) ══ */}
         {tab==="prices"&&(
           <div>
-            <div style={{...s.card,marginBottom:16,borderColor:C.accent+"44"}}>
-              <div style={{fontSize:13,fontWeight:700,marginBottom:12,color:C.accent}}>+ Добавить маркировку</div>
+            <div style={{...s.card,marginBottom:16,borderColor:C.brand+"44"}}>
+              <div style={{fontSize:13,fontWeight:700,marginBottom:12,color:C.brand}}>+ Добавить маркировку</div>
               <label style={s.label}>Категория</label>
               <select value={newMarkerCat} onChange={e=>setNewMarkerCat(e.target.value)} style={{...s.input,marginBottom:10}}>
                 <option value="">Выбрать...</option>
@@ -2473,8 +2516,8 @@ export default function App(){
                                 ...s.btn(),
                                 padding:"5px 8px",
                                 fontSize:11,
-                                borderColor: mAliases.length > 0 ? C.accent+"66" : C.border,
-                                color: mAliases.length > 0 ? C.accent : C.textSub,
+                                borderColor: mAliases.length > 0 ? C.brand+"66" : C.border,
+                                color: mAliases.length > 0 ? C.brand : C.textSub,
                               }}>≡</button>
                             <button onClick={()=>setRenameModal({cat, oldName:m})} title="Переименовать"
                               style={{...s.btn(),padding:"5px 8px",fontSize:11}}>✎</button>
