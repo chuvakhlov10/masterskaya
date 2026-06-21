@@ -250,11 +250,11 @@ function TypeBadge({ recordType }){
 
 function MarkerPicker({ markers, value, onChange, extraLabel }){
   const [search, setSearch] = useState("");
+  const [collapsed, setCollapsed] = useState({});
   const allM = Object.entries(markers).flatMap(([cat,ms])=>ms.map(m=>({cat,m})));
   const filtered = search.trim()
     ? allM.filter(({cat,m})=>m.toLowerCase().includes(search.toLowerCase())||cat.toLowerCase().includes(search.toLowerCase()))
     : allM;
-  // Сортируем по категориям и внутри по алфавиту
   const grouped = {};
   filtered.forEach(({cat,m})=>{ if(!grouped[cat]) grouped[cat]=[]; grouped[cat].push(m); });
   Object.keys(grouped).forEach(cat => grouped[cat].sort((a,b)=>a.localeCompare(b,"ru")));
@@ -265,11 +265,17 @@ function MarkerPicker({ markers, value, onChange, extraLabel }){
       <div style={{maxHeight:240,overflowY:"auto",border:`1px solid ${C.border}`,background:C.bgCard}}>
         {Object.entries(grouped).sort((a,b)=>a[0].localeCompare(b[0],"ru")).length===0
           ? <div style={{padding:"10px 14px",fontSize:13,color:C.textDim}}>Ничего не найдено</div>
-          : Object.entries(grouped).sort((a,b)=>a[0].localeCompare(b[0],"ru")).map(([cat,ms])=>(
+          : Object.entries(grouped).sort((a,b)=>a[0].localeCompare(b[0],"ru")).map(([cat,ms])=>{
+            const isCollapsed = collapsed[cat] && !search;
+            return (
             <div key={cat}>
-              <div style={{padding:"6px 12px",fontSize:11,fontWeight:800,color:C.text,background:C.bgSection,
-                borderBottom:`1px solid ${C.border}`,textTransform:"uppercase",letterSpacing:"1px"}}>{cat}</div>
-              {ms.map(m=>(
+              <div onClick={()=>setCollapsed(p=>({...p,[cat]:!p[cat]}))}
+                style={{padding:"6px 12px",fontSize:11,fontWeight:800,color:C.text,background:C.bgSection,
+                borderBottom:`1px solid ${C.border}`,textTransform:"uppercase",letterSpacing:"1px",cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <span>{cat}</span>
+                <span style={{fontSize:10}}>{isCollapsed?"▼":"▲"}</span>
+              </div>
+              {!isCollapsed && ms.map(m=>(
                 <div key={m} onClick={()=>{onChange(m);setSearch("");}}
                   style={{padding:"8px 14px",fontSize:13,cursor:"pointer",display:"flex",justifyContent:"space-between",
                     background:value===m?C.brandDim:"transparent",color:value===m?C.brand:C.text,
@@ -279,7 +285,8 @@ function MarkerPicker({ markers, value, onChange, extraLabel }){
                 </div>
               ))}
             </div>
-          ))
+            );
+          })
         }
       </div>
       {value&&<div style={{marginTop:6,fontSize:12,color:C.brand,fontWeight:700}}>Выбрано: <b>{value}</b></div>}
@@ -1891,23 +1898,15 @@ export default function App(){
 
   // ── Кнопка маркировки в форме записи ──
   function renderMarkerButton(m, isService, yearCount){
-    const wq = isService ? 0 : (wsStock[m]||0);
-    const cfg = safeStockCfg[m]||{};
-    const low = !isService && cfg.threshold>0 && wq<=cfg.threshold && wq > 0;
-    const empty = !isService && wq===0;
     const isSelected = marker === m;
     const mAliases = getAliases(m);
-    const titleParts = [];
-    if(yearCount) titleParts.push(`${yearCount} ключей за год`);
-    if(!isService) titleParts.push(`остаток ${wq} шт`);
-    if(mAliases.length > 0) titleParts.push(`алиасы: ${mAliases.join(", ")}`);
     return (
-      <button key={m} type="button" onClick={()=>{setMarker(m);setShowAllMarkers(false);setMarkerSearch("");}} title={titleParts.join(" · ")}
+      <button key={m} type="button" onClick={()=>{setMarker(m);setShowAllMarkers(false);setMarkerSearch("");}}
         style={{
           fontSize:11, padding:"4px 8px", borderRadius:6, cursor:"pointer",
-          background: isSelected ? C.brand : (empty ? C.dangerDim : low ? C.warnDim : C.bgCard),
-          border: `1px solid ${isSelected ? C.brand : (empty ? C.danger+"88" : low ? C.warn+"88" : C.border)}`,
-          color: isSelected ? "#fff" : (empty ? C.danger : low ? C.warn : C.text),
+          background: isSelected ? C.brand : C.bgCard,
+          border: `1px solid ${isSelected ? C.brand : C.border}`,
+          color: isSelected ? "#fff" : C.text,
           display:"flex", alignItems:"center", gap:4, maxWidth:"100%",
         }}>
         <span style={{fontWeight:600}}>{m}</span>
@@ -1916,8 +1915,6 @@ export default function App(){
             ={mAliases.length > 1 ? `${mAliases[0]} +${mAliases.length-1}` : mAliases[0]}
           </span>
         )}
-        {!isService && wq > 0 && <span style={{fontSize:9,opacity:.7}}>{wq}</span>}
-        {yearCount && <span style={{fontSize:9,opacity:.5}}>({yearCount})</span>}
       </button>
     );
   }
@@ -2419,11 +2416,21 @@ export default function App(){
                 )}
               </div>
 
+              {/* Выбранная маркировка — показываем когда список свёрнут */}
+              {marker && !showAllMarkers && category !== "Прочие услуги" && (
+                <div style={{...s.card,padding:"8px 12px",marginBottom:8,background:C.brandDim,borderColor:C.brand+"44",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <span style={{fontSize:13,fontWeight:700,color:C.brand}}>{marker}</span>
+                  <button type="button" onClick={()=>{setMarker("");setShowAllMarkers(true);}} style={{fontSize:11,color:C.danger,background:"transparent",border:"none",cursor:"pointer",fontWeight:700}}>✕ Изменить</button>
+                </div>
+              )}
+
               {/* Поле поиска — показываем только в режиме "Показать все" или для услуг */}
               {(showAllMarkers || category === "Прочие услуги") && (
                 <input value={markerSearch} onChange={e=>setMarkerSearch(e.target.value)} placeholder="🔍 Поиск..." style={{...s.input,marginBottom:8}}/>
               )}
 
+              {/* Список маркировок — скрываем если уже выбрана и список свёрнут */}
+              {(!marker || showAllMarkers || category === "Прочие услуги") && (
               <div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:8,maxHeight:showAllMarkers?400:200,overflowY:"auto",padding:4,background:C.bgInput,border:`1px solid ${C.border}`}}>
                 {(() => {
                   const isService = category === "Прочие услуги";
@@ -2471,6 +2478,7 @@ export default function App(){
                   return top.map(([m, c]) => renderMarkerButton(m, isService, c));
                 })()}
               </div>
+              )}
 
             </div>
             {markerPhoto&&(
@@ -2521,7 +2529,7 @@ export default function App(){
                 <label style={{fontSize:12,color:C.textSub,display:"flex",gap:5,alignItems:"center"}}>
                   <input type="checkbox" checked={manualAmount||recordType==="refund"}
                     disabled={recordType==="refund"}
-                    onChange={e=>setManualAmount(e.target.checked)} style={{width:"auto"}}/> вручную
+                    onChange={e=>setManualAmount(e.target.checked)} style={{width:"auto"}}/> Сумма вручную
                 </label>
               </div>
               <NumInput value={amount} onChange={v=>{if(manualAmount||recordType==="refund"||!prices[marker])setAmount(v);}}
@@ -2596,13 +2604,14 @@ export default function App(){
         {/* ══ СКЛАД ══ */}
         {tab==="stock"&&(
           <div>
-            <div style={{display:"flex",gap:6,marginBottom:14}}>
+            <div style={{display:"flex",gap:1,marginBottom:16,background:C.border,padding:1}}>
               {[["ws",workshop],["main","Общий склад"],["move","Перемещение"]].map(([id,label])=>(
                 <button key={id} onClick={()=>setStockTab(id)} style={{
-                  flex:1,padding:"6px 4px",fontSize:12,fontWeight:600,borderRadius:8,
-                  border:`1px solid ${stockTab===id?C.brand:C.border}`,
-                  background:stockTab===id?C.brandDim:C.bgInput,
-                  color:stockTab===id?C.brand:C.textSub,cursor:"pointer"
+                  flex:1,padding:"12px 4px",fontSize:12,fontWeight:800,border:"none",cursor:"pointer",
+                  background:stockTab===id?C.bgCard:C.bgSection,
+                  color:stockTab===id?C.brand:C.textSub,
+                  borderTop:`3px solid ${stockTab===id?C.brand:"transparent"}`,
+                  textTransform:"uppercase",letterSpacing:"0.8px",transition:"all .15s",
                 }}>{label}</button>
               ))}
             </div>
