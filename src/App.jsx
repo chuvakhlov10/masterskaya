@@ -95,18 +95,21 @@ function NumInput({ value, onChange, style, min="0", placeholder="" }) {
 }
 
 // ── Инпут с кнопками + и - ──
-// silent=true — не вызывает onChange при нажатии кнопок (только локальный state + debouncedSave)
-// silent=false — мгновенный onChange (для формы записи)
 function StepperInput({ value, onChange, step = 1, min = 0, style, inputStyle, silent = false }) {
   const [localVal, setLocalVal] = useState(String(value ?? ""));
+  const skipSyncRef = useRef(false);
 
   useEffect(() => {
-    setLocalVal(String(value ?? ""));
+    if (!skipSyncRef.current) {
+      setLocalVal(String(value ?? ""));
+    }
+    skipSyncRef.current = false;
   }, [value]);
 
   const fireChange = (v) => {
     setLocalVal(String(v));
-    if (!silent) onChange(v);
+    skipSyncRef.current = true;
+    onChange(v);
   };
 
   const dec = () => {
@@ -2019,8 +2022,8 @@ export default function App(){
                   </div>
                   <StepperInput value={q} onChange={async nq=>{
                     const ns={...stockObj,[m]:nq};
-                    if(isWS){debouncedSave(`stock:ws:${workshop}`,ns);}
-                    else{debouncedSave("stock:main",ns);}
+                    if(isWS){setStockWS(p=>({...p,[workshop]:ns}));debouncedSave(`stock:ws:${workshop}`,ns);}
+                    else{setStockMain(ns);debouncedSave("stock:main",ns);}
                   }} inputStyle={{color:q===0?C.danger:C.success}} silent/>
                   <button onClick={()=>setNoteModal({markerName:m})} title="Комментарий"
                     style={{...s.btn(),padding:"5px 6px",fontSize:11,borderColor:mNote?C.warn+"66":C.border,color:mNote?C.warn:C.textSub}}>💬</button>
@@ -2753,7 +2756,7 @@ export default function App(){
                             {mNote && <div style={{fontSize:10,color:C.warn,marginTop:2,fontStyle:"italic"}}>💬 {mNote}</div>}
                           </div>
                           <div style={{display:"flex",alignItems:"center",gap:6}}>
-                            <StepperInput value={safePrices[m]||0} onChange={async (val) => { const np = {...safePrices}; if(val > 0) np[m] = val; else delete np[m]; debouncedSave("prices", np); }} step={10} silent />
+                            <StepperInput value={safePrices[m]||0} onChange={async (val) => { const np = {...safePrices}; if(val > 0) np[m] = val; else delete np[m]; setPrices(np); debouncedSave("prices", np); }} step={10} silent />
                             <span style={{fontSize:12,color:C.textSub,whiteSpace:"nowrap"}}>р/шт</span>
                             <button onClick={()=>setNoteModal({markerName:m})} title="Комментарий" style={{...s.btn(),padding:"5px 8px",fontSize:11,borderColor:mNote?C.warn+"66":C.border,color:mNote?C.warn:C.textSub}}>💬</button>
                             <button onClick={()=>setAliasesModal({cat, markerName:m})} title="Алиасы" style={{...s.btn(),padding:"5px 8px",fontSize:11,borderColor:mAliases.length>0?C.brand+"66":C.border,color:mAliases.length>0?C.brand:C.textSub}}>≡</button>
