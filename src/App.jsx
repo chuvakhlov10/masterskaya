@@ -33,6 +33,14 @@ if (typeof window !== "undefined") {
   }
 }
 
+// Глобальная функция для уведомления других клиентов
+function ablyNotify() {
+  if (ablyChannel) {
+    ablyChannel.publish("changed", { ts: Date.now() });
+    console.log("[ABLY] Notified others");
+  }
+}
+
 const DEFAULT_MARKERS = {
   "Автомобильные": ["Замена корпуса","HD39RP","Нарезка лезвия","LD-1P","MIT8AP","MIT8RP (п.ч.)","XT27A"],
   "Английские": ["APK-1","TL-3R","BUL5D","45-2","Аблой","Favour","CI51D","UL050M","China 2008","AB015","BUL-7D","BLT1R","Solex","UL-1","YA4","UL-4","ED3R","Apex-04"],
@@ -1434,7 +1442,7 @@ export default function App(){
     const next = {...safeSubcategories, [cat]: nextSubs};
     setSubcategories(next);
     await sSet("subcategories", next);
-    return {ok:true, text:`«${oldName}» → «${newName}»`};
+    return {ok:true, text:`«${oldName}» → «${newName}»`}; ablyNotify();
   }
 
   // переименование маркировки
@@ -1468,8 +1476,9 @@ export default function App(){
     await sSet(key, value);
     // Уведомляем других через Ably
     if (ablyChannel) {
-      ablyChannel.publish('changed', { ts: Date.now() });
+      ablyChannel.publish("changed", { ts: Date.now() });
     }
+    ablyNotify();
   }
 
   useEffect(() => {
@@ -1532,7 +1541,7 @@ export default function App(){
     window.__masterskayaPoll = poll;
 
     const initialTimer = setTimeout(poll, 3000);
-    const interval = setInterval(poll, 30000); // polling каждые 30 сек (WS для мгновенной)
+    const interval = setInterval(poll, 10000); // polling каждые 30 сек (WS для мгновенной)
 
     return () => {
       clearTimeout(initialTimer);
@@ -1681,7 +1690,7 @@ export default function App(){
     const next = {...passwords, [workshop]: newHash};
     setPasswords(next);
     await sSet("passwords", next);
-    return {ok:true, text:"Пароль обновлён"};
+    return {ok:true, text:"Пароль обновлён"}; ablyNotify();
   }
 
   // ── добавление записи ──
@@ -1711,7 +1720,8 @@ export default function App(){
     // Сброс формы — qty/defect по 0 (как просил пользователь)
     setMarker(""); setQty(0); setDefect(0); setAmount(0);
     setManualAmount(false); setComment(""); setRecordType("sale");
-    setSubmitMsg({ok:true, text: rec.recordType==="refund" ? "Возврат оформлен" : (rec.qty===0&&rec.defect>0 ? `Брак оформлен (${rec.defect} шт)` : "Запись добавлена")});
+    setSubmitMsg({ok:true, text: rec.recordType==="refund" ? "Возврат оформлен" : (rec.qty===0&&rec.defect>0 ? `Брак оформлен (${rec.defect} шт)` : "Запись добавлен")});
+    ablyNotify();
     setTimeout(()=>setSubmitMsg(null), 2000);
   }
 
@@ -1735,6 +1745,7 @@ export default function App(){
     setRecords(next); await sSet("records", next);
     setStockWS(p=>({...p,[updated.workshop]:wsStk})); await sSet(`stock:ws:${updated.workshop}`, wsStk);
     setEditRec(null);
+    ablyNotify();
   }
 
   async function handleEditDelete(gi){
@@ -1750,6 +1761,7 @@ export default function App(){
     setRecords(next); await sSet("records", next);
     setStockWS(p=>({...p,[old.workshop]:wsStk})); await sSet(`stock:ws:${old.workshop}`, wsStk);
     setEditRec(null);
+    ablyNotify();
   }
 
   // ── склад: перемещение ──
@@ -1773,7 +1785,7 @@ export default function App(){
     if((markers[newMarkerCat]||[]).includes(nm)){setNewMarkerMsg({ok:false,text:"Уже есть"});return;}
     const next = {...markers, [newMarkerCat]:[...(markers[newMarkerCat]||[]), nm]};
     setMarkers(next); await sSet("custom:markers", next);
-    setNewMarkerName(""); setNewMarkerMsg({ok:true, text:`«${nm}» добавлена`});
+    setNewMarkerName(""); setNewMarkerMsg({ok:true, text:`«${nm}» добавлена`}); ablyNotify();
     setTimeout(()=>setNewMarkerMsg(null), 2000);
   }
   async function deleteMarker(cat,m){
@@ -1811,7 +1823,7 @@ export default function App(){
     const next = {...aliases, [markerName]: [...existing, alias]};
     setAliases(next);
     await sSet("marker-aliases", next);
-    return {ok:true, text:`Алиас «${alias}» добавлен`};
+    return {ok:true, text:`Алиас «${alias}» добавлен`}; ablyNotify();
   }
 
   async function removeAlias(markerName, alias){
@@ -1820,7 +1832,7 @@ export default function App(){
     if(next[markerName].length === 0) delete next[markerName];
     setAliases(next);
     await sSet("marker-aliases", next);
-    return {ok:true, text:`Алиас «${alias}» удалён`};
+    return {ok:true, text:`Алиас «${alias}» удалён`}; ablyNotify();
   }
 
   // Сделать алиас основным именем (старое основное становится алиасом)
@@ -2001,7 +2013,7 @@ export default function App(){
       }
     });
 
-    return {ok:true, text:`«${oldName}» → «${newName}»`};
+    return {ok:true, text:`«${oldName}» → «${newName}»`}; ablyNotify();
   }
 
   // ── Панель управления складом: поиск + сортировка + фильтры ──
@@ -2391,7 +2403,7 @@ export default function App(){
     }
     setNotes(next);
     await sSet("marker-notes", next);
-    return {ok:true, text: trimmed ? "Комментарий сохранён" : "Комментарий удалён"};
+    return {ok:true, text: trimmed ? "Комментарий сохранён" : "Комментарий удалён"}; ablyNotify();
   }
 
   // Найти алиасы для маркировки (возвращает массив)
