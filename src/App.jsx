@@ -266,7 +266,7 @@ function MarkerPicker({ markers, value, onChange, extraLabel }){
         {Object.entries(grouped).sort((a,b)=>a[0].localeCompare(b[0],"ru")).length===0
           ? <div style={{padding:"10px 14px",fontSize:13,color:C.textDim}}>Ничего не найдено</div>
           : Object.entries(grouped).sort((a,b)=>a[0].localeCompare(b[0],"ru")).map(([cat,ms])=>{
-            const isCollapsed = collapsed[cat] && !search;
+            const isCollapsed = !search ? (collapsed[cat] !== false) : false;
             return (
             <div key={cat}>
               <div onClick={()=>setCollapsed(p=>({...p,[cat]:!p[cat]}))}
@@ -1881,14 +1881,10 @@ export default function App(){
       <div style={{marginBottom:12}}>
         <input value={localSearch} onChange={e=>onSearchChange(e.target.value)} placeholder="🔍 Поиск по маркировке..." style={{...s.input,marginBottom:8}} autoFocus/>
         <div style={{display:"flex",gap:6}}>
-          <button type="button" onClick={()=>setExpandedCats({})} style={{...s.btn(),padding:"4px 10px",fontSize:11}}>
+          <button type="button" onClick={()=>{const all={};sortedCategories(safeMarkers).forEach(c=>all[c]=true);setExpandedCats(all);}} style={{...s.btn(),padding:"4px 10px",fontSize:11}}>
             ▼ Раскрыть все
           </button>
-          <button type="button" onClick={()=>{
-            const all = {};
-            sortedCategories(safeMarkers).forEach(c => all[c] = false);
-            setExpandedCats(all);
-          }} style={{...s.btn(),padding:"4px 10px",fontSize:11}}>
+          <button type="button" onClick={()=>setExpandedCats({})} style={{...s.btn(),padding:"4px 10px",fontSize:11}}>
             ▲ Свернуть все
           </button>
         </div>
@@ -1962,7 +1958,7 @@ export default function App(){
     const emptyCount = filteredMs.filter(m=>(stockObj[m]||0)===0).length;
     const withStockCount = filteredMs.length - emptyCount;
     const hasLow = filteredMs.some(m=>{ const q=stockObj[m]||0,t=(stockCfg[m]||{}).threshold||0; return t>0&&q<=t; });
-    const expanded = expandedCats[cat]!==false;
+    const expanded = expandedCats[cat]===true;
     const activeCatFilter = catFilter[cat] || "all";
 
     // Мини-кнопка фильтра для категории
@@ -2688,7 +2684,7 @@ export default function App(){
             {sortedCategoryEntries(safeMarkers).map(([cat,ms])=>{
               const filtered = ms.filter(m=>matchesSearch(m, priceSearch));
               if(filtered.length===0) return null;
-              const expanded = priceExpandedCats[cat]!==false;
+              const expanded = priceExpandedCats[cat]===true;
               const withPrice = filtered.filter(m=>safePrices[m]).length;
               return (
                 <div key={cat} style={{...s.card,padding:0,overflow:"hidden",marginBottom:8}}>
