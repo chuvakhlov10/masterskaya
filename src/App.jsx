@@ -122,13 +122,13 @@ function StepperInput({ value, onChange, step = 1, min = 0, style, inputStyle, s
   };
 
   const btnStyle = {
-    width: 30,
-    height: 30,
+    width: 36,
+    height: 36,
     background: C.bgSection,
     border: "none",
     color: C.textSub,
     cursor: "pointer",
-    fontSize: 16,
+    fontSize: 18,
     fontWeight: 700,
     display: "flex",
     alignItems: "center",
@@ -224,12 +224,12 @@ function Tabs({ tabs, active, onChange }){
         const isActive = active === t.id;
         return (
           <button key={t.id} onClick={()=>onChange(t.id)} style={{
-            flex:1,padding:"12px 4px",fontSize:11,fontWeight:700,border:"none",cursor:"pointer",
+            flex:1,padding:"14px 4px",fontSize:11,fontWeight:800,border:"none",cursor:"pointer",
             background:isActive?C.bgCard:C.bgSection,
             color:isActive?C.brand:C.textSub,
             borderTop:`3px solid ${isActive?C.brand:"transparent"}`,
             textTransform:"uppercase",letterSpacing:"0.8px",
-            transition:"all .15s",
+            transition:"all .2s cubic-bezier(0.16,1,0.3,1)",
             display:"flex",flexDirection:"column",alignItems:"center",gap:4,
           }}>
             <span style={{fontSize:16}}>{t.icon}</span>
@@ -2633,7 +2633,7 @@ export default function App(){
               <textarea value={comment} onChange={e=>setComment(e.target.value)} rows={2} placeholder="Необязательно" style={{...s.input,resize:"vertical"}}/>
             </div>
             <button onClick={submitRecord}
-              style={{...s.btn(recordType==="refund"?"refund":"accent"),width:"100%",padding:"11px 0",fontSize:15,fontWeight:700}}>
+              style={{...s.btn(recordType==="refund"?"refund":"accent"),width:"100%",padding:"14px 0",fontSize:16,fontWeight:800}}>
               {recordType==="refund" ? "Оформить возврат" : "Добавить запись"}
             </button>
             {submitMsg&&<div style={{textAlign:"center",marginTop:8,fontSize:13,color:submitMsg.ok?C.success:C.danger}}>{submitMsg.text}</div>}
@@ -2674,7 +2674,7 @@ export default function App(){
                   background:statsPeriod===id?C.bgCard:C.bgSection,
                   color:statsPeriod===id?C.brand:C.textSub,
                   borderTop:`3px solid ${statsPeriod===id?C.brand:"transparent"}`,
-                  textTransform:"uppercase",letterSpacing:"0.8px",transition:"all .15s",
+                  textTransform:"uppercase",letterSpacing:"0.8px",transition:"all .2s cubic-bezier(0.16,1,0.3,1)",
                 }}>{label}</button>
               ))}
             </div>
@@ -2727,7 +2727,7 @@ export default function App(){
                   background:stockTab===id?C.bgCard:C.bgSection,
                   color:stockTab===id?C.brand:C.textSub,
                   borderTop:`3px solid ${stockTab===id?C.brand:"transparent"}`,
-                  textTransform:"uppercase",letterSpacing:"0.8px",transition:"all .15s",
+                  textTransform:"uppercase",letterSpacing:"0.8px",transition:"all .2s cubic-bezier(0.16,1,0.3,1)",
                 }}>{label}</button>
               ))}
             </div>
