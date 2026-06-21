@@ -96,6 +96,8 @@ function NumInput({ value, onChange, style, min="0", placeholder="" }) {
 
 // ── Инпут с кнопками + и - ──
 function StepperInput({ value, onChange, step = 1, min = 0, style, inputStyle }) {
+  const [localVal, setLocalVal] = useState(String(value ?? ""));
+  useEffect(() => { setLocalVal(String(value ?? "")); }, [value]);
   const dec = () => {
     const v = Math.max((value || 0) - step, min);
     onChange(v);
@@ -126,7 +128,18 @@ function StepperInput({ value, onChange, step = 1, min = 0, style, inputStyle })
       <button type="button" onClick={dec} style={{ ...btnStyle, opacity: (value||0) <= min ? 0.4 : 1 }}
         onMouseEnter={e=>{if((value||0)>min){e.target.style.background=C.brand;e.target.style.color="#fff";}}}
         onMouseLeave={e=>{e.target.style.background=C.bgSection;e.target.style.color=C.textSub;}}>−</button>
-      <NumInput value={value} onChange={onChange} min={String(min)} style={{ textAlign: "center", width: 50, padding: "6px 4px", fontSize: 14, fontWeight: 700, border: "none", borderLeft: `1px solid ${C.border}`, borderRight: `1px solid ${C.border}`, background: C.bgCard, fontVariantNumeric: "tabular-nums", ...inputStyle }}/>
+      <input type="text" inputMode="numeric" value={localVal}
+        onChange={e => {
+          const v = e.target.value.replace(/[^0-9]/g,"");
+          setLocalVal(v);
+        }}
+        onBlur={() => {
+          const n = localVal===""?0:parseInt(localVal,10);
+          const final = isNaN(n)||n<min ? min : n;
+          setLocalVal(String(final));
+          onChange(final);
+        }}
+        style={{ textAlign: "center", width: 50, padding: "6px 4px", fontSize: 14, fontWeight: 700, border: "none", borderLeft: `1px solid ${C.border}`, borderRight: `1px solid ${C.border}`, background: C.bgCard, fontVariantNumeric: "tabular-nums", outline: "none", ...inputStyle }}/>
       <button type="button" onClick={inc} style={btnStyle}
         onMouseEnter={e=>{e.target.style.background=C.brand;e.target.style.color="#fff";}}
         onMouseLeave={e=>{e.target.style.background=C.bgSection;e.target.style.color=C.textSub;}}>+</button>
