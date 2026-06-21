@@ -2573,25 +2573,51 @@ export default function App(){
         {/* ══ СТАТИСТИКА ══ */}
         {tab==="stats"&&(
           <div>
-            <div style={{display:"flex",gap:6,marginBottom:10}}>
+            <div style={{display:"flex",gap:1,marginBottom:16,background:C.border,padding:1}}>
               {[["day","День"],["month","Месяц"],["year","Год"]].map(([id,label])=>(
                 <button key={id} onClick={()=>setStatsPeriod(id)} style={{
-                  flex:1,padding:"7px 0",fontSize:12,fontWeight:600,borderRadius:8,
-                  border:`1px solid ${statsPeriod===id?C.brand:C.border}`,
-                  background:statsPeriod===id?C.brandDim:C.bgInput,
-                  color:statsPeriod===id?C.brand:C.textSub,cursor:"pointer"
+                  flex:1,padding:"12px 4px",fontSize:12,fontWeight:800,border:"none",cursor:"pointer",
+                  background:statsPeriod===id?C.bgCard:C.bgSection,
+                  color:statsPeriod===id?C.brand:C.textSub,
+                  borderTop:`3px solid ${statsPeriod===id?C.brand:"transparent"}`,
+                  textTransform:"uppercase",letterSpacing:"0.8px",transition:"all .15s",
                 }}>{label}</button>
               ))}
             </div>
             <div style={{marginBottom:14}}>
-              <input type="date" value={statsDate} onChange={e=>setStatsDate(e.target.value)}
-                style={{
-                  ...s.input,
-                  cursor:"pointer",
-                  colorScheme:"dark",
-                  color: statsDate ? C.text : C.textDim,
-                  fontWeight:500,
-                }}/>
+              {statsPeriod==="day" ? (
+                <input type="date" value={statsDate} onChange={e=>setStatsDate(e.target.value)}
+                  style={{...s.input,cursor:"pointer",colorScheme:"dark",color:C.text,fontWeight:500}}/>
+              ) : statsPeriod==="month" ? (
+                <select value={statsDate.slice(0,7)} onChange={e=>setStatsDate(e.target.value+"-15")}
+                  style={s.input}>
+                  {(() => {
+                    const months = [];
+                    const now = new Date();
+                    for(let year = now.getFullYear(); year >= 2025; year--){
+                      for(let month = 11; month >= 0; month--){
+                        if(year === now.getFullYear() && month > now.getMonth()) continue;
+                        const val = `${year}-${String(month+1).padStart(2,"0")}`;
+                        const label = `${MONTH_NAMES[month]} ${year}`;
+                        months.push(<option key={val} value={val}>{label}</option>);
+                      }
+                    }
+                    return months;
+                  })()}
+                </select>
+              ) : (
+                <select value={statsDate.slice(0,4)} onChange={e=>setStatsDate(e.target.value+"-01-15")}
+                  style={s.input}>
+                  {(() => {
+                    const years = [];
+                    const now = new Date();
+                    for(let year = now.getFullYear(); year >= 2025; year--){
+                      years.push(<option key={year} value={year}>{year} год</option>);
+                    }
+                    return years;
+                  })()}
+                </select>
+              )}
             </div>
             {renderStats()}
           </div>
