@@ -4,7 +4,16 @@ import Ably from "ably";
 
 const ABLY_KEY = "Z2GSmg.BgNkkg:ns6NnvUHHdkQYt0MyDTaDZqWs4-kEqHPYihb39mmUfk";
 const CLIENT_ID = String(Date.now()) + '-' + Math.random().toString(36).slice(2, 8);
-const ably = new Ably.Realtime({ key: ABLY_KEY, clientId: CLIENT_ID });
+const ably = new Ably.Realtime({
+  key: ABLY_KEY,
+  clientId: CLIENT_ID,
+  // Настройки для стабильного соединения
+  disconnectedRetryTimeout: 2000,   // переподключение через 2 сек после disconnect
+  suspendedRetryTimeout: 5000,      // переподключение через 5 сек после suspend
+  realtimeRequestTimeout: 15000,    // таймаут запроса 15 сек
+  idlePeriod: 5000,                 // ждём 5 сек перед idle check (увеличиваем активность)
+  heartbeatInterval: 5000,          // пинг каждые 5 сек чтобы соединение не падало
+});
 
 const DEFAULT_MARKERS = {
   "Автомобильные": ["Замена корпуса","HD39RP","Нарезка лезвия","LD-1P","MIT8AP","MIT8RP (п.ч.)","XT27A"],
@@ -1507,30 +1516,42 @@ export default function App(){
   const flushQueueRef = useRef(null); // ссылка на функцию flushQueue для вызова из useEffect
 
   // Универсальное сохранение: обновляет state + пишет в GitHub + мгновенно рассылает данные через Ably
+  // Debounce для GitHub: 7 быстрых нажатий +/- = 1 PUT запрос (через 400мс после последнего)
+  const saveTimersRef = useRef({}); // {key: setTimeout_id}
   async function saveAndSync(key, value, setter) {
     if (setter) setter(value);
     skipPollRef.current = 3;
-    await sSet(key, value);
-    // Обновляем счётчик очереди (для индикатора в шапке)
-    setPendingCount(getQueue().length);
-    // Рассылаем сами данные через Ably (только если онлайн)
+    
+    // Ably publish — мгновенно, без debounce (другое устройство должно видеть сразу)
     if (navigator.onLine && ablyChannelRef.current) {
       try {
         const ts = Date.now();
         lastBroadcastTsRef.current[key] = ts;
         const payload = { key, value, ts, from: clientIdRef.current };
-        // Точный размер в байтах UTF-8 (кириллица = 2 байта)
         const size = new TextEncoder().encode(JSON.stringify(payload)).length;
         if (size < 60000) {
           ablyChannelRef.current.publish('update', payload);
         } else {
-          // Слишком большой payload — отправляем только сигнал
           ablyChannelRef.current.publish('changed', { key, ts, from: clientIdRef.current });
         }
       } catch(e) {
         console.warn('[ABLY] publish error', e);
       }
     }
+    
+    // GitHub запись — с debounce 400мс (для одного key)
+    // Если уже есть отложенная запись для этого key — отменяем её
+    if (saveTimersRef.current[key]) {
+      clearTimeout(saveTimersRef.current[key]);
+    }
+    return new Promise((resolve) => {
+      saveTimersRef.current[key] = setTimeout(async () => {
+        delete saveTimersRef.current[key];
+        await sSet(key, value);
+        setPendingCount(getQueue().length);
+        resolve();
+      }, 400);
+    });
   }
 
   // Старое имя для совместимости (3 места уже используют его)
@@ -1597,11 +1618,24 @@ export default function App(){
     ably.connection.on('connected', () => {
       console.log('[ABLY] Подключено');
       wsConnectedRef.current = true;
-      setSyncStatus("ws");
+      if (navigator.onLine) setSyncStatus("ws");
     });
 
     ably.connection.on('disconnected', () => {
-      console.log('[ABLY] Отключено');
+      console.log('[ABLY] Отключено, переподключаемся...');
+      wsConnectedRef.current = false;
+      if (navigator.onLine) setSyncStatus("synced"); // не "idle" — polling продолжит работать
+      // Ably сам переподключится через disconnectedRetryTimeout (2 сек)
+    });
+    
+    ably.connection.on('suspended', () => {
+      console.log('[ABLY] Suspended, ждём переподключения...');
+      wsConnectedRef.current = false;
+      if (navigator.onLine) setSyncStatus("synced");
+    });
+    
+    ably.connection.on('failed', (stateChange) => {
+      console.error('[ABLY] Failed:', stateChange.reason);
       wsConnectedRef.current = false;
       setSyncStatus("idle");
     });
@@ -1721,7 +1755,7 @@ export default function App(){
     }
 
     const initialTimer = setTimeout(poll, 3000);
-    const interval = setInterval(poll, 30000); // polling каждые 30 сек (WS для мгновенной)
+    const interval = setInterval(poll, 60000); // polling каждые 60 сек (Ably для мгновенной)
 
     return () => {
       clearTimeout(initialTimer);
