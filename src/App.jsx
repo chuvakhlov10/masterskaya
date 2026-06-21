@@ -1431,10 +1431,17 @@ export default function App(){
   const ablyChannelRef = useRef(null);
 
   // Тихое сохранение: пишет в GitHub + обновляет React state + блокирует polling + уведомляет WS
+  function ablyNotify() {
+    if (ablyChannelRef.current) {
+      ablyChannelRef.current.publish("changed", { ts: Date.now() });
+    }
+  }
+
   async function silentSaveState(key, value, setter) {
     setter(value);
-    skipPollRef.current = 2;
+    skipPollRef.current = 3;
     await sSet(key, value);
+    ablyNotify();
   }
 
   useEffect(() => {
@@ -1501,7 +1508,7 @@ export default function App(){
     doPollRef.current = poll;
 
     const initialTimer = setTimeout(poll, 3000);
-    const interval = setInterval(poll, 15000); // polling каждые 30 сек (WS для мгновенной)
+    const interval = setInterval(poll, 10000); // polling каждые 30 сек (WS для мгновенной)
 
     return () => {
       clearTimeout(initialTimer);
