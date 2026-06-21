@@ -1423,13 +1423,24 @@ export default function App(){
   // ── Polling синхронизация (каждые 15 сек) ──
   const [syncStatus, setSyncStatus] = useState("idle"); // idle | syncing | synced
   const lastDataHashRef = useRef("");
-  const isUserEditingRef = useRef(false); // блокировка polling при редактировании
+  const skipPollRef = useRef(0); // пропуск N циклов polling после silentSave
+
+  // Тихое сохранение: пишет в GitHub + обновляет React state + блокирует polling
+  async function silentSaveState(key, value, setter) {
+    setter(value);
+    skipPollRef.current = 2; // пропустить следующие 2 цикла (~30 сек)
+    await sSet(key, value);
+  }
 
   useEffect(() => {
     if (!authed) return;
     const poll = async () => {
-      // Не синхронизируем, если пользователь активно редактирует
-      if (isUserEditingRef.current) return;
+      // Пропуск после silentSave (пользователь только что сохранил)
+      if (skipPollRef.current > 0) {
+        skipPollRef.current--;
+        setSyncStatus("synced");
+        return;
+      }
       setSyncStatus("syncing");
       try {
         const [r,p,sm,sS,sCfg,sm2,al,nt] = await Promise.all([
@@ -1949,7 +1960,7 @@ export default function App(){
     };
     return (
       <div style={{marginBottom:12}}>
-        <input value={localSearch} onChange={e=>onSearchChange(e.target.value)} placeholder="🔍 Поиск по маркировке..." style={{...s.input,marginBottom:8}} autoFocus/>
+        <input value={localSearch} onChange={e=>onSearchChange(e.target.value)} placeholder="🔍 Поиск по маркировке..." style={{...s.input,marginBottom:8}}/>
         <div style={{display:"flex",gap:6}}>
           <button type="button" onClick={()=>{const all={};sortedCategories(safeMarkers).forEach(c=>all[c]=true);setExpandedCats(all);}} style={{...s.btn(),padding:"4px 10px",fontSize:11}}>
             ▼ Раскрыть все
@@ -2075,8 +2086,8 @@ export default function App(){
                   </div>
                   <StepperInput value={q} silentSave={async nq=>{
                     const ns={...stockObj,[m]:nq};
-                    const key = isWS ? `stock:ws:${workshop}` : "stock:main";
-                    await sSet(key, ns);
+                    if(isWS){silentSaveState(`stock:ws:${workshop}`, ns, (v)=>setStockWS(p=>({...p,[workshop]:v})));}
+                    else{silentSaveState("stock:main", ns, setStockMain);}
                   }} inputStyle={{color:q===0?C.danger:C.success}}/>
                   <button onClick={()=>setNoteModal({markerName:m})} title="Комментарий"
                     style={{...s.btn(),padding:"5px 6px",fontSize:11,borderColor:mNote?C.warn+"66":C.border,color:mNote?C.warn:C.textSub}}>💬</button>
@@ -2822,7 +2833,7 @@ export default function App(){
                             {mNote && <div style={{fontSize:10,color:C.warn,marginTop:2,fontStyle:"italic"}}>💬 {mNote}</div>}
                           </div>
                           <div style={{display:"flex",alignItems:"center",gap:6}}>
-                            <StepperInput value={safePrices[m]||0} silentSave={async (val) => { const np = {...safePrices}; if(val > 0) np[m] = val; else delete np[m]; await sSet("prices", np); }} step={10} />
+                            <StepperInput value={safePrices[m]||0} silentSave={async (val) => { const np = {...safePrices}; if(val > 0) np[m] = val; else delete np[m]; silentSaveState("prices", np, setPrices); }} step={10} />
                             <span style={{fontSize:12,color:C.textSub,whiteSpace:"nowrap"}}>р/шт</span>
                             <button onClick={()=>setNoteModal({markerName:m})} title="Комментарий" style={{...s.btn(),padding:"5px 8px",fontSize:11,borderColor:mNote?C.warn+"66":C.border,color:mNote?C.warn:C.textSub}}>💬</button>
                             <button onClick={()=>setAliasesModal({cat, markerName:m})} title="Алиасы" style={{...s.btn(),padding:"5px 8px",fontSize:11,borderColor:mAliases.length>0?C.brand+"66":C.border,color:mAliases.length>0?C.brand:C.textSub}}>≡</button>
