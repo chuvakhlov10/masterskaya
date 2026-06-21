@@ -1,22 +1,36 @@
 import { useState, useEffect, useCallback, useRef, Component } from "react";
 import { dbGet, dbSet, hasToken, setToken, clearToken, verifyToken, photoGet, photoSet, photoDelete } from "./github-storage.js";
-// Ably через CDN — загружается динамически
+// Ably через CDN
 let ably = null;
 let ablyChannel = null;
 const ABLY_KEY = "Z2GSmg.BgNkkg:ns6NnvUHHdkQYt0MyDTaDZqWs4-kEqHPYihb39mmUfk";
 function initAbly() {
   if (ably) return;
-  if (typeof Ably !== "undefined") {
-    ably = new Ably.Realtime({ key: ABLY_KEY, clientId: String(Date.now()) });
-  }
+  if (typeof Ably === "undefined") return;
+  ably = new Ably.Realtime({ key: ABLY_KEY, clientId: String(Date.now()), autoConnect: true });
+  ably.connection.on("connected", () => {
+    console.log("[ABLY] Connected");
+    ablyChannel = ably.channels.get("masterskaya-sync");
+    ablyChannel.subscribe((msg) => {
+      if (msg.name === "changed") {
+        console.log("[ABLY] Sync notification received");
+        // Вызываем poll через window функцию
+        if (window.__masterskayaPoll) window.__masterskayaPoll();
+      }
+    });
+  });
 }
-// Загружаем Ably SDK через script tag
-if (typeof window !== "undefined" && !document.getElementById("ably-script")) {
-  const s = document.createElement("script");
-  s.id = "ably-script";
-  s.src = "https://cdn.ably.com/lib/ably.min-1.js";
-  s.onload = () => { initAbly(); };
-  document.head.appendChild(s);
+// Загружаем Ably SDK
+if (typeof window !== "undefined") {
+  if (typeof Ably !== "undefined") {
+    initAbly();
+  } else if (!document.getElementById("ably-script")) {
+    const s = document.createElement("script");
+    s.id = "ably-script";
+    s.src = "https://cdn.ably.com/lib/ably.min-1.js";
+    s.onload = () => initAbly();
+    document.head.appendChild(s);
+  }
 }
 
 const DEFAULT_MARKERS = {
@@ -1452,45 +1466,29 @@ export default function App(){
     setter(value);
     skipPollRef.current = 2;
     await sSet(key, value);
-    // Уведомляем других через WebSocket
-    if (ablyChannelRef.current) {
-      ablyChannelRef.current.publish('changed', { ts: Date.now() });
+    // Уведомляем других через Ably
+    if (ablyChannel) {
+      ablyChannel.publish('changed', { ts: Date.now() });
     }
   }
 
   useEffect(() => {
     if (!authed) return;
 
-    // ── Ably (мгновенная синхронизация) ──
-    const channel = ably.channels.get('masterskaya-sync');
-    
-    channel.subscribe((msg) => {
-      if (msg.name === 'changed') {
-        console.log('[ABLY] Получено уведомление о синхронизации');
-        if (doPollRef.current) doPollRef.current();
+    // ── Ably уже инициализирован глобально — проверяем статус ──
+    function checkAbly() {
+      if (ably && ably.connection.state === "connected") {
+        wsConnectedRef.current = true;
+        setSyncStatus("ws");
+        return true;
       }
-    });
-
-    ably.connection.on('connected', () => {
-      console.log('[ABLY] Подключено');
-      wsConnectedRef.current = true;
-      setSyncStatus("ws");
-    });
-
-    ably.connection.on('disconnected', () => {
-      console.log('[ABLY] Отключено');
-      wsConnectedRef.current = false;
-      setSyncStatus("idle");
-    });
-
-    // Если уже подключён
-    if (ably.connection.state === 'connected') {
-      wsConnectedRef.current = true;
-      setSyncStatus("ws");
+      return false;
     }
-
-    // Сохраняем channel для silentSaveState
-    ablyChannelRef.current = channel;
+    // Проверяем каждые 2 сек пока не подключится
+    const ablyCheckTimer = setInterval(() => {
+      if (checkAbly()) clearInterval(ablyCheckTimer);
+    }, 2000);
+    checkAbly();
 
     // ── Polling (fallback если Ably не работает) ──
     const poll = async () => {
@@ -1531,6 +1529,7 @@ export default function App(){
     };
 
     doPollRef.current = poll;
+    window.__masterskayaPoll = poll;
 
     const initialTimer = setTimeout(poll, 3000);
     const interval = setInterval(poll, 30000); // polling каждые 30 сек (WS для мгновенной)
@@ -1538,7 +1537,7 @@ export default function App(){
     return () => {
       clearTimeout(initialTimer);
       clearInterval(interval);
-      channel.unsubscribe();
+      clearInterval(ablyCheckTimer);
     };
   }, [authed]);
   useEffect(() => {
