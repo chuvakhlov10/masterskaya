@@ -2004,9 +2004,11 @@ export default function App(){
                     {mNote && <div style={{fontSize:10,color:C.warn,marginTop:2,lineHeight:1.3,fontStyle:"italic"}}>💬 {mNote}</div>}
                   </div>
                   <StepperInput value={q} onChange={async nq=>{
+                    const scrollY = window.scrollY;
                     const ns={...stockObj,[m]:nq};
                     if(isWS){setStockWS(p=>({...p,[workshop]:ns}));debouncedSave(`stock:ws:${workshop}`,ns);}
                     else{setStockMain(ns);debouncedSave("stock:main",ns);}
+                    requestAnimationFrame(()=>window.scrollTo(0,scrollY));
                   }} inputStyle={{color:q===0?C.danger:C.success}}/>
                   <button onClick={()=>setNoteModal({markerName:m})} title="Комментарий"
                     style={{...s.btn(),padding:"5px 6px",fontSize:11,borderColor:mNote?C.warn+"66":C.border,color:mNote?C.warn:C.textSub}}>💬</button>
