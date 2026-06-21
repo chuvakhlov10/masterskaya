@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, useLayoutEffect, Component } from "react";
+import { useState, useEffect, useCallback, useRef, Component } from "react";
 import { dbGet, dbSet, hasToken, setToken, clearToken, verifyToken, photoGet, photoSet, photoDelete } from "./github-storage.js";
 
 const DEFAULT_MARKERS = {
@@ -95,17 +95,40 @@ function NumInput({ value, onChange, style, min="0", placeholder="" }) {
 }
 
 // ── Инпут с кнопками + и - ──
-function StepperInput({ value, onChange, step = 1, min = 0, style, inputStyle }) {
+// deferMs > 0 — откладывает onChange (для склада/цен, чтобы не было скролла)
+// deferMs = 0 — мгновенный onChange (для формы записи)
+function StepperInput({ value, onChange, step = 1, min = 0, style, inputStyle, deferMs = 0 }) {
   const [localVal, setLocalVal] = useState(String(value ?? ""));
-  useEffect(() => { setLocalVal(String(value ?? "")); }, [value]);
+  const committedRef = useRef(value || 0);
+  const debounceRef = useRef(null);
+
+  useEffect(() => {
+    setLocalVal(String(value ?? ""));
+    committedRef.current = value || 0;
+  }, [value]);
+
+  const fireChange = (v) => {
+    committedRef.current = v;
+    setLocalVal(String(v));
+    if (deferMs > 0) {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      debounceRef.current = setTimeout(() => onChange(committedRef.current), deferMs);
+    } else {
+      onChange(v);
+    }
+  };
+
   const dec = () => {
-    const v = Math.max((value || 0) - step, min);
-    onChange(v);
+    const v = Math.max(committedRef.current - step, min);
+    fireChange(v);
   };
   const inc = () => {
-    const v = (value || 0) + step;
-    onChange(v);
+    const v = committedRef.current + step;
+    fireChange(v);
   };
+
+  useEffect(() => () => { if (debounceRef.current) clearTimeout(debounceRef.current); }, []);
+
   const btnStyle = {
     width: 30,
     height: 30,
@@ -125,8 +148,8 @@ function StepperInput({ value, onChange, step = 1, min = 0, style, inputStyle })
   };
   return (
     <div style={{ display: "inline-flex", alignItems: "center", gap: 0, background: C.bgCard, border: `1px solid ${C.border}`, ...style }}>
-      <button type="button" onClick={dec} style={{ ...btnStyle, opacity: (value||0) <= min ? 0.4 : 1 }}
-        onMouseEnter={e=>{if((value||0)>min){e.target.style.background=C.brand;e.target.style.color="#fff";}}}
+      <button type="button" onClick={dec} style={{ ...btnStyle, opacity: (committedRef.current) <= min ? 0.4 : 1 }}
+        onMouseEnter={e=>{if(committedRef.current>min){e.target.style.background=C.brand;e.target.style.color="#fff";}}}
         onMouseLeave={e=>{e.target.style.background=C.bgSection;e.target.style.color=C.textSub;}}>−</button>
       <input type="text" inputMode="numeric" value={localVal}
         onChange={e => {
@@ -137,6 +160,7 @@ function StepperInput({ value, onChange, step = 1, min = 0, style, inputStyle })
           const n = localVal===""?0:parseInt(localVal,10);
           const final = isNaN(n)||n<min ? min : n;
           setLocalVal(String(final));
+          committedRef.current = final;
           onChange(final);
         }}
         style={{ textAlign: "center", width: 50, padding: "6px 4px", fontSize: 14, fontWeight: 700, border: "none", borderLeft: `1px solid ${C.border}`, borderRight: `1px solid ${C.border}`, background: C.bgCard, fontVariantNumeric: "tabular-nums", outline: "none", ...inputStyle }}/>
@@ -2004,12 +2028,10 @@ export default function App(){
                     {mNote && <div style={{fontSize:10,color:C.warn,marginTop:2,lineHeight:1.3,fontStyle:"italic"}}>💬 {mNote}</div>}
                   </div>
                   <StepperInput value={q} onChange={async nq=>{
-                    const sY = window.scrollY;
                     const ns={...stockObj,[m]:nq};
                     if(isWS){setStockWS(p=>({...p,[workshop]:ns}));debouncedSave(`stock:ws:${workshop}`,ns);}
                     else{setStockMain(ns);debouncedSave("stock:main",ns);}
-                    setTimeout(()=>window.scrollTo(0,sY),0);
-                  }} inputStyle={{color:q===0?C.danger:C.success}}/>
+                  }} inputStyle={{color:q===0?C.danger:C.success}} deferMs={400}/>
                   <button onClick={()=>setNoteModal({markerName:m})} title="Комментарий"
                     style={{...s.btn(),padding:"5px 6px",fontSize:11,borderColor:mNote?C.warn+"66":C.border,color:mNote?C.warn:C.textSub}}>💬</button>
                 </div>
@@ -2741,7 +2763,7 @@ export default function App(){
                             {mNote && <div style={{fontSize:10,color:C.warn,marginTop:2,fontStyle:"italic"}}>💬 {mNote}</div>}
                           </div>
                           <div style={{display:"flex",alignItems:"center",gap:6}}>
-                            <StepperInput value={safePrices[m]||0} onChange={async (val) => { const sY=window.scrollY; const np = {...safePrices}; if(val > 0) np[m] = val; else delete np[m]; setPrices(np); debouncedSave("prices", np); setTimeout(()=>window.scrollTo(0,sY),0); }} step={10} />
+                            <StepperInput value={safePrices[m]||0} onChange={async (val) => { const np = {...safePrices}; if(val > 0) np[m] = val; else delete np[m]; setPrices(np); debouncedSave("prices", np); }} step={10} deferMs={400} />
                             <span style={{fontSize:12,color:C.textSub,whiteSpace:"nowrap"}}>р/шт</span>
                             <button onClick={()=>setNoteModal({markerName:m})} title="Комментарий" style={{...s.btn(),padding:"5px 8px",fontSize:11,borderColor:mNote?C.warn+"66":C.border,color:mNote?C.warn:C.textSub}}>💬</button>
                             <button onClick={()=>setAliasesModal({cat, markerName:m})} title="Алиасы" style={{...s.btn(),padding:"5px 8px",fontSize:11,borderColor:mAliases.length>0?C.brand+"66":C.border,color:mAliases.length>0?C.brand:C.textSub}}>≡</button>
