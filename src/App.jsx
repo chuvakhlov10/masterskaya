@@ -169,8 +169,79 @@ function StepperInput({ value, onChange, step = 1, min = 0, style, inputStyle, s
 }
 
 
-async function sGet(key){ return dbGet(key); }
-async function sSet(key,val){ return dbSet(key,val); }
+// ── Офлайн-кеш и очередь мутаций ──
+const OFFLINE_CACHE_PREFIX = "offline_cache_";
+const PENDING_WRITES_KEY = "pending_writes";
+
+function cacheGet(key){
+  try {
+    const raw = localStorage.getItem(OFFLINE_CACHE_PREFIX + key);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+function cacheSet(key, val){
+  try { localStorage.setItem(OFFLINE_CACHE_PREFIX + key, JSON.stringify(val)); } catch {}
+}
+function getQueue(){
+  try { return JSON.parse(localStorage.getItem(PENDING_WRITES_KEY) || "[]"); } catch { return []; }
+}
+function setQueue(q){
+  try { localStorage.setItem(PENDING_WRITES_KEY, JSON.stringify(q)); } catch {}
+}
+
+async function sGet(key){
+  // Пробуем GitHub (только если онлайн)
+  if (navigator.onLine) {
+    try {
+      const val = await dbGet(key);
+      if (val !== null && val !== undefined) {
+        cacheSet(key, val);
+        return val;
+      }
+      // Если null — возможно файла нет; но кеш тоже вернём как fallback при следующем запросе
+      return null;
+    } catch (e) {
+      console.warn(`[sGet] GitHub failed for "${key}", using cache:`, e.message);
+    }
+  }
+  // Fallback: локальный кеш
+  return cacheGet(key);
+}
+
+async function sSet(key, val){
+  // Всегда обновляем локальный кеш (для мгновенного отображения и офлайн-доступа)
+  cacheSet(key, val);
+  
+  // Если офлайн — кладём в очередь, не вызываем GitHub
+  if (!navigator.onLine) {
+    const q = getQueue();
+    // Если уже есть запись для этого key — заменяем (последняя версия выигрывает)
+    const filtered = q.filter(item => item.key !== key);
+    filtered.push({ key, val, ts: Date.now() });
+    setQueue(filtered);
+    return { ok: true, queued: true };
+  }
+  
+  // Онлайн — пишем в GitHub
+  try {
+    const result = await dbSet(key, val);
+    if (!result.ok) {
+      // Не получилось — в очередь на повтор
+      const q = getQueue();
+      const filtered = q.filter(item => item.key !== key);
+      filtered.push({ key, val, ts: Date.now() });
+      setQueue(filtered);
+    }
+    return result;
+  } catch (e) {
+    // Сетевая ошибка — в очередь
+    const q = getQueue();
+    const filtered = q.filter(item => item.key !== key);
+    filtered.push({ key, val, ts: Date.now() });
+    setQueue(filtered);
+    return { ok: true, queued: true };
+  }
+}
 
 // Защита: получить объект из любого значения (для prices, stock, cfg)
 function ensureObj(v){ return (v && typeof v === "object" && !Array.isArray(v)) ? v : {}; }
@@ -1421,7 +1492,9 @@ export default function App(){
   const [nowTime, setNowTime] = useState(new Date());
 
   // ── WebSocket + Polling синхронизация ──
-  const [syncStatus, setSyncStatus] = useState("idle"); // idle | syncing | synced | ws
+  const [syncStatus, setSyncStatus] = useState("idle"); // idle | syncing | synced | ws | offline
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [pendingCount, setPendingCount] = useState(() => getQueue().length);
   const lastDataHashRef = useRef("");
   const skipPollRef = useRef(0);
   const wsRef = useRef(null);
@@ -1431,14 +1504,17 @@ export default function App(){
   const stateSettersRef = useRef({}); // маппинг key → setter для мгновенного применения Ably-обновлений
   const lastBroadcastTsRef = useRef({}); // {key: ts} — защита от эха собственных сообщений
   const clientIdRef = useRef(CLIENT_ID); // ID этого клиента для фильтрации собственных сообщений
+  const flushQueueRef = useRef(null); // ссылка на функцию flushQueue для вызова из useEffect
 
   // Универсальное сохранение: обновляет state + пишет в GitHub + мгновенно рассылает данные через Ably
   async function saveAndSync(key, value, setter) {
     if (setter) setter(value);
     skipPollRef.current = 3;
     await sSet(key, value);
-    // Рассылаем сами данные через Ably (мгновенная синхронизация без polling)
-    if (ablyChannelRef.current) {
+    // Обновляем счётчик очереди (для индикатора в шапке)
+    setPendingCount(getQueue().length);
+    // Рассылаем сами данные через Ably (только если онлайн)
+    if (navigator.onLine && ablyChannelRef.current) {
       try {
         const ts = Date.now();
         lastBroadcastTsRef.current[key] = ts;
@@ -1579,6 +1655,71 @@ export default function App(){
 
     doPollRef.current = poll;
 
+    // ── flushQueue: отправляет накопленные в офлайне изменения на GitHub ──
+    const flushQueue = async () => {
+      const q = getQueue();
+      if (q.length === 0) {
+        setPendingCount(0);
+        return;
+      }
+      console.log(`[OFFLINE] Отправляем очередь: ${q.length} элементов`);
+      setSyncStatus("syncing");
+      const remaining = [];
+      for (const item of q) {
+        try {
+          const result = await dbSet(item.key, item.val);
+          if (result.ok) {
+            cacheSet(item.key, item.val);
+            // Рассылаем через Ably — другие устройства тоже получат обновление
+            if (ablyChannelRef.current) {
+              try {
+                const payload = { key: item.key, value: item.val, ts: Date.now(), from: clientIdRef.current };
+                const size = new TextEncoder().encode(JSON.stringify(payload)).length;
+                if (size < 60000) {
+                  ablyChannelRef.current.publish('update', payload);
+                } else {
+                  ablyChannelRef.current.publish('changed', { key: item.key, ts: Date.now(), from: clientIdRef.current });
+                }
+              } catch {}
+            }
+          } else {
+            remaining.push(item);
+          }
+        } catch (e) {
+          console.warn(`[OFFLINE] Ошибка отправки "${item.key}":`, e.message);
+          remaining.push(item);
+        }
+      }
+      setQueue(remaining);
+      setPendingCount(remaining.length);
+      setSyncStatus(remaining.length === 0 ? (wsConnectedRef.current ? "ws" : "synced") : "offline");
+      if (remaining.length === 0 && doPollRef.current) {
+        // После успешной отправки — подтянем свежие данные
+        setTimeout(() => doPollRef.current && doPollRef.current(), 500);
+      }
+    };
+    flushQueueRef.current = flushQueue;
+
+    // ── Слушатели online/offline ──
+    const handleOnline = () => {
+      console.log('[OFFLINE] Сеть восстановлена');
+      setIsOnline(true);
+      // Небольшая задержка чтобы соединение установилось
+      setTimeout(() => flushQueueRef.current && flushQueueRef.current(), 1000);
+    };
+    const handleOffline = () => {
+      console.log('[OFFLINE] Сеть потеряна — работаем офлайн');
+      setIsOnline(false);
+      setSyncStatus("offline");
+    };
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    
+    // Если стартовали онлайн, но в очереди что-то есть — отправим
+    if (navigator.onLine && getQueue().length > 0) {
+      setTimeout(() => flushQueueRef.current && flushQueueRef.current(), 2000);
+    }
+
     const initialTimer = setTimeout(poll, 3000);
     const interval = setInterval(poll, 30000); // polling каждые 30 сек (WS для мгновенной)
 
@@ -1586,6 +1727,8 @@ export default function App(){
       clearTimeout(initialTimer);
       clearInterval(interval);
       channel.unsubscribe();
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
     };
   }, [authed]);
   useEffect(() => {
@@ -2519,16 +2662,28 @@ export default function App(){
               </span>
             ))}
             {/* Индикатор синхронизации */}
-            {syncStatus !== "idle" && (
+            {!isOnline ? (
               <span style={{
                 fontSize:10,
                 padding:"2px 6px",
-                background: syncStatus === "syncing" ? C.smartDim : syncStatus === "ws" ? C.brandDim : C.successDim,
-                color: syncStatus === "syncing" ? C.smart : syncStatus === "ws" ? C.brand : C.success,
-                border: `1px solid ${syncStatus === "syncing" ? C.smart : syncStatus === "ws" ? C.brand : C.success}44`,
+                background: C.warnDim,
+                color: C.warn,
+                border: `1px solid ${C.warn}44`,
                 fontWeight: 700,
               }}>
-                {syncStatus === "syncing" ? "🔄" : syncStatus === "ws" ? "⚡ Live" : "✓"}
+                📴 Офлайн{pendingCount > 0 ? ` (${pendingCount} в очереди)` : ""}
+              </span>
+            ) : syncStatus !== "idle" && (
+              <span style={{
+                fontSize:10,
+                padding:"2px 6px",
+                background: syncStatus === "syncing" ? C.smartDim : syncStatus === "ws" ? C.brandDim : syncStatus === "offline" ? C.warnDim : C.successDim,
+                color: syncStatus === "syncing" ? C.smart : syncStatus === "ws" ? C.brand : syncStatus === "offline" ? C.warn : C.success,
+                border: `1px solid ${syncStatus === "syncing" ? C.smart : syncStatus === "ws" ? C.brand : syncStatus === "offline" ? C.warn : C.success}44`,
+                fontWeight: 700,
+              }}>
+                {syncStatus === "syncing" ? "🔄 Синхр..." : syncStatus === "ws" ? "⚡ Live" : syncStatus === "offline" ? "📴 Офлайн" : "✓"}
+                {pendingCount > 0 ? ` (${pendingCount})` : ""}
               </span>
             )}
           </div>
