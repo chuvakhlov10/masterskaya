@@ -1,43 +1,41 @@
 import { useState, useEffect, useCallback, useRef, Component } from "react";
 import { dbGet, dbSet, hasToken, setToken, clearToken, verifyToken, photoGet, photoSet, photoDelete } from "./github-storage.js";
-// Ably через CDN
-let ably = null;
+// Ably через CDN — упрощённая версия
 let ablyChannel = null;
 const ABLY_KEY = "Z2GSmg.BgNkkg:ns6NnvUHHdkQYt0MyDTaDZqWs4-kEqHPYihb39mmUfk";
-function initAbly() {
-  if (ably) return;
-  if (typeof Ably === "undefined") return;
-  ably = new Ably.Realtime({ key: ABLY_KEY, clientId: String(Date.now()), autoConnect: true });
-  ably.connection.on("connected", () => {
-    console.log("[ABLY] Connected");
-    ablyChannel = ably.channels.get("masterskaya-sync");
-    ablyChannel.subscribe((msg) => {
-      if (msg.name === "changed") {
-        console.log("[ABLY] Sync notification received");
-        // Вызываем poll через window функцию
-        if (window.__masterskayaPoll) window.__masterskayaPoll();
-      }
+
+function ablyNotify() {
+  if (ablyChannel) {
+    ablyChannel.publish("changed", { ts: Date.now() }, function(err) {
+      if (err) console.warn("[ABLY] Publish error:", err);
+      else console.log("[ABLY] Notified others");
     });
-  });
-}
-// Загружаем Ably SDK
-if (typeof window !== "undefined") {
-  if (typeof Ably !== "undefined") {
-    initAbly();
-  } else if (!document.getElementById("ably-script")) {
-    const s = document.createElement("script");
-    s.id = "ably-script";
-    s.src = "https://cdn.ably.com/lib/ably.min-1.js";
-    s.onload = () => initAbly();
-    document.head.appendChild(s);
+  } else {
+    console.warn("[ABLY] No channel yet");
   }
 }
 
-// Глобальная функция для уведомления других клиентов
-function ablyNotify() {
-  if (ablyChannel) {
-    ablyChannel.publish("changed", { ts: Date.now() });
-    console.log("[ABLY] Notified others");
+function setupAbly() {
+  if (ablyChannel) return; // уже настроен
+  var ably = new Ably.Realtime({ key: ABLY_KEY, clientId: String(Date.now()) });
+  ably.connection.once("connected", function() {
+    console.log("[ABLY] Connected");
+    ablyChannel = ably.channels.get("masterskaya-sync");
+    ablyChannel.subscribe("changed", function(msg) {
+      console.log("[ABLY] Got sync notification");
+      if (window.__masterskayaPoll) window.__masterskayaPoll();
+    });
+  });
+}
+
+if (typeof window !== "undefined") {
+  if (typeof Ably !== "undefined") {
+    setupAbly();
+  } else {
+    var s = document.createElement("script");
+    s.src = "https://cdn.ably.com/lib/ably.min-1.js";
+    s.onload = setupAbly;
+    document.head.appendChild(s);
   }
 }
 
@@ -1466,7 +1464,6 @@ export default function App(){
   const skipPollRef = useRef(0);
   const wsRef = useRef(null);
   const wsConnectedRef = useRef(false);
-  const ablyChannelRef = useRef(null);
   const doPollRef = useRef(null); // ссылка на функцию poll для вызова из WS
 
   // Тихое сохранение: пишет в GitHub + обновляет React state + блокирует polling + уведомляет WS
@@ -1474,10 +1471,6 @@ export default function App(){
     setter(value);
     skipPollRef.current = 2;
     await sSet(key, value);
-    // Уведомляем других через Ably
-    if (ablyChannel) {
-      ablyChannel.publish("changed", { ts: Date.now() });
-    }
     ablyNotify();
   }
 
