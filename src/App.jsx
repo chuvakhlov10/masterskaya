@@ -1,5 +1,9 @@
 import { useState, useEffect, useCallback, useRef, Component } from "react";
 import { dbGet, dbSet, hasToken, setToken, clearToken, verifyToken, photoGet, photoSet, photoDelete } from "./github-storage.js";
+import Ably from "ably";
+
+const ABLY_KEY = "Z2GSmg.BgNkkg:ns6NnvUHHdkQYt0MyDTaDZqWs4-kEqHPYihb39mmUfk";
+const ably = new Ably.Realtime({ key: ABLY_KEY, clientId: String(Date.now()) });
 
 const DEFAULT_MARKERS = {
   "Автомобильные": ["Замена корпуса","HD39RP","Нарезка лезвия","LD-1P","MIT8AP","MIT8RP (п.ч.)","XT27A"],
@@ -1426,6 +1430,7 @@ export default function App(){
   const skipPollRef = useRef(0);
   const wsRef = useRef(null);
   const wsConnectedRef = useRef(false);
+  const ablyChannelRef = useRef(null);
   const doPollRef = useRef(null); // ссылка на функцию poll для вызова из WS
 
   // Тихое сохранение: пишет в GitHub + обновляет React state + блокирует polling + уведомляет WS
@@ -1434,58 +1439,46 @@ export default function App(){
     skipPollRef.current = 2;
     await sSet(key, value);
     // Уведомляем других через WebSocket
-    if (wsRef.current && wsRef.current.readyState === 1) {
-      wsRef.current.send(JSON.stringify({ type: 'changed' }));
+    if (ablyChannelRef.current) {
+      ablyChannelRef.current.publish('changed', { ts: Date.now() });
     }
   }
 
   useEffect(() => {
     if (!authed) return;
 
-    // ── WebSocket подключение ──
-    const WS_URL = 'wss://masterskaya-ws.onrender.com';
-    let reconnectTimer = null;
-
-    function connectWS() {
-      try {
-        const ws = new WebSocket(WS_URL);
-        wsRef.current = ws;
-
-        ws.onopen = () => {
-          console.log('[WS] Подключено');
-          wsConnectedRef.current = true;
-          setSyncStatus("ws");
-        };
-
-        ws.onmessage = (event) => {
-          try {
-            const msg = JSON.parse(event.data);
-            if (msg.type === 'sync') {
-              // Кто-то изменил данные — мгновенный poll
-              console.log('[WS] Получено уведомление о синхронизации');
-              if (doPollRef.current) doPollRef.current();
-            }
-          } catch(e) {}
-        };
-
-        ws.onclose = () => {
-          console.log('[WS] Отключено, переподключение через 5 сек');
-          wsConnectedRef.current = false;
-          setSyncStatus("idle");
-          reconnectTimer = setTimeout(connectWS, 5000);
-        };
-
-        ws.onerror = () => {
-          ws.close();
-        };
-      } catch(e) {
-        reconnectTimer = setTimeout(connectWS, 5000);
+    // ── Ably (мгновенная синхронизация) ──
+    const channel = ably.channels.get('masterskaya-sync');
+    
+    channel.subscribe((msg) => {
+      if (msg.name === 'changed') {
+        console.log('[ABLY] Получено уведомление о синхронизации');
+        if (doPollRef.current) doPollRef.current();
       }
+    });
+
+    ably.connection.on('connected', () => {
+      console.log('[ABLY] Подключено');
+      wsConnectedRef.current = true;
+      setSyncStatus("ws");
+    });
+
+    ably.connection.on('disconnected', () => {
+      console.log('[ABLY] Отключено');
+      wsConnectedRef.current = false;
+      setSyncStatus("idle");
+    });
+
+    // Если уже подключён
+    if (ably.connection.state === 'connected') {
+      wsConnectedRef.current = true;
+      setSyncStatus("ws");
     }
 
-    connectWS();
+    // Сохраняем channel для silentSaveState
+    ablyChannelRef.current = channel;
 
-    // ── Polling (fallback если WS не работает) ──
+    // ── Polling (fallback если Ably не работает) ──
     const poll = async () => {
       if (skipPollRef.current > 0) {
         skipPollRef.current--;
@@ -1531,8 +1524,7 @@ export default function App(){
     return () => {
       clearTimeout(initialTimer);
       clearInterval(interval);
-      clearTimeout(reconnectTimer);
-      if (wsRef.current) wsRef.current.close();
+      channel.unsubscribe();
     };
   }, [authed]);
   useEffect(() => {
