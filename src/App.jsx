@@ -1848,8 +1848,7 @@ export default function App(){
   }
 
   // ── Панель управления складом: поиск + сортировка + фильтры ──
-  function StockControls({ search, setSearch, sort, setSort, filter, setFilter }){
-    // Локальный state для поля поиска — решает проблему потери фокуса
+  function StockControls({ search, setSearch }){
     const [localSearch, setLocalSearch] = useState(search);
     const searchTimer = useRef(null);
     useEffect(() => { setLocalSearch(search); }, [search]);
@@ -1858,33 +1857,9 @@ export default function App(){
       if(searchTimer.current) clearTimeout(searchTimer.current);
       searchTimer.current = setTimeout(() => setSearch(v), 250);
     };
-    const filterBtn = (id, label, color) => (
-      <button type="button" onClick={()=>setFilter(id)} style={{
-        padding:"5px 10px",fontSize:11,fontWeight:700,borderRadius:0,cursor:"pointer",
-        border:`1px solid ${filter===id?(color||C.brand):C.border}`,
-        background:filter===id?((color||C.brand)+"22"):C.bgCard,
-        color:filter===id?(color||C.brand):C.textSub,
-        textTransform:"uppercase",letterSpacing:"0.5px",
-      }}>{label}</button>
-    );
     return (
       <div style={{marginBottom:12}}>
         <input value={localSearch} onChange={e=>onSearchChange(e.target.value)} placeholder="🔍 Поиск по маркировке..." style={{...s.input,marginBottom:8}} autoFocus/>
-        <div style={{display:"flex",gap:6,marginBottom:8,flexWrap:"wrap"}}>
-          {filterBtn("all","Все",C.brand)}
-          {filterBtn("with-stock","С остатком",C.success)}
-          {filterBtn("empty","Пустые",C.danger)}
-        </div>
-        <div style={{display:"flex",gap:6,alignItems:"center",fontSize:11,color:C.textSub,marginBottom:8}}>
-          <span style={{fontWeight:700,textTransform:"uppercase",letterSpacing:"0.5px"}}>Сорт.:</span>
-          <select value={sort} onChange={e=>setSort(e.target.value)} style={{...s.input,padding:"6px 8px",fontSize:11,flex:1}}>
-            <option value="alpha">По алфавиту (А→Я)</option>
-            <option value="alpha-desc">По алфавиту (Я→А)</option>
-            <option value="qty-desc">По остатку (больше → меньше)</option>
-            <option value="qty-asc">По остатку (меньше → больше)</option>
-            <option value="empty-first">Сначала пустые</option>
-          </select>
-        </div>
         <div style={{display:"flex",gap:6}}>
           <button type="button" onClick={()=>setExpandedCats({})} style={{...s.btn(),padding:"4px 10px",fontSize:11}}>
             ▼ Раскрыть все
@@ -1914,7 +1889,7 @@ export default function App(){
     if(!isService) titleParts.push(`остаток ${wq} шт`);
     if(mAliases.length > 0) titleParts.push(`алиасы: ${mAliases.join(", ")}`);
     return (
-      <button key={m} type="button" onClick={()=>setMarker(m)} title={titleParts.join(" · ")}
+      <button key={m} type="button" onClick={()=>{setMarker(m);setShowAllMarkers(false);setMarkerSearch("");}} title={titleParts.join(" · ")}
         style={{
           fontSize:11, padding:"4px 8px", borderRadius:6, cursor:"pointer",
           background: isSelected ? C.brand : (empty ? C.dangerDim : low ? C.warnDim : C.bgCard),
@@ -2014,84 +1989,35 @@ export default function App(){
             <span style={{color:C.textDim,fontSize:12}}>{expanded?"▲":"▼"}</span>
           </div>
         </div>
-        {expanded && (
-          <div style={{borderTop:`1px solid ${C.border}`,padding:"6px 14px",display:"flex",gap:5,flexWrap:"wrap",alignItems:"center",background:C.bgSection,borderBottom:`1px solid ${C.border}`}}>
-            <span style={{fontSize:10,color:C.textDim,marginRight:4,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.5px"}}>Фильтр:</span>
-            {catFilterBtn("all","Все",C.brand)}
-            {catFilterBtn("with-stock","С остатком",C.success)}
-            {catFilterBtn("empty","Пустые",C.danger)}
-            {activeCatFilter !== "all" && (
-              <button type="button" onClick={(e)=>{e.stopPropagation();setCatFilter(p=>{const n={...p};delete n[cat];return n;});}} style={{
-                padding:"2px 7px",fontSize:10,borderRadius:0,cursor:"pointer",
-                border:`1px solid ${C.border}`,background:"transparent",color:C.textSub,
-              }}>✕ Сбросить</button>
-            )}
-          </div>
-        )}
         {expanded&&(
           <div>
             <div style={{display:"grid",gridTemplateColumns:"1fr auto 36px",gap:6,
               padding:"6px 14px",fontSize:11,color:C.textDim,borderBottom:`1px solid ${C.border}`,background:C.bgSection}}>
               <span>Маркировка</span><span style={{textAlign:"center"}}>Кол-во</span><span style={{textAlign:"center"}}>💬</span>
             </div>
-            {(() => {
-              // Группировка по подкатегориям
-              const catSubs = getSubcategories(cat);
-              const subNames = Object.keys(catSubs);
-              const allSubMarkers = new Set();
-              Object.values(catSubs).forEach(ms => ms.forEach(m => allSubMarkers.add(m)));
-              const renderStockRow = (m, indent) => {
-                const q=stockObj[m]||0,cfg=stockCfg[m]||{};
-                const mAliases = getAliases(m);
-                const mNote = getNote(m);
-                return (
-                  <div key={m} style={{display:"grid",gridTemplateColumns:"1fr auto 36px",gap:6,
-                    padding:`7px 14px ${indent?"7px 14px 7px 28px":""}`,borderBottom:`1px solid ${C.border}22`,alignItems:"center",
-                    background:q===0?C.dangerDim:q>0&&cfg.threshold>0&&q<=cfg.threshold?C.warnDim:"transparent"}}>
-                    <div>
-                      <div style={{fontSize:13,color:q===0?C.textDim:C.text,fontWeight:600}}>{m}</div>
-                      {mAliases.length > 0 && <div style={{fontSize:10,color:C.textDim,marginTop:2,lineHeight:1.3}}>= {mAliases.join(", ")}</div>}
-                      {mNote && <div style={{fontSize:10,color:C.warn,marginTop:2,lineHeight:1.3,fontStyle:"italic"}}>💬 {mNote}</div>}
-                    </div>
-                    <StepperInput value={q} onChange={async nq=>{
-                      const ns={...stockObj,[m]:nq};
-                      if(isWS){setStockWS(p=>({...p,[workshop]:ns}));debouncedSave(`stock:ws:${workshop}`,ns);}
-                      else{setStockMain(ns);debouncedSave("stock:main",ns);}
-                    }} inputStyle={{color:q===0?C.danger:cfg.threshold>0&&q<=cfg.threshold?C.warn:C.success}}/>
-                    <button onClick={()=>setNoteModal({markerName:m})} title="Комментарий"
-                      style={{...s.btn(),padding:"5px 6px",fontSize:11,borderColor:mNote?C.warn+"66":C.border,color:mNote?C.warn:C.textSub}}>💬</button>
-                  </div>
-                );
-              };
-
-              if(subNames.length === 0){
-                return filteredMs.map(m => renderStockRow(m, false));
-              }
-
+            {filteredMs.map(m=>{
+              const q=stockObj[m]||0,cfg=stockCfg[m]||{};
+              const mAliases = getAliases(m);
+              const mNote = getNote(m);
               return (
-                <>
-                  {subNames.map(sn => {
-                    const subMarkers = (catSubs[sn]||[]).filter(m => filteredMs.includes(m));
-                    if(subMarkers.length === 0) return null;
-                    return (
-                      <div key={sn}>
-                        <div onClick={()=>setExpandedSubcats(p=>({...p,[`${cat}|${sn}`]:!p[`${cat}|${sn}`]}))}
-                          style={{padding:"4px 14px 4px 20px",fontSize:10,fontWeight:800,color:C.text,background:C.bgSection,borderTop:`1px solid ${C.border}`,borderBottom:`1px solid ${C.border}`,textTransform:"uppercase",letterSpacing:"1px",cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                          <span>📁 {sn} ({subMarkers.length})</span>
-                          <span style={{fontSize:11}}>{expandedSubcats[`${cat}|${sn}`]===false ? "▼" : "▲"}</span>
-                        </div>
-                        {expandedSubcats[`${cat}|${sn}`]!==false && subMarkers.map(m => renderStockRow(m, true))}
-                      </div>
-                    );
-                  })}
-                  {(() => {
-                    const noSub = filteredMs.filter(m => !allSubMarkers.has(m));
-                    if(noSub.length === 0) return null;
-                    return noSub.map(m => renderStockRow(m, false));
-                  })()}
-                </>
+                <div key={m} style={{display:"grid",gridTemplateColumns:"1fr auto 36px",gap:6,
+                  padding:"7px 14px",borderBottom:`1px solid ${C.border}22`,alignItems:"center",
+                  background:q===0?C.dangerDim:"transparent"}}>
+                  <div>
+                    <div style={{fontSize:13,color:q===0?C.textDim:C.text,fontWeight:600}}>{m}</div>
+                    {mAliases.length > 0 && <div style={{fontSize:10,color:C.textDim,marginTop:2,lineHeight:1.3}}>= {mAliases.join(", ")}</div>}
+                    {mNote && <div style={{fontSize:10,color:C.warn,marginTop:2,lineHeight:1.3,fontStyle:"italic"}}>💬 {mNote}</div>}
+                  </div>
+                  <StepperInput value={q} onChange={async nq=>{
+                    const ns={...stockObj,[m]:nq};
+                    if(isWS){setStockWS(p=>({...p,[workshop]:ns}));debouncedSave(`stock:ws:${workshop}`,ns);}
+                    else{setStockMain(ns);debouncedSave("stock:main",ns);}
+                  }} inputStyle={{color:q===0?C.danger:C.success}}/>
+                  <button onClick={()=>setNoteModal({markerName:m})} title="Комментарий"
+                    style={{...s.btn(),padding:"5px 6px",fontSize:11,borderColor:mNote?C.warn+"66":C.border,color:mNote?C.warn:C.textSub}}>💬</button>
+                </div>
               );
-            })()}
+            })}
           </div>
         )}
       </div>
@@ -2271,18 +2197,20 @@ export default function App(){
           <div style={{fontSize:22,fontWeight:800,letterSpacing:"-0.3px"}}>Мастерская</div>
           <div style={{fontSize:10,fontWeight:700,color:C.brand,letterSpacing:"1px",textTransform:"uppercase",marginTop:4}}>Простое Решение</div>
         </div>
-        <label style={s.label}>Введите пароль</label>
-        <input type="password" value={passwordInput}
-          onChange={e=>setPasswordInput(e.target.value)}
-          onKeyDown={e=>{if(e.key==="Enter")handleLogin();}}
-          placeholder="Пароль"
-          style={{...s.input,marginBottom:12,textAlign:"center",fontSize:16,letterSpacing:2}}/>
-        {authError&&<div style={{fontSize:12,color:C.danger,marginBottom:10,textAlign:"center",fontWeight:700}}>{authError}</div>}
-        <button onClick={handleLogin} style={{...s.btn("accent"),width:"100%",padding:"14px 0",fontSize:14}}>Войти</button>
-        <div style={{fontSize:11,color:C.textDim,textAlign:"center",marginTop:16,lineHeight:1.6}}>
-          Пароль определяет мастерскую<br/>
-          (по умолчанию: smart123 / begemot123)
+        <div style={{fontSize:11,color:C.textDim,textAlign:"center",marginBottom:20,lineHeight:1.6}}>
+          Выберите мастерскую
         </div>
+        {WORKSHOPS.map(ws=>{
+          const wsCol = ws==="SMART"?C.smart:C.begemot;
+          return (
+            <button key={ws} onClick={()=>{setWorkshop(ws);setAuthed(true);try{localStorage.setItem(LOCAL_WS_KEY,ws);localStorage.setItem(LOCAL_AUTH_KEY,"1");}catch{}}}
+              style={{
+                width:"100%",padding:"16px 0",fontSize:18,fontWeight:800,cursor:"pointer",
+                background:wsCol,color:"#fff",border:"none",borderRadius:0,marginBottom:10,
+                textTransform:"uppercase",letterSpacing:"1px",
+              }}>{ws}</button>
+          );
+        })}
       </div>
     </div>
   );
@@ -2392,8 +2320,9 @@ export default function App(){
             </div>
           </div>
           <div style={{display:"flex",gap:6,alignItems:"center"}}>
-            <button onClick={()=>setPwdModalOpen(true)} title="Сменить пароль" style={{background:"transparent",color:C.textSub,border:`1px solid ${C.border}`,padding:"6px 10px",fontSize:10,cursor:"pointer",borderRadius:0,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.5px"}}>🔑 Пароль</button>
-            <button onClick={handleLogout} title="Переключиться на другую мастерскую" style={{background:"transparent",color:C.textSub,border:`1px solid ${C.border}`,padding:"6px 10px",fontSize:10,cursor:"pointer",borderRadius:0,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.5px"}}>🔄 Мастерская</button>
+            <button onClick={handleLogout} title="Переключиться на другую мастерскую" style={{background:"transparent",color:C.textSub,border:`1px solid ${C.border}`,padding:"6px 10px",fontSize:10,cursor:"pointer",borderRadius:0,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.5px"}}>
+              🔄 → {workshop==="SMART" ? "Бегемот" : "SMART"}
+            </button>
             <button onClick={handleTokenLogout} title="Полный выход из приложения" style={{background:"transparent",color:C.danger,border:`1px solid ${C.danger}`,padding:"6px 10px",fontSize:10,cursor:"pointer",borderRadius:0,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.5px"}}>🚪 Выйти</button>
           </div>
         </div>
@@ -2514,40 +2443,7 @@ export default function App(){
                     const search = markerSearch.toLowerCase();
                     const list = search ? inStock.filter(m => matchesSearch(m, markerSearch)) : inStock;
                     if(list.length === 0) return <div style={{padding:"8px",color:C.textDim,fontSize:12}}>Ничего не найдено. Возможно, остаток на складе 0 — пополните в разделе «Склад».</div>;
-                    // Группировка по подкатегориям
-                    const catSubs = getSubcategories(category);
-                    const subNames = Object.keys(catSubs);
-                    if(subNames.length === 0) return list.map(m => renderMarkerButton(m, isService));
-                    const allSubMarkers = new Set();
-                    Object.values(catSubs).forEach(ms => ms.forEach(m => allSubMarkers.add(m)));
-                    return (
-                      <>
-                        {subNames.map(sn => {
-                          const subInList = (catSubs[sn]||[]).filter(m => list.includes(m));
-                          if(subInList.length === 0) return null;
-                          return (
-                            <div key={sn} style={{width:"100%",marginBottom:4}}>
-                              <div style={{fontSize:9,fontWeight:800,color:C.textSub,textTransform:"uppercase",letterSpacing:"1px",padding:"2px 4px"}}>📁 {sn}</div>
-                              <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
-                                {subInList.map(m => renderMarkerButton(m, isService))}
-                              </div>
-                            </div>
-                          );
-                        })}
-                        {(() => {
-                          const noSub = list.filter(m => !allSubMarkers.has(m));
-                          if(noSub.length === 0) return null;
-                          return (
-                            <div style={{width:"100%",marginBottom:4}}>
-                              {subNames.length > 0 && <div style={{fontSize:9,fontWeight:800,color:C.textSub,textTransform:"uppercase",letterSpacing:"1px",padding:"2px 4px"}}>Остальные</div>}
-                              <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
-                                {noSub.map(m => renderMarkerButton(m, isService))}
-                              </div>
-                            </div>
-                          );
-                        })()}
-                      </>
-                    );
+                    return list.map(m => renderMarkerButton(m, isService));
                   }
 
                   // Иначе — топ-20 за год для этой категории (только из тех, что есть в наличии)
@@ -2574,7 +2470,6 @@ export default function App(){
                 })()}
               </div>
 
-              <input value={marker} onChange={e=>setMarker(e.target.value)} placeholder="Или введите свою маркировку" style={s.input}/>
             </div>
             {markerPhoto&&(
               <div style={{marginBottom:12}}>
@@ -2582,12 +2477,6 @@ export default function App(){
                 <img src={markerPhoto} alt="" onClick={()=>setPhotoModal({url: markerPhoto, markerName: marker})}
                   style={{maxWidth:140,maxHeight:140,border:`1px solid ${C.border}`,display:"block",cursor:"pointer"}}/>
                 <div style={{fontSize:10,color:C.textDim,marginTop:4}}>Загрузить/изменить фото можно в разделе «Маркировки»</div>
-              </div>
-            )}
-            {marker && category !== "Прочие услуги" && (
-              <div style={{...s.card,padding:"8px 12px",marginBottom:12,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                <span style={{fontSize:12,color:C.textSub}}>Остаток в {workshop}</span>
-                <StockBadge qty={wsStock[marker.trim()]||0} threshold={(stockCfg[marker.trim()]||{}).threshold||0}/>
               </div>
             )}
             {marker && getNote(marker.trim()) && (
@@ -2716,7 +2605,7 @@ export default function App(){
             {stockTab==="ws"&&(
               <div>
                 <div style={{fontSize:13,color:C.textSub,marginBottom:10}}>Остатки · <b style={{color:wsColor}}>{workshop}</b></div>
-                <StockControls search={stockSearch} setSearch={setStockSearch} sort={stockSort} setSort={setStockSort} filter={stockFilter} setFilter={setStockFilter}/>
+                <StockControls search={stockSearch} setSearch={setStockSearch}/>
                 {sortedCategories(safeMarkers).map(cat=>renderStockCategory(cat,wsStock,true))}
                 <div style={{fontSize:11,color:C.textDim,marginTop:4}}>«Прочие услуги» в складе не отображаются</div>
               </div>
@@ -2724,7 +2613,7 @@ export default function App(){
             {stockTab==="main"&&(
               <div>
                 <div style={{fontSize:13,color:C.textSub,marginBottom:10}}>Общий склад</div>
-                <StockControls search={stockSearch} setSearch={setStockSearch} sort={stockSort} setSort={setStockSort} filter={stockFilter} setFilter={setStockFilter}/>
+                <StockControls search={stockSearch} setSearch={setStockSearch}/>
                 {sortedCategories(safeMarkers).map(cat=>renderStockCategory(cat,stockMain,false))}
               </div>
             )}
@@ -2794,11 +2683,6 @@ export default function App(){
                     style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 14px",
                       cursor:"pointer",background:expanded?C.bgCard:C.bgSection,borderBottom:expanded?`1px solid ${C.border}`:"none"}}>
                     <span style={{fontWeight:700,fontSize:13,color:C.text}}>{cat}</span>
-                    {Object.keys(getSubcategories(cat)).length > 0 && (
-                      <span style={{fontSize:10,color:C.brand,fontWeight:700,background:C.brandDim,padding:"2px 6px",border:`1px solid ${C.brand}44`}}>{Object.keys(getSubcategories(cat)).length} подк.</span>
-                    )}
-                    <button onClick={(e)=>{e.stopPropagation();setSubModal({cat});}} title="Управление подкатегориями"
-                      style={{fontSize:12,padding:"3px 8px",background:"transparent",border:`1px solid ${C.border}`,color:C.textSub,cursor:"pointer",borderRadius:0,fontWeight:700}}>📁 Подкатегории</button>
                     <div style={{display:"flex",alignItems:"center",gap:10}}>
                       <span style={{fontSize:11,color:C.textDim,fontWeight:600,textTransform:"uppercase",letterSpacing:"0.5px"}}>{withPrice}/{filtered.length} с ценой</span>
                       <span style={{color:C.textDim,fontSize:12}}>{expanded?"▲":"▼"}</span>
@@ -2806,92 +2690,30 @@ export default function App(){
                   </div>
                   {expanded&&(
                     <div style={{borderTop:`1px solid ${C.border}`}}>
-                      {/* Подкатегории */}
-                      {(() => {
-                        const catSubs = getSubcategories(cat);
-                        const subNames = Object.keys(catSubs);
-                        if(subNames.length === 0) return null;
-                        return subNames.map(subName => {
-                          const subMarkers = (catSubs[subName]||[]).filter(m => filtered.includes(m));
-                          if(subMarkers.length === 0) return null;
-                          return (
-                            <div key={subName} style={{borderBottom:`1px solid ${C.border}`,background:C.bgSection}}>
-                              <div onClick={()=>setExpandedSubcats(p=>({...p,[`${cat}|${subName}`]:!p[`${cat}|${subName}`]}))}
-                                style={{padding:"6px 14px",fontSize:11,fontWeight:800,color:C.text,textTransform:"uppercase",letterSpacing:"1px",display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer"}}>
-                                <span>📁 {subName}</span>
-                                <div style={{display:"flex",alignItems:"center",gap:6}}>
-                                  <button onClick={(e)=>{e.stopPropagation();deleteSubcategory(cat, subName);}} title="Удалить подкатегорию"
-                                    style={{fontSize:10,color:C.danger,background:"transparent",border:"none",cursor:"pointer"}}>✕</button>
-                                  <span style={{fontSize:11}}>{expandedSubcats[`${cat}|${subName}`]===false ? "▼" : "▲"}</span>
-                                </div>
-                              </div>
-                              {expandedSubcats[`${cat}|${subName}`]!==false && subMarkers.map(m => {
-                                const mAliases = getAliases(m);
-                                const mNote = getNote(m);
-                                const cachedPhoto = photoCache[m];
-                                return (
-                                  <div key={m} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
-                                    padding:"8px 14px 8px 28px",borderBottom:`1px solid ${C.border}22`,gap:8,flexWrap:"wrap",background:C.bgCard}}>
-                                    <MarkerPhotoThumb markerName={m} photo={cachedPhoto} onPhotoLoaded={(url)=>setPhotoCache(p=>({...p,[m]:url}))} onPhotoClick={()=>cachedPhoto && setPhotoModal({url: cachedPhoto, markerName: m})}/>
-                                    <div style={{flex:1,minWidth:80}}>
-                                      <div style={{fontSize:13,color:C.text}}>{m}</div>
-                                      {mAliases.length > 0 && <div style={{fontSize:10,color:C.textDim,marginTop:2}}>= {mAliases.join(", ")}</div>}
-                                      {mNote && <div style={{fontSize:10,color:C.warn,marginTop:2,fontStyle:"italic"}}>💬 {mNote}</div>}
-                                    </div>
-                                    <div style={{display:"flex",alignItems:"center",gap:6}}>
-                                      <StepperInput value={safePrices[m]||0} onChange={async (val) => { const np = {...safePrices}; if(val > 0) np[m] = val; else delete np[m]; setPrices(np); debouncedSave("prices", np); }} step={10} />
-                                      <span style={{fontSize:12,color:C.textSub,whiteSpace:"nowrap"}}>р/шт</span>
-                                      <button onClick={()=>setNoteModal({markerName:m})} title="Комментарий" style={{...s.btn(),padding:"5px 8px",fontSize:11,borderColor:mNote?C.warn+"66":C.border,color:mNote?C.warn:C.textSub}}>💬</button>
-                                      <button onClick={()=>setAliasesModal({cat, markerName:m})} title="Алиасы" style={{...s.btn(),padding:"5px 8px",fontSize:11,borderColor:mAliases.length>0?C.brand+"66":C.border,color:mAliases.length>0?C.brand:C.textSub}}>≡</button>
-                                      <button onClick={()=>setRenameModal({cat, oldName:m})} title="Переименовать" style={{...s.btn(),padding:"5px 8px",fontSize:11}}>✎</button>
-                                      <button onClick={()=>removeMarkerFromSubcategory(cat, subName, m)} title="Убрать из подкатегории" style={{...s.btn(),padding:"5px 8px",fontSize:11}}>↩</button>
-                                      <button onClick={()=>deleteMarker(cat,m)} title="Удалить" style={{...s.btn("danger"),padding:"5px 8px",fontSize:11}}>✕</button>
-                                    </div>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          );
-                        });
-                      })()}
-                      {/* Маркировки без подкатегории */}
-                      {(() => {
-                        const catSubs = getSubcategories(cat);
-                        const allSubMarkers = new Set();
-                        Object.values(catSubs).forEach(ms => ms.forEach(m => allSubMarkers.add(m)));
-                        const noSub = filtered.filter(m => !allSubMarkers.has(m));
-                        if(noSub.length === 0) return null;
-                        return noSub.map(m=>{
-                          const mAliases = getAliases(m);
-                          const mNote = getNote(m);
-                          const cachedPhoto = photoCache[m];
-                          const mSub = getMarkerSubcategory(cat, m);
-                          return (
-                          <div key={m} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
-                            padding:"8px 14px",borderBottom:`1px solid ${C.border}22`,gap:8,flexWrap:"wrap"}}>
-                            <MarkerPhotoThumb markerName={m} photo={cachedPhoto} onPhotoLoaded={(url)=>setPhotoCache(p=>({...p,[m]:url}))} onPhotoClick={()=>cachedPhoto && setPhotoModal({url: cachedPhoto, markerName: m})}/>
-                            <div style={{flex:1,minWidth:80}}>
-                              <div style={{fontSize:13,color:C.text}}>{m}</div>
-                              {mAliases.length > 0 && <div style={{fontSize:10,color:C.textDim,marginTop:2}}>= {mAliases.join(", ")}</div>}
-                              {mNote && <div style={{fontSize:10,color:C.warn,marginTop:2,fontStyle:"italic"}}>💬 {mNote}</div>}
-                            </div>
-                            <div style={{display:"flex",alignItems:"center",gap:6}}>
-                              <StepperInput value={safePrices[m]||0} onChange={async (val) => { const np = {...safePrices}; if(val > 0) np[m] = val; else delete np[m]; setPrices(np); debouncedSave("prices", np); }} step={10} />
-                              <span style={{fontSize:12,color:C.textSub,whiteSpace:"nowrap"}}>р/шт</span>
-                              <button onClick={()=>setNoteModal({markerName:m})} title="Комментарий" style={{...s.btn(),padding:"5px 8px",fontSize:11,borderColor:mNote?C.warn+"66":C.border,color:mNote?C.warn:C.textSub}}>💬</button>
-                              <button onClick={()=>setAliasesModal({cat, markerName:m})} title="Алиасы" style={{...s.btn(),padding:"5px 8px",fontSize:11,borderColor:mAliases.length>0?C.brand+"66":C.border,color:mAliases.length>0?C.brand:C.textSub}}>≡</button>
-                              <button onClick={()=>setRenameModal({cat, oldName:m})} title="Переименовать" style={{...s.btn(),padding:"5px 8px",fontSize:11}}>✎</button>
-                              <button onClick={()=>deleteMarker(cat,m)} title="Удалить" style={{...s.btn("danger"),padding:"5px 8px",fontSize:11}}>✕</button>
-                            </div>
+                      {filtered.map(m=>{
+                        const mAliases = getAliases(m);
+                        const mNote = getNote(m);
+                        const cachedPhoto = photoCache[m];
+                        return (
+                        <div key={m} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+                          padding:"8px 14px",borderBottom:`1px solid ${C.border}22`,gap:8,flexWrap:"wrap"}}>
+                          <MarkerPhotoThumb markerName={m} photo={cachedPhoto} onPhotoLoaded={(url)=>setPhotoCache(p=>({...p,[m]:url}))} onPhotoClick={()=>cachedPhoto && setPhotoModal({url: cachedPhoto, markerName: m})}/>
+                          <div style={{flex:1,minWidth:80}}>
+                            <div style={{fontSize:13,color:C.text}}>{m}</div>
+                            {mAliases.length > 0 && <div style={{fontSize:10,color:C.textDim,marginTop:2}}>= {mAliases.join(", ")}</div>}
+                            {mNote && <div style={{fontSize:10,color:C.warn,marginTop:2,fontStyle:"italic"}}>💬 {mNote}</div>}
                           </div>
-                          );
-                        });
-                      })()}
-                      {/* Кнопка создания подкатегории */}
-                      <div style={{padding:"8px 14px",display:"flex",gap:8,alignItems:"center",background:C.bgSection,borderTop:`1px solid ${C.border}`}}>
-                        <input value={newSubInput[cat]||""} onChange={e=>setNewSubInput(p=>({...p,[cat]:e.target.value}))} placeholder="Новая подкатегория..." style={{...s.input,fontSize:12}} onKeyDown={e=>{if(e.key==="Enter"&&(newSubInput[cat]||"").trim()){createSubcategory(cat,newSubInput[cat]).then(r=>{if(r.ok)setNewSubInput(p=>({...p,[cat]:""}));});}}}/>
-                        <button onClick={()=>{const v=(newSubInput[cat]||"").trim(); if(v){createSubcategory(cat,v).then(r=>{if(r.ok)setNewSubInput(p=>({...p,[cat]:""}));});}}} style={{...s.btn(),fontSize:11,whiteSpace:"nowrap"}}>+ Подкатегория</button>
-                      </div>
+                          <div style={{display:"flex",alignItems:"center",gap:6}}>
+                            <StepperInput value={safePrices[m]||0} onChange={async (val) => { const np = {...safePrices}; if(val > 0) np[m] = val; else delete np[m]; setPrices(np); debouncedSave("prices", np); }} step={10} />
+                            <span style={{fontSize:12,color:C.textSub,whiteSpace:"nowrap"}}>р/шт</span>
+                            <button onClick={()=>setNoteModal({markerName:m})} title="Комментарий" style={{...s.btn(),padding:"5px 8px",fontSize:11,borderColor:mNote?C.warn+"66":C.border,color:mNote?C.warn:C.textSub}}>💬</button>
+                            <button onClick={()=>setAliasesModal({cat, markerName:m})} title="Алиасы" style={{...s.btn(),padding:"5px 8px",fontSize:11,borderColor:mAliases.length>0?C.brand+"66":C.border,color:mAliases.length>0?C.brand:C.textSub}}>≡</button>
+                            <button onClick={()=>setRenameModal({cat, oldName:m})} title="Переименовать" style={{...s.btn(),padding:"5px 8px",fontSize:11}}>✎</button>
+                            <button onClick={()=>deleteMarker(cat,m)} title="Удалить" style={{...s.btn("danger"),padding:"5px 8px",fontSize:11}}>✕</button>
+                          </div>
+                        </div>
+                        );
+                      })}
                     </div>
                   )}
                 </div>
