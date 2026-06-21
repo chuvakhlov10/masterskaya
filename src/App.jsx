@@ -320,9 +320,9 @@ function EditModal({ record, idx, markers, onSave, onDelete, onClose }){
           ))}
         </div>
         <input value={mrk} onChange={e=>setMrk(e.target.value)} style={{...s.input,marginBottom:10}} placeholder="или своя маркировка"/>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
+        <div style={{display:"grid",gridTemplateColumns:recordType==="refund"?"1fr":"1fr 1fr",gap:10,marginBottom:10}}>
           <div><label style={s.label}>Количество</label><StepperInput value={qty} onChange={setQty} style={{width:"100%"}} inputStyle={{width:"100%"}}/></div>
-          <div><label style={s.label}>Брак</label><StepperInput value={defect} onChange={setDefect} style={{width:"100%"}} inputStyle={{width:"100%"}}/></div>
+          {recordType!=="refund" && <div><label style={s.label}>Брак</label><StepperInput value={defect} onChange={setDefect} style={{width:"100%"}} inputStyle={{width:"100%"}}/></div>}
         </div>
         {recordType==="sale"&&qty>0&&defect>0&&(
           <div style={{fontSize:11,color:C.textDim,marginBottom:10,lineHeight:1.5}}>
@@ -2474,15 +2474,17 @@ export default function App(){
                 <div style={{fontSize:12,color:C.warn,lineHeight:1.5,fontStyle:"italic"}}>{getNote(marker.trim())}</div>
               </div>
             )}
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
+            <div style={{display:"grid",gridTemplateColumns:recordType==="refund"?"1fr":"1fr 1fr",gap:10,marginBottom:12}}>
               <div>
                 <label style={s.label}>Количество</label>
                 <StepperInput value={qty} onChange={setQty} style={{width:"100%"}} inputStyle={{width:"100%"}}/>
               </div>
+              {recordType!=="refund" && (
               <div>
                 <label style={s.label}>Брак</label>
                 <StepperInput value={defect} onChange={setDefect} style={{width:"100%"}} inputStyle={{width:"100%"}}/>
               </div>
+              )}
             </div>
             {recordType==="sale"&&qty>0&&defect>0&&(
               <div style={{...s.card,padding:"8px 12px",marginBottom:10,background:C.warnDim,borderColor:C.warn+"44"}}>
