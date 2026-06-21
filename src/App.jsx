@@ -1419,6 +1419,60 @@ export default function App(){
   const [subModal, setSubModal] = useState(null); // {cat}
   // текущее время (тикает каждую минуту)
   const [nowTime, setNowTime] = useState(new Date());
+
+  // ── Polling синхронизация (каждые 15 сек) ──
+  const [syncStatus, setSyncStatus] = useState("idle"); // idle | syncing | synced
+  const lastDataHashRef = useRef("");
+  const isUserEditingRef = useRef(false); // блокировка polling при редактировании
+
+  useEffect(() => {
+    if (!authed) return;
+    const poll = async () => {
+      // Не синхронизируем, если пользователь активно редактирует
+      if (isUserEditingRef.current) return;
+      setSyncStatus("syncing");
+      try {
+        const [r,p,sm,sS,sCfg,sm2,al,nt] = await Promise.all([
+          sGet("records"), sGet("prices"),
+          sGet("stock:main"), Promise.all(WORKSHOPS.map(w=>sGet(`stock:ws:${w}`))),
+          sGet("stock:cfg"), sGet("custom:markers"), sGet("marker-aliases"), sGet("marker-notes"),
+        ]);
+        // Хэш для сравнения
+        const hash = JSON.stringify({r, p, sm, sS, sCfg, sm2, al, nt});
+        if (hash === lastDataHashRef.current) {
+          setSyncStatus("synced");
+          return;
+        }
+        lastDataHashRef.current = hash;
+
+        // Сохраняем скролл
+        const sY = window.scrollY;
+
+        // Обновляем state
+        if(Array.isArray(r)) setRecords(r);
+        if(p && typeof p === "object" && !Array.isArray(p)) setPrices(p);
+        if(sm && typeof sm === "object" && !Array.isArray(sm)) setStockMain(sm);
+        const wsObj = {};
+        WORKSHOPS.forEach((w,i)=>{ wsObj[w] = (sS[i] && typeof sS[i] === "object" && !Array.isArray(sS[i])) ? sS[i] : {}; });
+        setStockWS(wsObj);
+        if(sCfg && typeof sCfg === "object" && !Array.isArray(sCfg)) setStockCfg(sCfg);
+        if(sm2 && typeof sm2 === "object" && !Array.isArray(sm2)) setMarkers(sm2);
+        if(al && typeof al === "object" && !Array.isArray(al)) setAliases(al);
+        if(nt && typeof nt === "object" && !Array.isArray(nt)) setNotes(nt);
+
+        // Восстанавливаем скролл
+        setTimeout(()=>window.scrollTo(0, sY), 0);
+        setSyncStatus("synced");
+      } catch(e) {
+        setSyncStatus("idle");
+      }
+    };
+    // Первый запуск через 3 сек
+    const initialTimer = setTimeout(poll, 3000);
+    // Затем каждые 15 сек
+    const interval = setInterval(poll, 15000);
+    return () => { clearTimeout(initialTimer); clearInterval(interval); };
+  }, [authed]);
   useEffect(() => {
     const t = setInterval(() => setNowTime(new Date()), 60000);
     return () => clearInterval(t);
@@ -2367,6 +2421,19 @@ export default function App(){
                 {status === "saving" ? "⏳ Сохранение..." : status === "error" ? "⚠ Ошибка" : "✓ Сохранено"}
               </span>
             ))}
+            {/* Индикатор синхронизации */}
+            {syncStatus !== "idle" && (
+              <span style={{
+                fontSize:10,
+                padding:"2px 6px",
+                background: syncStatus === "syncing" ? C.smartDim : C.successDim,
+                color: syncStatus === "syncing" ? C.smart : C.success,
+                border: `1px solid ${syncStatus === "syncing" ? C.smart : C.success}44`,
+                fontWeight: 700,
+              }}>
+                {syncStatus === "syncing" ? "🔄 Синхр..." : "✓ Синхронизировано"}
+              </span>
+            )}
           </div>
         </div>
         <Tabs tabs={tabs} active={tab} onChange={setTab}/>
