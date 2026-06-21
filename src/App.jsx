@@ -1420,25 +1420,76 @@ export default function App(){
   // текущее время (тикает каждую минуту)
   const [nowTime, setNowTime] = useState(new Date());
 
-  // ── Polling синхронизация (каждые 15 сек) ──
-  const [syncStatus, setSyncStatus] = useState("idle"); // idle | syncing | synced
+  // ── WebSocket + Polling синхронизация ──
+  const [syncStatus, setSyncStatus] = useState("idle"); // idle | syncing | synced | ws
   const lastDataHashRef = useRef("");
-  const skipPollRef = useRef(0); // пропуск N циклов polling после silentSave
+  const skipPollRef = useRef(0);
+  const wsRef = useRef(null);
+  const wsConnectedRef = useRef(false);
+  const doPollRef = useRef(null); // ссылка на функцию poll для вызова из WS
 
-  // Тихое сохранение: пишет в GitHub + обновляет React state + блокирует polling
+  // Тихое сохранение: пишет в GitHub + обновляет React state + блокирует polling + уведомляет WS
   async function silentSaveState(key, value, setter) {
     setter(value);
-    skipPollRef.current = 2; // пропустить следующие 2 цикла (~30 сек)
+    skipPollRef.current = 2;
     await sSet(key, value);
+    // Уведомляем других через WebSocket
+    if (wsRef.current && wsRef.current.readyState === 1) {
+      wsRef.current.send(JSON.stringify({ type: 'changed' }));
+    }
   }
 
   useEffect(() => {
     if (!authed) return;
+
+    // ── WebSocket подключение ──
+    const WS_URL = 'wss://masterskaya-ws.onrender.com';
+    let reconnectTimer = null;
+
+    function connectWS() {
+      try {
+        const ws = new WebSocket(WS_URL);
+        wsRef.current = ws;
+
+        ws.onopen = () => {
+          console.log('[WS] Подключено');
+          wsConnectedRef.current = true;
+          setSyncStatus("ws");
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const msg = JSON.parse(event.data);
+            if (msg.type === 'sync') {
+              // Кто-то изменил данные — мгновенный poll
+              console.log('[WS] Получено уведомление о синхронизации');
+              if (doPollRef.current) doPollRef.current();
+            }
+          } catch(e) {}
+        };
+
+        ws.onclose = () => {
+          console.log('[WS] Отключено, переподключение через 5 сек');
+          wsConnectedRef.current = false;
+          setSyncStatus("idle");
+          reconnectTimer = setTimeout(connectWS, 5000);
+        };
+
+        ws.onerror = () => {
+          ws.close();
+        };
+      } catch(e) {
+        reconnectTimer = setTimeout(connectWS, 5000);
+      }
+    }
+
+    connectWS();
+
+    // ── Polling (fallback если WS не работает) ──
     const poll = async () => {
-      // Пропуск после silentSave (пользователь только что сохранил)
       if (skipPollRef.current > 0) {
         skipPollRef.current--;
-        setSyncStatus("synced");
+        setSyncStatus(wsConnectedRef.current ? "ws" : "synced");
         return;
       }
       setSyncStatus("syncing");
@@ -1448,18 +1499,13 @@ export default function App(){
           sGet("stock:main"), Promise.all(WORKSHOPS.map(w=>sGet(`stock:ws:${w}`))),
           sGet("stock:cfg"), sGet("custom:markers"), sGet("marker-aliases"), sGet("marker-notes"),
         ]);
-        // Хэш для сравнения
         const hash = JSON.stringify({r, p, sm, sS, sCfg, sm2, al, nt});
         if (hash === lastDataHashRef.current) {
-          setSyncStatus("synced");
+          setSyncStatus(wsConnectedRef.current ? "ws" : "synced");
           return;
         }
         lastDataHashRef.current = hash;
-
-        // Сохраняем скролл
         const sY = window.scrollY;
-
-        // Обновляем state
         if(Array.isArray(r)) setRecords(r);
         if(p && typeof p === "object" && !Array.isArray(p)) setPrices(p);
         if(sm && typeof sm === "object" && !Array.isArray(sm)) setStockMain(sm);
@@ -1470,19 +1516,24 @@ export default function App(){
         if(sm2 && typeof sm2 === "object" && !Array.isArray(sm2)) setMarkers(sm2);
         if(al && typeof al === "object" && !Array.isArray(al)) setAliases(al);
         if(nt && typeof nt === "object" && !Array.isArray(nt)) setNotes(nt);
-
-        // Восстанавливаем скролл
         setTimeout(()=>window.scrollTo(0, sY), 0);
-        setSyncStatus("synced");
+        setSyncStatus(wsConnectedRef.current ? "ws" : "synced");
       } catch(e) {
         setSyncStatus("idle");
       }
     };
-    // Первый запуск через 3 сек
+
+    doPollRef.current = poll;
+
     const initialTimer = setTimeout(poll, 3000);
-    // Затем каждые 15 сек
-    const interval = setInterval(poll, 15000);
-    return () => { clearTimeout(initialTimer); clearInterval(interval); };
+    const interval = setInterval(poll, 30000); // polling каждые 30 сек (WS для мгновенной)
+
+    return () => {
+      clearTimeout(initialTimer);
+      clearInterval(interval);
+      clearTimeout(reconnectTimer);
+      if (wsRef.current) wsRef.current.close();
+    };
   }, [authed]);
   useEffect(() => {
     const t = setInterval(() => setNowTime(new Date()), 60000);
@@ -2437,12 +2488,12 @@ export default function App(){
               <span style={{
                 fontSize:10,
                 padding:"2px 6px",
-                background: syncStatus === "syncing" ? C.smartDim : C.successDim,
-                color: syncStatus === "syncing" ? C.smart : C.success,
-                border: `1px solid ${syncStatus === "syncing" ? C.smart : C.success}44`,
+                background: syncStatus === "syncing" ? C.smartDim : syncStatus === "ws" ? C.brandDim : C.successDim,
+                color: syncStatus === "syncing" ? C.smart : syncStatus === "ws" ? C.brand : C.success,
+                border: `1px solid ${syncStatus === "syncing" ? C.smart : syncStatus === "ws" ? C.brand : C.success}44`,
                 fontWeight: 700,
               }}>
-                {syncStatus === "syncing" ? "🔄 Синхр..." : "✓ Синхронизировано"}
+                {syncStatus === "syncing" ? "🔄" : syncStatus === "ws" ? "⚡ Live" : "✓"}
               </span>
             )}
           </div>
