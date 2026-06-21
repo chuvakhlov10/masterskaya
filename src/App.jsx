@@ -1,7 +1,10 @@
-import Ably from "ably";
 import { useState, useEffect, useCallback, useRef, Component } from "react";
 import { dbGet, dbSet, hasToken, setToken, clearToken, verifyToken, photoGet, photoSet, photoDelete } from "./github-storage.js";
+import Ably from "ably";
 
+const ABLY_KEY = "Z2GSmg.BgNkkg:ns6NnvUHHdkQYt0MyDTaDZqWs4-kEqHPYihb39mmUfk";
+const CLIENT_ID = String(Date.now()) + '-' + Math.random().toString(36).slice(2, 8);
+const ably = new Ably.Realtime({ key: ABLY_KEY, clientId: CLIENT_ID });
 
 const DEFAULT_MARKERS = {
   "Автомобильные": ["Замена корпуса","HD39RP","Нарезка лезвия","LD-1P","MIT8AP","MIT8RP (п.ч.)","XT27A"],
@@ -1347,8 +1350,7 @@ export default function App(){
     const subs = ensureObj(safeSubcategories[cat]);
     if(subs[subName]) return {ok:false, text:"Такая подкатегория уже есть"};
     const next = {...safeSubcategories, [cat]: {...subs, [subName]: []}};
-    setSubcategories(next);
-    await sSet("subcategories", next);
+    await saveAndSync("subcategories", next, setSubcategories);
     return {ok:true, text:`Подкатегория «${subName}» создана`};
   }
 
@@ -1358,8 +1360,7 @@ export default function App(){
     const nextSubs = {...subs};
     delete nextSubs[subName];
     const next = {...safeSubcategories, [cat]: nextSubs};
-    setSubcategories(next);
-    await sSet("subcategories", next);
+    await saveAndSync("subcategories", next, setSubcategories);
   }
 
   async function addMarkerToSubcategory(cat, subName, markerName){
@@ -1376,8 +1377,7 @@ export default function App(){
       }
     }
     const next = {...safeSubcategories, [cat]: nextSubs};
-    setSubcategories(next);
-    await sSet("subcategories", next);
+    await saveAndSync("subcategories", next, setSubcategories);
     return {ok:true, text:`«${markerName}» → ${subName}`};
   }
 
@@ -1386,8 +1386,7 @@ export default function App(){
     const nextSubs = {...subs};
     nextSubs[subName] = (nextSubs[subName]||[]).filter(m => m !== markerName);
     const next = {...safeSubcategories, [cat]: nextSubs};
-    setSubcategories(next);
-    await sSet("subcategories", next);
+    await saveAndSync("subcategories", next, setSubcategories);
   }
 
   async function renameSubcategory(cat, oldName, newName){
@@ -1402,9 +1401,8 @@ export default function App(){
       else nextSubs[sn] = ms;
     }
     const next = {...safeSubcategories, [cat]: nextSubs};
-    setSubcategories(next);
-    await sSet("subcategories", next);
-    return {ok:true, text:`«${oldName}» → «${newName}»`}; 
+    await saveAndSync("subcategories", next, setSubcategories);
+    return {ok:true, text:`«${oldName}» → «${newName}»`};
   }
 
   // переименование маркировки
@@ -1423,55 +1421,129 @@ export default function App(){
   const [nowTime, setNowTime] = useState(new Date());
 
   // ── WebSocket + Polling синхронизация ──
-  const [syncStatus, setSyncStatus] = useState("idle"); // idle | syncing | synced
+  const [syncStatus, setSyncStatus] = useState("idle"); // idle | syncing | synced | ws
   const lastDataHashRef = useRef("");
   const skipPollRef = useRef(0);
-  const doPollRef = useRef(null);
-  const ablyRef = useRef(null);
+  const wsRef = useRef(null);
+  const wsConnectedRef = useRef(false);
   const ablyChannelRef = useRef(null);
+  const doPollRef = useRef(null); // ссылка на функцию poll для вызова из WS
+  const stateSettersRef = useRef({}); // маппинг key → setter для мгновенного применения Ably-обновлений
+  const lastBroadcastTsRef = useRef({}); // {key: ts} — защита от эха собственных сообщений
+  const clientIdRef = useRef(CLIENT_ID); // ID этого клиента для фильтрации собственных сообщений
 
-  // Тихое сохранение: пишет в GitHub + обновляет React state + блокирует polling + уведомляет WS
-  function ablyNotify() {
+  // Универсальное сохранение: обновляет state + пишет в GitHub + мгновенно рассылает данные через Ably
+  async function saveAndSync(key, value, setter) {
+    if (setter) setter(value);
+    skipPollRef.current = 3;
+    await sSet(key, value);
+    // Рассылаем сами данные через Ably (мгновенная синхронизация без polling)
     if (ablyChannelRef.current) {
-      ablyChannelRef.current.publish("changed", { ts: Date.now() });
+      try {
+        const ts = Date.now();
+        lastBroadcastTsRef.current[key] = ts;
+        const payload = { key, value, ts, from: clientIdRef.current };
+        // Точный размер в байтах UTF-8 (кириллица = 2 байта)
+        const size = new TextEncoder().encode(JSON.stringify(payload)).length;
+        if (size < 60000) {
+          ablyChannelRef.current.publish('update', payload);
+        } else {
+          // Слишком большой payload — отправляем только сигнал
+          ablyChannelRef.current.publish('changed', { key, ts, from: clientIdRef.current });
+        }
+      } catch(e) {
+        console.warn('[ABLY] publish error', e);
+      }
     }
   }
 
-  async function silentSaveState(key, value, setter) {
-    setter(value);
-    skipPollRef.current = 3;
-    await sSet(key, value);
-    ablyNotify();
-  }
+  // Старое имя для совместимости (3 места уже используют его)
+  const silentSaveState = saveAndSync;
 
   useEffect(() => {
     if (!authed) return;
 
-    // ── Ably инициализация ──
-    const ably = new Ably.Realtime({ key: "Z2GSmg.BgNkkg:ns6NnvUHHdkQYt0MyDTaDZqWs4-kEqHPYihb39mmUfk" });
-    ablyRef.current = ably;
+    // Заполняем маппинг ключей → setters для мгновенного применения Ably-обновлений
+    stateSettersRef.current = {
+      "records": setRecords,
+      "prices": setPrices,
+      "stock:main": setStockMain,
+      "stock:cfg": setStockCfg,
+      "custom:markers": setMarkers,
+      "marker-aliases": setAliases,
+      "marker-notes": setNotes,
+      "subcategories": setSubcategories,
+      "passwords": setPasswords,
+    };
+
+    // ── Ably (мгновенная синхронизация) ──
+    const channel = ably.channels.get('masterskaya-sync');
     
-    ably.connection.on("connected", () => {
-      console.log("[ABLY] Connected");
-      const channel = ably.channels.get("masterskaya-sync");
-      ablyChannelRef.current = channel;
-      setSyncStatus("live");
+    channel.subscribe((msg) => {
+      // Защита от получения собственных сообщений
+      if (msg.data && msg.data.from === clientIdRef.current) return;
       
-      channel.subscribe("changed", () => {
-        console.log("[ABLY] Got notification");
+      if (msg.name === 'update' && msg.data && msg.data.key) {
+        const { key, value, ts } = msg.data;
+        // Пропускаем устаревшие сообщения (если уже приняли более свежее)
+        const lastTs = lastBroadcastTsRef.current[key] || 0;
+        if (ts <= lastTs) return;
+        lastBroadcastTsRef.current[key] = ts;
+        
+        console.log('[ABLY] Получено обновление для:', key);
+        skipPollRef.current = 3; // не даём polling'у перезаписать наши данные
+        
+        // Сохраняем позицию скролла
+        const sY = window.scrollY;
+        
+        // Применяем value через setter
+        if (key.startsWith('stock:ws:')) {
+          const workshop = key.replace('stock:ws:', '');
+          setStockWS(p => ({...p, [workshop]: value}));
+        } else {
+          const setter = stateSettersRef.current[key];
+          if (setter) {
+            setter(value);
+          } else {
+            console.warn('[ABLY] Нет setter для ключа:', key);
+          }
+        }
+        
+        // Восстанавливаем позицию скролла
+        setTimeout(() => window.scrollTo(0, sY), 0);
+      } else if (msg.name === 'changed') {
+        // Fallback: большой payload, нужно сделать polling
+        console.log('[ABLY] Signal changed для:', msg.data?.key);
         if (doPollRef.current) doPollRef.current();
-      });
+      }
     });
 
-    ably.connection.on("disconnected", () => {
-      console.log("[ABLY] Disconnected");
+    ably.connection.on('connected', () => {
+      console.log('[ABLY] Подключено');
+      wsConnectedRef.current = true;
+      setSyncStatus("ws");
+    });
+
+    ably.connection.on('disconnected', () => {
+      console.log('[ABLY] Отключено');
+      wsConnectedRef.current = false;
       setSyncStatus("idle");
     });
 
-    // ── Polling (fallback) ──
+    // Если уже подключён
+    if (ably.connection.state === 'connected') {
+      wsConnectedRef.current = true;
+      setSyncStatus("ws");
+    }
+
+    // Сохраняем channel для saveAndSync
+    ablyChannelRef.current = channel;
+
+    // ── Polling (fallback если Ably не работает) ──
     const poll = async () => {
       if (skipPollRef.current > 0) {
         skipPollRef.current--;
+        setSyncStatus(wsConnectedRef.current ? "ws" : "synced");
         return;
       }
       setSyncStatus("syncing");
@@ -1483,7 +1555,7 @@ export default function App(){
         ]);
         const hash = JSON.stringify({r, p, sm, sS, sCfg, sm2, al, nt});
         if (hash === lastDataHashRef.current) {
-          setSyncStatus("synced");
+          setSyncStatus(wsConnectedRef.current ? "ws" : "synced");
           return;
         }
         lastDataHashRef.current = hash;
@@ -1499,7 +1571,7 @@ export default function App(){
         if(al && typeof al === "object" && !Array.isArray(al)) setAliases(al);
         if(nt && typeof nt === "object" && !Array.isArray(nt)) setNotes(nt);
         setTimeout(()=>window.scrollTo(0, sY), 0);
-        setSyncStatus("synced");
+        setSyncStatus(wsConnectedRef.current ? "ws" : "synced");
       } catch(e) {
         setSyncStatus("idle");
       }
@@ -1508,12 +1580,12 @@ export default function App(){
     doPollRef.current = poll;
 
     const initialTimer = setTimeout(poll, 3000);
-    const interval = setInterval(poll, 10000); // polling каждые 30 сек (WS для мгновенной)
+    const interval = setInterval(poll, 30000); // polling каждые 30 сек (WS для мгновенной)
 
     return () => {
       clearTimeout(initialTimer);
       clearInterval(interval);
-      ably.close();
+      channel.unsubscribe();
     };
   }, [authed]);
   useEffect(() => {
@@ -1655,9 +1727,8 @@ export default function App(){
     }
     const newHash = await sha256(newPwd);
     const next = {...passwords, [workshop]: newHash};
-    setPasswords(next);
-    await sSet("passwords", next);
-    return {ok:true, text:"Пароль обновлён"}; 
+    await saveAndSync("passwords", next, setPasswords);
+    return {ok:true, text:"Пароль обновлён"};
   }
 
   // ── добавление записи ──
@@ -1674,22 +1745,21 @@ export default function App(){
       recordType, timestamp: Date.now()
     };
     const next = [...records, rec];
-    setRecords(next); await sSet("records", next);
+    await saveAndSync("records", next, setRecords);
 
     // Склад: списываем через stockDelta (для refund = 0, для sale = qty или defect)
     const delta = stockDelta(rec);
     if(delta > 0){
       const wsStk = {...stockWS[workshop]};
       wsStk[m] = Math.max((wsStk[m]||0) - delta, 0);
-      setStockWS(p=>({...p,[workshop]:wsStk})); await sSet(`stock:ws:${workshop}`, wsStk);
+      await saveAndSync(`stock:ws:${workshop}`, wsStk, (v)=>setStockWS(p=>({...p,[workshop]:v})));
     }
 
     // Сброс формы — qty/defect по 0 (как просил пользователь)
     setMarker(""); setQty(0); setDefect(0); setAmount(0);
     setManualAmount(false); setComment(""); setRecordType("sale");
-    setSubmitMsg({ok:true, text: rec.recordType==="refund" ? "Возврат оформлен" : (rec.qty===0&&rec.defect>0 ? `Брак оформлен (${rec.defect} шт)` : "Запись добавлен")});
+    setSubmitMsg({ok:true, text: rec.recordType==="refund" ? "Возврат оформлен" : (rec.qty===0&&rec.defect>0 ? `Брак оформлен (${rec.defect} шт)` : "Запись добавлена")});
     setTimeout(()=>setSubmitMsg(null), 2000);
-    ablyNotify();
   }
 
   // ── сохранение редактируемой записи ──
@@ -1709,10 +1779,9 @@ export default function App(){
     }
 
     const next = records.map((r,i)=>i===editRec.globalIdx?updated:r);
-    setRecords(next); await sSet("records", next);
-    setStockWS(p=>({...p,[updated.workshop]:wsStk})); await sSet(`stock:ws:${updated.workshop}`, wsStk);
+    await saveAndSync("records", next, setRecords);
+    await saveAndSync(`stock:ws:${updated.workshop}`, wsStk, (v)=>setStockWS(p=>({...p,[updated.workshop]:v})));
     setEditRec(null);
-    ablyNotify();
   }
 
   async function handleEditDelete(gi){
@@ -1725,10 +1794,9 @@ export default function App(){
       wsStk[old.marker] = (wsStk[old.marker]||0) + oldDelta;
     }
     const next = records.filter((_,i)=>i!==gi);
-    setRecords(next); await sSet("records", next);
-    setStockWS(p=>({...p,[old.workshop]:wsStk})); await sSet(`stock:ws:${old.workshop}`, wsStk);
+    await saveAndSync("records", next, setRecords);
+    await saveAndSync(`stock:ws:${old.workshop}`, wsStk, (v)=>setStockWS(p=>({...p,[old.workshop]:v})));
     setEditRec(null);
-    ablyNotify();
   }
 
   // ── склад: перемещение ──
@@ -1739,8 +1807,8 @@ export default function App(){
     if(avail<moveQty){setMoveMsg({ok:false,text:`На складе только ${avail} шт`});return;}
     const nm = {...stockMain, [moveMarker]: avail-moveQty};
     const ws = {...stockWS[moveTo], [moveMarker]:(stockWS[moveTo][moveMarker]||0)+moveQty};
-    setStockMain(nm); await sSet("stock:main", nm);
-    setStockWS(p=>({...p,[moveTo]:ws})); await sSet(`stock:ws:${moveTo}`, ws);
+    await saveAndSync("stock:main", nm, setStockMain);
+    await saveAndSync(`stock:ws:${moveTo}`, ws, (v)=>setStockWS(p=>({...p,[moveTo]:v})));
     setMoveMsg({ok:true, text:`${moveQty} шт «${moveMarker}» → ${moveTo}`});
     setMoveQty(1); setMoveMarker(""); setTimeout(()=>setMoveMsg(null), 3000);
   }
@@ -1751,20 +1819,19 @@ export default function App(){
     const nm = newMarkerName.trim();
     if((markers[newMarkerCat]||[]).includes(nm)){setNewMarkerMsg({ok:false,text:"Уже есть"});return;}
     const next = {...markers, [newMarkerCat]:[...(markers[newMarkerCat]||[]), nm]};
-    setMarkers(next); await sSet("custom:markers", next); ablyNotify();
-    setNewMarkerName(""); setNewMarkerMsg({ok:true, text:`«${nm}» добавлена`}); ablyNotify(); 
+    await saveAndSync("custom:markers", next, setMarkers);
+    setNewMarkerName(""); setNewMarkerMsg({ok:true, text:`«${nm}» добавлена`});
     setTimeout(()=>setNewMarkerMsg(null), 2000);
   }
   async function deleteMarker(cat,m){
     if(!confirm(`Удалить «${m}»?`)) return;
     const next = {...markers, [cat]:markers[cat].filter(x=>x!==m)};
-    setMarkers(next); await sSet("custom:markers", next); ablyNotify();
+    await saveAndSync("custom:markers", next, setMarkers);
     // Удалить алиасы тоже
     if(aliases[m]){
       const nextAliases = {...aliases};
       delete nextAliases[m];
-      setAliases(nextAliases);
-      await sSet("marker-aliases", nextAliases);
+      await saveAndSync("marker-aliases", nextAliases, setAliases);
     }
   }
 
@@ -1788,18 +1855,16 @@ export default function App(){
       }
     }
     const next = {...aliases, [markerName]: [...existing, alias]};
-    setAliases(next);
-    await sSet("marker-aliases", next);
-    return {ok:true, text:`Алиас «${alias}» добавлен`}; 
+    await saveAndSync("marker-aliases", next, setAliases);
+    return {ok:true, text:`Алиас «${alias}» добавлен`};
   }
 
   async function removeAlias(markerName, alias){
     const existing = aliases[markerName] || [];
     const next = {...aliases, [markerName]: existing.filter(a => a !== alias)};
     if(next[markerName].length === 0) delete next[markerName];
-    setAliases(next);
-    await sSet("marker-aliases", next);
-    return {ok:true, text:`Алиас «${alias}» удалён`}; 
+    await saveAndSync("marker-aliases", next, setAliases);
+    return {ok:true, text:`Алиас «${alias}» удалён`};
   }
 
   // Сделать алиас основным именем (старое основное становится алиасом)
@@ -1810,8 +1875,7 @@ export default function App(){
 
     // 1. Обновить markers.json — заменить oldMain на newMain в категории
     const nextMarkers = {...markers, [cat]: markers[cat].map(m => m === oldMain ? newMain : m)};
-    setMarkers(nextMarkers);
-    await sSet("custom:markers", nextMarkers);
+    await saveAndSync("custom:markers", nextMarkers, setMarkers);
 
     // 2. Обновить aliases: newMain больше не алиас, oldMain становится алиасом
     const newAliases = existing.filter(a => a !== newMain);
@@ -1819,8 +1883,7 @@ export default function App(){
     const nextAliases = {...aliases};
     delete nextAliases[oldMain];
     if(newAliases.length > 0) nextAliases[newMain] = newAliases;
-    setAliases(nextAliases);
-    await sSet("marker-aliases", nextAliases);
+    await saveAndSync("marker-aliases", nextAliases, setAliases);
 
     // 3. Обновить records
     let recChanged = false;
@@ -1828,15 +1891,14 @@ export default function App(){
       if(r.marker === oldMain){ recChanged = true; return {...r, marker: newMain}; }
       return r;
     });
-    if(recChanged){ setRecords(nextRecords); await sSet("records", nextRecords); }
+    if(recChanged){ await saveAndSync("records", nextRecords, setRecords); }
 
     // 4. Обновить prices
     if(prices[oldMain] !== undefined){
       const nextPrices = {...prices};
       nextPrices[newMain] = nextPrices[oldMain];
       delete nextPrices[oldMain];
-      setPrices(nextPrices);
-      await sSet("prices", nextPrices);
+      await saveAndSync("prices", nextPrices, setPrices);
     }
 
     // 5. Обновить склады
@@ -1844,16 +1906,14 @@ export default function App(){
       const nextStockMain = {...stockMain};
       nextStockMain[newMain] = nextStockMain[oldMain];
       delete nextStockMain[oldMain];
-      setStockMain(nextStockMain);
-      await sSet("stock:main", nextStockMain);
+      await saveAndSync("stock:main", nextStockMain, setStockMain);
     }
     for(const ws of WORKSHOPS){
       if(stockWS[ws] && stockWS[ws][oldMain] !== undefined){
         const nextWs = {...stockWS[ws]};
         nextWs[newMain] = nextWs[oldMain];
         delete nextWs[oldMain];
-        setStockWS(p => ({...p, [ws]: nextWs}));
-        await sSet(`stock:ws:${ws}`, nextWs);
+        await saveAndSync(`stock:ws:${ws}`, nextWs, (v)=>setStockWS(p=>({...p,[ws]:v})));
       }
     }
 
@@ -1862,8 +1922,7 @@ export default function App(){
       const nextCfg = {...stockCfg};
       nextCfg[newMain] = nextCfg[oldMain];
       delete nextCfg[oldMain];
-      setStockCfg(nextCfg);
-      await sSet("stock:cfg", nextCfg);
+      await saveAndSync("stock:cfg", nextCfg, setStockCfg);
     }
 
     // 6a. Обновить notes (комментарии)
@@ -1871,8 +1930,7 @@ export default function App(){
       const nextNotes = {...notes};
       nextNotes[newMain] = nextNotes[oldMain];
       delete nextNotes[oldMain];
-      setNotes(nextNotes);
-      await sSet("marker-notes", nextNotes);
+      await saveAndSync("marker-notes", nextNotes, setNotes);
     }
 
     // 7. Фото — асинхронно
@@ -1900,8 +1958,7 @@ export default function App(){
 
     // 1. markers (категории)
     const nextMarkers = {...markers, [cat]: markers[cat].map(x=>x===oldName?newName:x)};
-    setMarkers(nextMarkers);
-    await sSet("custom:markers", nextMarkers);
+    await saveAndSync("custom:markers", nextMarkers, setMarkers);
 
     // 2. records (записи)
     let recChanged = false;
@@ -1913,8 +1970,7 @@ export default function App(){
       return r;
     });
     if(recChanged){
-      setRecords(nextRecords);
-      await sSet("records", nextRecords);
+      await saveAndSync("records", nextRecords, setRecords);
     }
 
     // 3. prices (цены)
@@ -1922,8 +1978,7 @@ export default function App(){
       const nextPrices = {...prices};
       nextPrices[newName] = nextPrices[oldName];
       delete nextPrices[oldName];
-      setPrices(nextPrices);
-      await sSet("prices", nextPrices);
+      await saveAndSync("prices", nextPrices, setPrices);
     }
 
     // 4. stock:main (общий склад)
@@ -1931,8 +1986,7 @@ export default function App(){
       const nextStockMain = {...stockMain};
       nextStockMain[newName] = nextStockMain[oldName];
       delete nextStockMain[oldName];
-      setStockMain(nextStockMain);
-      await sSet("stock:main", nextStockMain);
+      await saveAndSync("stock:main", nextStockMain, setStockMain);
     }
 
     // 5. stock:ws:SMART и stock:ws:Бегемот
@@ -1941,8 +1995,7 @@ export default function App(){
         const nextWs = {...stockWS[ws]};
         nextWs[newName] = nextWs[oldName];
         delete nextWs[oldName];
-        setStockWS(p=>({...p, [ws]: nextWs}));
-        await sSet(`stock:ws:${ws}`, nextWs);
+        await saveAndSync(`stock:ws:${ws}`, nextWs, (v)=>setStockWS(p=>({...p,[ws]:v})));
       }
     }
 
@@ -1951,8 +2004,7 @@ export default function App(){
       const nextCfg = {...stockCfg};
       nextCfg[newName] = nextCfg[oldName];
       delete nextCfg[oldName];
-      setStockCfg(nextCfg);
-      await sSet("stock:cfg", nextCfg);
+      await saveAndSync("stock:cfg", nextCfg, setStockCfg);
     }
 
     // 6a. notes (комментарии)
@@ -1960,8 +2012,7 @@ export default function App(){
       const nextNotes = {...notes};
       nextNotes[newName] = nextNotes[oldName];
       delete nextNotes[oldName];
-      setNotes(nextNotes);
-      await sSet("marker-notes", nextNotes);
+      await saveAndSync("marker-notes", nextNotes, setNotes);
     }
 
     // 7. photo (фото заготовки) — асинхронно, не блокируем UI
@@ -1980,7 +2031,7 @@ export default function App(){
       }
     });
 
-    return {ok:true, text:`«${oldName}» → «${newName}»`}; 
+    return {ok:true, text:`«${oldName}» → «${newName}»`};
   }
 
   // ── Панель управления складом: поиск + сортировка + фильтры ──
@@ -2369,8 +2420,8 @@ export default function App(){
       delete next[markerName];
     }
     setNotes(next);
-    await sSet("marker-notes", next);
-    return {ok:true, text: trimmed ? "Комментарий сохранён" : "Комментарий удалён"}; ablyNotify(); 
+    await saveAndSync("marker-notes", next);
+    return {ok:true, text: trimmed ? "Комментарий сохранён" : "Комментарий удалён"};
   }
 
   // Найти алиасы для маркировки (возвращает массив)
@@ -2472,12 +2523,12 @@ export default function App(){
               <span style={{
                 fontSize:10,
                 padding:"2px 6px",
-                background: syncStatus === "syncing" ? C.smartDim : syncStatus === "live" ? C.brandDim : C.successDim,
-                color: syncStatus === "syncing" ? C.smart : syncStatus === "live" ? C.brand : C.success,
-                border: `1px solid ${syncStatus === "syncing" ? C.smart : syncStatus === "live" ? C.brand : C.success}44`,
+                background: syncStatus === "syncing" ? C.smartDim : syncStatus === "ws" ? C.brandDim : C.successDim,
+                color: syncStatus === "syncing" ? C.smart : syncStatus === "ws" ? C.brand : C.success,
+                border: `1px solid ${syncStatus === "syncing" ? C.smart : syncStatus === "ws" ? C.brand : C.success}44`,
                 fontWeight: 700,
               }}>
-                {syncStatus === "syncing" ? "🔄" : syncStatus === "live" ? "⚡" : "✓"}
+                {syncStatus === "syncing" ? "🔄" : syncStatus === "ws" ? "⚡ Live" : "✓"}
               </span>
             )}
           </div>
@@ -2792,7 +2843,7 @@ export default function App(){
                   <button onClick={async()=>{
                     if(!moveMarker||moveQty<=0){setMoveMsg({ok:false,text:"Заполните поля"});return;}
                     const ns={...stockMain,[moveMarker]:(stockMain[moveMarker]||0)+moveQty};
-                    setStockMain(ns); await sSet("stock:main",ns);
+                    await saveAndSync("stock:main", ns, setStockMain);
                     setMoveMsg({ok:true,text:`+${moveQty} шт «${moveMarker}» на склад`});
                     setMoveMarker(""); setMoveQty(1); setTimeout(()=>setMoveMsg(null),3000);
                   }} style={{...s.btn("accent"),width:"100%"}}>Добавить на общий склад</button>
