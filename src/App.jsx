@@ -1426,7 +1426,9 @@ export default function App(){
   const [syncStatus, setSyncStatus] = useState("idle"); // idle | syncing | synced
   const lastDataHashRef = useRef("");
   const skipPollRef = useRef(0);
-  const doPollRef = useRef(null); // ссылка на функцию poll для вызова из WS
+  const doPollRef = useRef(null);
+  const ablyRef = useRef(null);
+  const ablyChannelRef = useRef(null);
 
   // Тихое сохранение: пишет в GitHub + обновляет React state + блокирует polling + уведомляет WS
   async function silentSaveState(key, value, setter) {
