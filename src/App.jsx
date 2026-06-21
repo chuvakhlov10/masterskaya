@@ -1,3 +1,4 @@
+import Ably from "ably";
 import { useState, useEffect, useCallback, useRef, Component } from "react";
 import { dbGet, dbSet, hasToken, setToken, clearToken, verifyToken, photoGet, photoSet, photoDelete } from "./github-storage.js";
 
@@ -1437,11 +1438,31 @@ export default function App(){
   useEffect(() => {
     if (!authed) return;
 
-    // ── Polling синхронизация ──
+    // ── Ably инициализация ──
+    const ably = new Ably.Realtime({ key: "Z2GSmg.BgNkkg:ns6NnvUHHdkQYt0MyDTaDZqWs4-kEqHPYihb39mmUfk" });
+    ablyRef.current = ably;
+    
+    ably.connection.on("connected", () => {
+      console.log("[ABLY] Connected");
+      const channel = ably.channels.get("masterskaya-sync");
+      ablyChannelRef.current = channel;
+      setSyncStatus("live");
+      
+      channel.subscribe("changed", () => {
+        console.log("[ABLY] Got notification");
+        if (doPollRef.current) doPollRef.current();
+      });
+    });
+
+    ably.connection.on("disconnected", () => {
+      console.log("[ABLY] Disconnected");
+      setSyncStatus("idle");
+    });
+
+    // ── Polling (fallback) ──
     const poll = async () => {
       if (skipPollRef.current > 0) {
         skipPollRef.current--;
-        setSyncStatus("synced");
         return;
       }
       setSyncStatus("syncing");
@@ -1478,11 +1499,12 @@ export default function App(){
     doPollRef.current = poll;
 
     const initialTimer = setTimeout(poll, 3000);
-    const interval = setInterval(poll, 5000); // polling каждые 30 сек (WS для мгновенной)
+    const interval = setInterval(poll, 15000); // polling каждые 30 сек (WS для мгновенной)
 
     return () => {
       clearTimeout(initialTimer);
       clearInterval(interval);
+      ably.close();
     };
   }, [authed]);
   useEffect(() => {
@@ -1658,6 +1680,7 @@ export default function App(){
     setManualAmount(false); setComment(""); setRecordType("sale");
     setSubmitMsg({ok:true, text: rec.recordType==="refund" ? "Возврат оформлен" : (rec.qty===0&&rec.defect>0 ? `Брак оформлен (${rec.defect} шт)` : "Запись добавлен")});
     setTimeout(()=>setSubmitMsg(null), 2000);
+    ablyNotify();
   }
 
   // ── сохранение редактируемой записи ──
@@ -1680,6 +1703,7 @@ export default function App(){
     setRecords(next); await sSet("records", next);
     setStockWS(p=>({...p,[updated.workshop]:wsStk})); await sSet(`stock:ws:${updated.workshop}`, wsStk);
     setEditRec(null);
+    ablyNotify();
   }
 
   async function handleEditDelete(gi){
@@ -1695,6 +1719,7 @@ export default function App(){
     setRecords(next); await sSet("records", next);
     setStockWS(p=>({...p,[old.workshop]:wsStk})); await sSet(`stock:ws:${old.workshop}`, wsStk);
     setEditRec(null);
+    ablyNotify();
   }
 
   // ── склад: перемещение ──
@@ -1717,14 +1742,14 @@ export default function App(){
     const nm = newMarkerName.trim();
     if((markers[newMarkerCat]||[]).includes(nm)){setNewMarkerMsg({ok:false,text:"Уже есть"});return;}
     const next = {...markers, [newMarkerCat]:[...(markers[newMarkerCat]||[]), nm]};
-    setMarkers(next); await sSet("custom:markers", next);
-    setNewMarkerName(""); setNewMarkerMsg({ok:true, text:`«${nm}» добавлена`}); 
+    setMarkers(next); await sSet("custom:markers", next); ablyNotify();
+    setNewMarkerName(""); setNewMarkerMsg({ok:true, text:`«${nm}» добавлена`}); ablyNotify(); 
     setTimeout(()=>setNewMarkerMsg(null), 2000);
   }
   async function deleteMarker(cat,m){
     if(!confirm(`Удалить «${m}»?`)) return;
     const next = {...markers, [cat]:markers[cat].filter(x=>x!==m)};
-    setMarkers(next); await sSet("custom:markers", next);
+    setMarkers(next); await sSet("custom:markers", next); ablyNotify();
     // Удалить алиасы тоже
     if(aliases[m]){
       const nextAliases = {...aliases};
@@ -2336,7 +2361,7 @@ export default function App(){
     }
     setNotes(next);
     await sSet("marker-notes", next);
-    return {ok:true, text: trimmed ? "Комментарий сохранён" : "Комментарий удалён"}; 
+    return {ok:true, text: trimmed ? "Комментарий сохранён" : "Комментарий удалён"}; ablyNotify(); 
   }
 
   // Найти алиасы для маркировки (возвращает массив)
@@ -2438,12 +2463,12 @@ export default function App(){
               <span style={{
                 fontSize:10,
                 padding:"2px 6px",
-                background: syncStatus === "syncing" ? C.smartDim : C.successDim,
-                color: syncStatus === "syncing" ? C.smart : C.success,
-                border: `1px solid ${syncStatus === "syncing" ? C.smart : C.success}44`,
+                background: syncStatus === "syncing" ? C.smartDim : syncStatus === "live" ? C.brandDim : C.successDim,
+                color: syncStatus === "syncing" ? C.smart : syncStatus === "live" ? C.brand : C.success,
+                border: `1px solid ${syncStatus === "syncing" ? C.smart : syncStatus === "live" ? C.brand : C.success}44`,
                 fontWeight: 700,
               }}>
-                {syncStatus === "syncing" ? "🔄" : "✓"}
+                {syncStatus === "syncing" ? "🔄" : syncStatus === "live" ? "⚡" : "✓"}
               </span>
             )}
           </div>
