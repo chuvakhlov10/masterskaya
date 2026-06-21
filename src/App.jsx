@@ -1,43 +1,6 @@
 import { useState, useEffect, useCallback, useRef, Component } from "react";
 import { dbGet, dbSet, hasToken, setToken, clearToken, verifyToken, photoGet, photoSet, photoDelete } from "./github-storage.js";
-// Ably через CDN — упрощённая версия
-let ablyChannel = null;
-const ABLY_KEY = "Z2GSmg.BgNkkg:ns6NnvUHHdkQYt0MyDTaDZqWs4-kEqHPYihb39mmUfk";
 
-function ablyNotify() {
-  if (ablyChannel) {
-    ablyChannel.publish("changed", { ts: Date.now() }, function(err) {
-      if (err) console.warn("[ABLY] Publish error:", err);
-      else console.log("[ABLY] Notified others");
-    });
-  } else {
-    console.warn("[ABLY] No channel yet");
-  }
-}
-
-function setupAbly() {
-  if (ablyChannel) return; // уже настроен
-  var ably = new Ably.Realtime({ key: ABLY_KEY, clientId: String(Date.now()) });
-  ably.connection.once("connected", function() {
-    console.log("[ABLY] Connected");
-    ablyChannel = ably.channels.get("masterskaya-sync");
-    ablyChannel.subscribe("changed", function(msg) {
-      console.log("[ABLY] Got sync notification");
-      if (window.__masterskayaPoll) window.__masterskayaPoll();
-    });
-  });
-}
-
-if (typeof window !== "undefined") {
-  if (typeof Ably !== "undefined") {
-    setupAbly();
-  } else {
-    var s = document.createElement("script");
-    s.src = "https://cdn.ably.com/lib/ably.min-1.js";
-    s.onload = setupAbly;
-    document.head.appendChild(s);
-  }
-}
 
 const DEFAULT_MARKERS = {
   "Автомобильные": ["Замена корпуса","HD39RP","Нарезка лезвия","LD-1P","MIT8AP","MIT8RP (п.ч.)","XT27A"],
@@ -1440,7 +1403,7 @@ export default function App(){
     const next = {...safeSubcategories, [cat]: nextSubs};
     setSubcategories(next);
     await sSet("subcategories", next);
-    return {ok:true, text:`«${oldName}» → «${newName}»`}; ablyNotify();
+    return {ok:true, text:`«${oldName}» → «${newName}»`}; 
   }
 
   // переименование маркировки
@@ -1459,11 +1422,9 @@ export default function App(){
   const [nowTime, setNowTime] = useState(new Date());
 
   // ── WebSocket + Polling синхронизация ──
-  const [syncStatus, setSyncStatus] = useState("idle"); // idle | syncing | synced | ws
+  const [syncStatus, setSyncStatus] = useState("idle"); // idle | syncing | synced
   const lastDataHashRef = useRef("");
   const skipPollRef = useRef(0);
-  const wsRef = useRef(null);
-  const wsConnectedRef = useRef(false);
   const doPollRef = useRef(null); // ссылка на функцию poll для вызова из WS
 
   // Тихое сохранение: пишет в GitHub + обновляет React state + блокирует polling + уведомляет WS
@@ -1471,32 +1432,16 @@ export default function App(){
     setter(value);
     skipPollRef.current = 2;
     await sSet(key, value);
-    ablyNotify();
   }
 
   useEffect(() => {
     if (!authed) return;
 
-    // ── Ably уже инициализирован глобально — проверяем статус ──
-    function checkAbly() {
-      if (ably && ably.connection.state === "connected") {
-        wsConnectedRef.current = true;
-        setSyncStatus("ws");
-        return true;
-      }
-      return false;
-    }
-    // Проверяем каждые 2 сек пока не подключится
-    const ablyCheckTimer = setInterval(() => {
-      if (checkAbly()) clearInterval(ablyCheckTimer);
-    }, 2000);
-    checkAbly();
-
-    // ── Polling (fallback если Ably не работает) ──
+    // ── Polling синхронизация ──
     const poll = async () => {
       if (skipPollRef.current > 0) {
         skipPollRef.current--;
-        setSyncStatus(wsConnectedRef.current ? "ws" : "synced");
+        setSyncStatus("synced");
         return;
       }
       setSyncStatus("syncing");
@@ -1508,7 +1453,7 @@ export default function App(){
         ]);
         const hash = JSON.stringify({r, p, sm, sS, sCfg, sm2, al, nt});
         if (hash === lastDataHashRef.current) {
-          setSyncStatus(wsConnectedRef.current ? "ws" : "synced");
+          setSyncStatus("synced");
           return;
         }
         lastDataHashRef.current = hash;
@@ -1524,22 +1469,20 @@ export default function App(){
         if(al && typeof al === "object" && !Array.isArray(al)) setAliases(al);
         if(nt && typeof nt === "object" && !Array.isArray(nt)) setNotes(nt);
         setTimeout(()=>window.scrollTo(0, sY), 0);
-        setSyncStatus(wsConnectedRef.current ? "ws" : "synced");
+        setSyncStatus("synced");
       } catch(e) {
         setSyncStatus("idle");
       }
     };
 
     doPollRef.current = poll;
-    window.__masterskayaPoll = poll;
 
     const initialTimer = setTimeout(poll, 3000);
-    const interval = setInterval(poll, 10000); // polling каждые 30 сек (WS для мгновенной)
+    const interval = setInterval(poll, 5000); // polling каждые 30 сек (WS для мгновенной)
 
     return () => {
       clearTimeout(initialTimer);
       clearInterval(interval);
-      clearInterval(ablyCheckTimer);
     };
   }, [authed]);
   useEffect(() => {
@@ -1683,7 +1626,7 @@ export default function App(){
     const next = {...passwords, [workshop]: newHash};
     setPasswords(next);
     await sSet("passwords", next);
-    return {ok:true, text:"Пароль обновлён"}; ablyNotify();
+    return {ok:true, text:"Пароль обновлён"}; 
   }
 
   // ── добавление записи ──
@@ -1714,7 +1657,6 @@ export default function App(){
     setMarker(""); setQty(0); setDefect(0); setAmount(0);
     setManualAmount(false); setComment(""); setRecordType("sale");
     setSubmitMsg({ok:true, text: rec.recordType==="refund" ? "Возврат оформлен" : (rec.qty===0&&rec.defect>0 ? `Брак оформлен (${rec.defect} шт)` : "Запись добавлен")});
-    ablyNotify();
     setTimeout(()=>setSubmitMsg(null), 2000);
   }
 
@@ -1738,7 +1680,6 @@ export default function App(){
     setRecords(next); await sSet("records", next);
     setStockWS(p=>({...p,[updated.workshop]:wsStk})); await sSet(`stock:ws:${updated.workshop}`, wsStk);
     setEditRec(null);
-    ablyNotify();
   }
 
   async function handleEditDelete(gi){
@@ -1754,7 +1695,6 @@ export default function App(){
     setRecords(next); await sSet("records", next);
     setStockWS(p=>({...p,[old.workshop]:wsStk})); await sSet(`stock:ws:${old.workshop}`, wsStk);
     setEditRec(null);
-    ablyNotify();
   }
 
   // ── склад: перемещение ──
@@ -1778,7 +1718,7 @@ export default function App(){
     if((markers[newMarkerCat]||[]).includes(nm)){setNewMarkerMsg({ok:false,text:"Уже есть"});return;}
     const next = {...markers, [newMarkerCat]:[...(markers[newMarkerCat]||[]), nm]};
     setMarkers(next); await sSet("custom:markers", next);
-    setNewMarkerName(""); setNewMarkerMsg({ok:true, text:`«${nm}» добавлена`}); ablyNotify();
+    setNewMarkerName(""); setNewMarkerMsg({ok:true, text:`«${nm}» добавлена`}); 
     setTimeout(()=>setNewMarkerMsg(null), 2000);
   }
   async function deleteMarker(cat,m){
@@ -1816,7 +1756,7 @@ export default function App(){
     const next = {...aliases, [markerName]: [...existing, alias]};
     setAliases(next);
     await sSet("marker-aliases", next);
-    return {ok:true, text:`Алиас «${alias}» добавлен`}; ablyNotify();
+    return {ok:true, text:`Алиас «${alias}» добавлен`}; 
   }
 
   async function removeAlias(markerName, alias){
@@ -1825,7 +1765,7 @@ export default function App(){
     if(next[markerName].length === 0) delete next[markerName];
     setAliases(next);
     await sSet("marker-aliases", next);
-    return {ok:true, text:`Алиас «${alias}» удалён`}; ablyNotify();
+    return {ok:true, text:`Алиас «${alias}» удалён`}; 
   }
 
   // Сделать алиас основным именем (старое основное становится алиасом)
@@ -2006,7 +1946,7 @@ export default function App(){
       }
     });
 
-    return {ok:true, text:`«${oldName}» → «${newName}»`}; ablyNotify();
+    return {ok:true, text:`«${oldName}» → «${newName}»`}; 
   }
 
   // ── Панель управления складом: поиск + сортировка + фильтры ──
@@ -2396,7 +2336,7 @@ export default function App(){
     }
     setNotes(next);
     await sSet("marker-notes", next);
-    return {ok:true, text: trimmed ? "Комментарий сохранён" : "Комментарий удалён"}; ablyNotify();
+    return {ok:true, text: trimmed ? "Комментарий сохранён" : "Комментарий удалён"}; 
   }
 
   // Найти алиасы для маркировки (возвращает массив)
@@ -2498,12 +2438,12 @@ export default function App(){
               <span style={{
                 fontSize:10,
                 padding:"2px 6px",
-                background: syncStatus === "syncing" ? C.smartDim : syncStatus === "ws" ? C.brandDim : C.successDim,
-                color: syncStatus === "syncing" ? C.smart : syncStatus === "ws" ? C.brand : C.success,
-                border: `1px solid ${syncStatus === "syncing" ? C.smart : syncStatus === "ws" ? C.brand : C.success}44`,
+                background: syncStatus === "syncing" ? C.smartDim : C.successDim,
+                color: syncStatus === "syncing" ? C.smart : C.success,
+                border: `1px solid ${syncStatus === "syncing" ? C.smart : C.success}44`,
                 fontWeight: 700,
               }}>
-                {syncStatus === "syncing" ? "🔄" : syncStatus === "ws" ? "⚡ Live" : "✓"}
+                {syncStatus === "syncing" ? "🔄" : "✓"}
               </span>
             )}
           </div>
