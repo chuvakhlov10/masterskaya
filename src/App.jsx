@@ -1975,19 +1975,8 @@ export default function App(){
       <div key={cat} style={{...s.card,padding:0,overflow:"hidden",marginBottom:8}}>
         <div onClick={()=>setExpandedCats(p=>({...p,[cat]:!expanded}))}
           style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 14px",cursor:"pointer",background:expanded?C.bgCard:C.bgSection,borderBottom:expanded?`1px solid ${C.border}`:"none"}}>
-          <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
-            <span style={{fontWeight:700,fontSize:13}}>{cat}</span>
-            <span style={{fontSize:11,color:C.textDim}}>
-              {filteredMs.length} шт
-              {withStockCount > 0 && <span style={{color:C.success}}> · {withStockCount} с остатком</span>}
-              {emptyCount > 0 && <span style={{color:C.danger}}> · {emptyCount} пустых</span>}
-            </span>
-            {hasLow&&<span style={{...s.tag(C.warn),fontSize:10,padding:"1px 6px"}}>⚠ мало</span>}
-          </div>
-          <div style={{display:"flex",alignItems:"center",gap:10}}>
-            <span style={{fontSize:12,color:C.textSub}}>итого: <b style={{color:C.text}}>{total}</b></span>
-            <span style={{color:C.textDim,fontSize:12}}>{expanded?"▲":"▼"}</span>
-          </div>
+          <span style={{fontWeight:700,fontSize:13}}>{cat}</span>
+          <span style={{color:C.textDim,fontSize:12}}>{expanded?"▲":"▼"}</span>
         </div>
         {expanded&&(
           <div>
@@ -2315,7 +2304,7 @@ export default function App(){
           <div style={{display:"flex",alignItems:"center",gap:10}}>
             <div style={{width:32,height:32,background:C.brand,borderRadius:6,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>🔑</div>
             <div style={{lineHeight:1.1}}>
-              <div style={{fontWeight:800,fontSize:15,color:C.text,letterSpacing:"-0.3px"}}>Мастерская</div>
+              <div style={{fontWeight:800,fontSize:15,color:C.text,letterSpacing:"-0.3px"}}>{workshop}</div>
               <div style={{fontSize:9,fontWeight:700,color:C.brand,letterSpacing:"1px",textTransform:"uppercase"}}>Простое Решение</div>
             </div>
           </div>
@@ -2593,7 +2582,7 @@ export default function App(){
         {tab==="stock"&&(
           <div>
             <div style={{display:"flex",gap:6,marginBottom:14}}>
-              {[["ws","Мастерская"],["main","Общий склад"],["move","Перемещение"]].map(([id,label])=>(
+              {[["ws",workshop],["main","Общий склад"],["move","Перемещение"]].map(([id,label])=>(
                 <button key={id} onClick={()=>setStockTab(id)} style={{
                   flex:1,padding:"6px 4px",fontSize:12,fontWeight:600,borderRadius:8,
                   border:`1px solid ${stockTab===id?C.brand:C.border}`,
