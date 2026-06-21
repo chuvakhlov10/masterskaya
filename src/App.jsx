@@ -1608,6 +1608,32 @@ export default function App(){
         
         // Восстанавливаем позицию скролла
         setTimeout(() => window.scrollTo(0, sY), 0);
+      } else if (msg.name === 'record-added' && msg.data && msg.data.rec) {
+        // Инкрементальное обновление records — не тянем весь массив с GitHub
+        const { rec } = msg.data;
+        console.log('[ABLY] Новая запись:', rec.marker);
+        skipPollRef.current = 3;
+        const sY = window.scrollY;
+        setRecords(prev => {
+          // Защита от дублей (по timestamp)
+          if (prev.some(r => r.timestamp === rec.timestamp)) return prev;
+          return [...prev, rec];
+        });
+        setTimeout(() => window.scrollTo(0, sY), 0);
+      } else if (msg.name === 'record-updated' && msg.data && msg.data.idx !== undefined) {
+        const { idx, rec } = msg.data;
+        console.log('[ABLY] Обновлена запись:', idx, rec.marker);
+        skipPollRef.current = 3;
+        const sY = window.scrollY;
+        setRecords(prev => prev.map((r, i) => i === idx ? rec : r));
+        setTimeout(() => window.scrollTo(0, sY), 0);
+      } else if (msg.name === 'record-deleted' && msg.data && msg.data.idx !== undefined) {
+        const { idx } = msg.data;
+        console.log('[ABLY] Удалена запись:', idx);
+        skipPollRef.current = 3;
+        const sY = window.scrollY;
+        setRecords(prev => prev.filter((_, i) => i !== idx));
+        setTimeout(() => window.scrollTo(0, sY), 0);
       } else if (msg.name === 'changed') {
         // Fallback: большой payload, нужно сделать polling
         console.log('[ABLY] Signal changed для:', msg.data?.key);
@@ -1922,17 +1948,24 @@ export default function App(){
       recordType, timestamp: Date.now()
     };
     const next = [...records, rec];
-    await saveAndSync("records", next, setRecords);
+    // Не await'им — форма сбрасывается мгновенно, GitHub пишется в фоне
+    saveAndSync("records", next, setRecords);
+    // Отправляем только новую запись через Ably (не весь массив — он >60KB)
+    if (ablyChannelRef.current && navigator.onLine) {
+      try {
+        ablyChannelRef.current.publish('record-added', { rec, from: clientIdRef.current });
+      } catch {}
+    }
 
     // Склад: списываем через stockDelta (для refund = 0, для sale = qty или defect)
     const delta = stockDelta(rec);
     if(delta > 0){
       const wsStk = {...stockWS[workshop]};
       wsStk[m] = Math.max((wsStk[m]||0) - delta, 0);
-      await saveAndSync(`stock:ws:${workshop}`, wsStk, (v)=>setStockWS(p=>({...p,[workshop]:v})));
+      saveAndSync(`stock:ws:${workshop}`, wsStk, (v)=>setStockWS(p=>({...p,[workshop]:v})));
     }
 
-    // Сброс формы — qty/defect по 0 (как просил пользователь)
+    // Сброс формы — мгновенно, не ждём GitHub
     setMarker(""); setQty(0); setDefect(0); setAmount(0);
     setManualAmount(false); setComment(""); setRecordType("sale");
     setSubmitMsg({ok:true, text: rec.recordType==="refund" ? "Возврат оформлен" : (rec.qty===0&&rec.defect>0 ? `Брак оформлен (${rec.defect} шт)` : "Запись добавлена")});
@@ -1956,8 +1989,15 @@ export default function App(){
     }
 
     const next = records.map((r,i)=>i===editRec.globalIdx?updated:r);
-    await saveAndSync("records", next, setRecords);
-    await saveAndSync(`stock:ws:${updated.workshop}`, wsStk, (v)=>setStockWS(p=>({...p,[updated.workshop]:v})));
+    // Не await'им — модалка закрывается мгновенно
+    saveAndSync("records", next, setRecords);
+    // Отправляем только обновлённую запись через Ably
+    if (ablyChannelRef.current && navigator.onLine) {
+      try {
+        ablyChannelRef.current.publish('record-updated', { idx: editRec.globalIdx, rec: updated, from: clientIdRef.current });
+      } catch {}
+    }
+    saveAndSync(`stock:ws:${updated.workshop}`, wsStk, (v)=>setStockWS(p=>({...p,[updated.workshop]:v})));
     setEditRec(null);
   }
 
@@ -1971,8 +2011,15 @@ export default function App(){
       wsStk[old.marker] = (wsStk[old.marker]||0) + oldDelta;
     }
     const next = records.filter((_,i)=>i!==gi);
-    await saveAndSync("records", next, setRecords);
-    await saveAndSync(`stock:ws:${old.workshop}`, wsStk, (v)=>setStockWS(p=>({...p,[old.workshop]:v})));
+    // Не await'им — модалка закрывается мгновенно
+    saveAndSync("records", next, setRecords);
+    // Отправляем только индекс удалённой записи через Ably
+    if (ablyChannelRef.current && navigator.onLine) {
+      try {
+        ablyChannelRef.current.publish('record-deleted', { idx: gi, from: clientIdRef.current });
+      } catch {}
+    }
+    saveAndSync(`stock:ws:${old.workshop}`, wsStk, (v)=>setStockWS(p=>({...p,[old.workshop]:v})));
     setEditRec(null);
   }
 
