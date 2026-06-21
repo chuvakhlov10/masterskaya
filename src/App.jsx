@@ -1,9 +1,23 @@
 import { useState, useEffect, useCallback, useRef, Component } from "react";
 import { dbGet, dbSet, hasToken, setToken, clearToken, verifyToken, photoGet, photoSet, photoDelete } from "./github-storage.js";
-import Ably from "ably";
-
+// Ably через CDN — загружается динамически
+let ably = null;
+let ablyChannel = null;
 const ABLY_KEY = "Z2GSmg.BgNkkg:ns6NnvUHHdkQYt0MyDTaDZqWs4-kEqHPYihb39mmUfk";
-const ably = new Ably.Realtime({ key: ABLY_KEY, clientId: String(Date.now()) });
+function initAbly() {
+  if (ably) return;
+  if (typeof Ably !== "undefined") {
+    ably = new Ably.Realtime({ key: ABLY_KEY, clientId: String(Date.now()) });
+  }
+}
+// Загружаем Ably SDK через script tag
+if (typeof window !== "undefined" && !document.getElementById("ably-script")) {
+  const s = document.createElement("script");
+  s.id = "ably-script";
+  s.src = "https://cdn.ably.com/lib/ably.min-1.js";
+  s.onload = () => { initAbly(); };
+  document.head.appendChild(s);
+}
 
 const DEFAULT_MARKERS = {
   "Автомобильные": ["Замена корпуса","HD39RP","Нарезка лезвия","LD-1P","MIT8AP","MIT8RP (п.ч.)","XT27A"],
