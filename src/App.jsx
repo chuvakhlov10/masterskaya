@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, Component } from "react";
+import { useState, useEffect, useCallback, useRef, useLayoutEffect, Component } from "react";
 import { dbGet, dbSet, hasToken, setToken, clearToken, verifyToken, photoGet, photoSet, photoDelete } from "./github-storage.js";
 
 const DEFAULT_MARKERS = {
@@ -1403,6 +1403,15 @@ export default function App(){
   const [subModal, setSubModal] = useState(null); // {cat}
   // текущее время (тикает каждую минуту)
   const [nowTime, setNowTime] = useState(new Date());
+
+  // ── Сохранение позиции скролла при изменениях на складе ──
+  const scrollSaveRef = useRef(0);
+  useLayoutEffect(() => {
+    if (scrollSaveRef.current > 0) {
+      window.scrollTo(0, scrollSaveRef.current);
+      scrollSaveRef.current = 0;
+    }
+  });
   useEffect(() => {
     const t = setInterval(() => setNowTime(new Date()), 60000);
     return () => clearInterval(t);
@@ -2004,11 +2013,10 @@ export default function App(){
                     {mNote && <div style={{fontSize:10,color:C.warn,marginTop:2,lineHeight:1.3,fontStyle:"italic"}}>💬 {mNote}</div>}
                   </div>
                   <StepperInput value={q} onChange={async nq=>{
-                    const scrollY = window.scrollY;
+                    scrollSaveRef.current = window.scrollY;
                     const ns={...stockObj,[m]:nq};
                     if(isWS){setStockWS(p=>({...p,[workshop]:ns}));debouncedSave(`stock:ws:${workshop}`,ns);}
                     else{setStockMain(ns);debouncedSave("stock:main",ns);}
-                    requestAnimationFrame(()=>window.scrollTo(0,scrollY));
                   }} inputStyle={{color:q===0?C.danger:C.success}}/>
                   <button onClick={()=>setNoteModal({markerName:m})} title="Комментарий"
                     style={{...s.btn(),padding:"5px 6px",fontSize:11,borderColor:mNote?C.warn+"66":C.border,color:mNote?C.warn:C.textSub}}>💬</button>
@@ -2741,7 +2749,7 @@ export default function App(){
                             {mNote && <div style={{fontSize:10,color:C.warn,marginTop:2,fontStyle:"italic"}}>💬 {mNote}</div>}
                           </div>
                           <div style={{display:"flex",alignItems:"center",gap:6}}>
-                            <StepperInput value={safePrices[m]||0} onChange={async (val) => { const np = {...safePrices}; if(val > 0) np[m] = val; else delete np[m]; setPrices(np); debouncedSave("prices", np); }} step={10} />
+                            <StepperInput value={safePrices[m]||0} onChange={async (val) => { scrollSaveRef.current = window.scrollY; const np = {...safePrices}; if(val > 0) np[m] = val; else delete np[m]; setPrices(np); debouncedSave("prices", np); }} step={10} />
                             <span style={{fontSize:12,color:C.textSub,whiteSpace:"nowrap"}}>р/шт</span>
                             <button onClick={()=>setNoteModal({markerName:m})} title="Комментарий" style={{...s.btn(),padding:"5px 8px",fontSize:11,borderColor:mNote?C.warn+"66":C.border,color:mNote?C.warn:C.textSub}}>💬</button>
                             <button onClick={()=>setAliasesModal({cat, markerName:m})} title="Алиасы" style={{...s.btn(),padding:"5px 8px",fontSize:11,borderColor:mAliases.length>0?C.brand+"66":C.border,color:mAliases.length>0?C.brand:C.textSub}}>≡</button>
