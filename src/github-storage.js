@@ -198,9 +198,11 @@ export async function dbDelete(key) {
 }
 
 // ── Фото: хранятся как base64 в отдельных файлах ──
+// ВАЖНО: не кодируем marker здесь — encodePath в ghRequest сделает это сам.
+// Иначе получится двойное кодирование (% → %25).
 export async function photoGet(marker) {
   try {
-    const path = `${PHOTO_PREFIX}${encodeURIComponent(marker)}.txt`;
+    const path = `${PHOTO_PREFIX}${marker}.txt`;
     const data = await ghRequest("GET", path);
     if (!data) return null;
     return decodeB64(data.content);
@@ -213,7 +215,7 @@ export async function photoGet(marker) {
 
 export async function photoSet(marker, base64data) {
   try {
-    const path = `${PHOTO_PREFIX}${encodeURIComponent(marker)}.txt`;
+    const path = `${PHOTO_PREFIX}${marker}.txt`;
     const body = {
       message: `photo: ${marker}`,
       content: encodeB64(base64data),
@@ -235,7 +237,7 @@ export async function photoSet(marker, base64data) {
 
 export async function photoDelete(marker) {
   try {
-    const path = `${PHOTO_PREFIX}${encodeURIComponent(marker)}.txt`;
+    const path = `${PHOTO_PREFIX}${marker}.txt`;
     const existing = await ghRequest("GET", path);
     if (!existing) return { ok: true };
     await ghRequest("DELETE", path, { message: `delete photo: ${marker}`, sha: existing.sha });

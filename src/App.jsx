@@ -798,10 +798,37 @@ function MarkerPhotoThumb({ markerName, photo, onPhotoLoaded, onPhotoClick }){
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState(null);
 
+  // Кеш «нет фото» в localStorage — чтобы не дёргать GitHub повторно
+  // для маркировок, у которых фото точно нет (иначе 100+ запросов 404 при раскрытии склада)
+  const NO_PHOTO_KEY = "no_photo_markers";
+  function isKnownNoPhoto(m){
+    try {
+      const set = JSON.parse(localStorage.getItem(NO_PHOTO_KEY) || "[]");
+      return set.includes(m);
+    } catch { return false; }
+  }
+  function markNoPhoto(m){
+    try {
+      const set = JSON.parse(localStorage.getItem(NO_PHOTO_KEY) || "[]");
+      if(!set.includes(m)){
+        set.push(m);
+        // Ограничиваем размер — последние 500
+        if(set.length > 500) set.splice(0, set.length - 500);
+        localStorage.setItem(NO_PHOTO_KEY, JSON.stringify(set));
+      }
+    } catch {}
+  }
+
   // Если фото ещё не загружено — попробуем загрузить (один раз)
   useEffect(() => {
     if(photo === undefined && markerName){
+      // Если мы уже знаем, что фото нет — не дёргаем GitHub
+      if(isKnownNoPhoto(markerName)){
+        onPhotoLoaded(null);
+        return;
+      }
       photoGet(markerName).then(url => {
+        if(url === null) markNoPhoto(markerName);
         onPhotoLoaded(url);
       });
     }
@@ -817,6 +844,12 @@ function MarkerPhotoThumb({ markerName, photo, onPhotoLoaded, onPhotoClick }){
       reader.onload = async () => {
         const url = reader.result;
         await photoSet(markerName, url);
+        // Снимаем флаг «нет фото» — теперь оно есть
+        try {
+          const set = JSON.parse(localStorage.getItem(NO_PHOTO_KEY) || "[]");
+          const filtered = set.filter(x => x !== markerName);
+          localStorage.setItem(NO_PHOTO_KEY, JSON.stringify(filtered));
+        } catch {}
         onPhotoLoaded(url);
         setLoading(false);
         setMsg({ok:true, text:"Фото сохранено"});
@@ -834,6 +867,7 @@ function MarkerPhotoThumb({ markerName, photo, onPhotoLoaded, onPhotoClick }){
     if(!confirm("Удалить фото?")) return;
     setLoading(true);
     await photoDelete(markerName);
+    markNoPhoto(markerName); // помечаем, что фото нет
     onPhotoLoaded(null);
     setLoading(false);
   }
@@ -1856,11 +1890,35 @@ export default function App(){
   },[marker,qty,defect,manualAmount,prices,recordType]);
 
   // ── фото маркировки ──
+  // Тот же кеш «нет фото», что и в MarkerPhotoThumb
+  const NO_PHOTO_KEY = "no_photo_markers";
   useEffect(()=>{
     if(!marker){setMarkerPhoto(null);return;}
     const cached=photoCache[marker];
     if(cached!==undefined){setMarkerPhoto(cached);return;}
-    photoGet(marker).then(v=>{ setPhotoCache(p=>({...p,[marker]:v})); setMarkerPhoto(v); });
+    // Если знаем что фото нет — не дёргаем GitHub
+    try {
+      const noPhoto = JSON.parse(localStorage.getItem(NO_PHOTO_KEY) || "[]");
+      if(noPhoto.includes(marker)){
+        setPhotoCache(p=>({...p,[marker]:null}));
+        setMarkerPhoto(null);
+        return;
+      }
+    } catch {}
+    photoGet(marker).then(v=>{
+      setPhotoCache(p=>({...p,[marker]:v}));
+      setMarkerPhoto(v);
+      if(v === null){
+        try {
+          const set = JSON.parse(localStorage.getItem(NO_PHOTO_KEY) || "[]");
+          if(!set.includes(marker)){
+            set.push(marker);
+            if(set.length > 500) set.splice(0, set.length - 500);
+            localStorage.setItem(NO_PHOTO_KEY, JSON.stringify(set));
+          }
+        } catch {}
+      }
+    });
   },[marker]);
 
   // ── авторизация ──
