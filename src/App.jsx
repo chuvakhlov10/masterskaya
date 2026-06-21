@@ -2626,7 +2626,7 @@ export default function App(){
         {/* ══ СКЛАД ══ */}
         {tab==="stock"&&(
           <div>
-            <div style={{display:"flex",gap:1,marginBottom:16,background:C.border,padding:1}}>
+            <div style={{display:"flex",gap:1,marginBottom:16,background:C.border,padding:1,position:"sticky",top:0,zIndex:10}}>
               {[["ws",workshop],["main","Общий склад"],["move","Перемещение"]].map(([id,label])=>(
                 <button key={id} onClick={()=>setStockTab(id)} style={{
                   flex:1,padding:"12px 4px",fontSize:12,fontWeight:800,border:"none",cursor:"pointer",
