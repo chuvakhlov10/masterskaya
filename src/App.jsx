@@ -1404,6 +1404,33 @@ function PasswordModal({ workshop, onChange, onClose }){
 }
 
 // ──────────────────────────────────────────────────────────────
+//  Панель управления складом (поиск + раскрыть/свернуть все)
+//  ВАЖНО: определён на уровне модуля, а не внутри App.
+//  Если определить внутри App — при каждом ре-рендере App компонент
+//  будет пересоздан, React размонтирует input → потеря фокуса при вводе.
+// ──────────────────────────────────────────────────────────────
+function StockControls({ search, setSearch, onExpandAll, onCollapseAll }){
+  const [localSearch, setLocalSearch] = useState(search);
+  useEffect(() => { setLocalSearch(search); }, [search]);
+  return (
+    <div style={{marginBottom:12}}>
+      <input value={localSearch} onChange={e=>{
+        setLocalSearch(e.target.value);
+        setSearch(e.target.value);
+      }} placeholder="🔍 Поиск по маркировке..." style={{...s.input,marginBottom:8}}/>
+      <div style={{display:"flex",gap:6}}>
+        <button type="button" onClick={onExpandAll} style={{...s.btn(),padding:"4px 10px",fontSize:11}}>
+          ▼ Раскрыть все
+        </button>
+        <button type="button" onClick={onCollapseAll} style={{...s.btn(),padding:"4px 10px",fontSize:11}}>
+          ▲ Свернуть все
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────
 //  ГЛАВНЫЙ КОМПОНЕНТ
 // ──────────────────────────────────────────────────────────────
 export default function App(){
@@ -2381,30 +2408,7 @@ export default function App(){
     return {ok:true, text:`«${oldName}» → «${newName}»`};
   }
 
-  // ── Панель управления складом: поиск + сортировка + фильтры ──
-  function StockControls({ search, setSearch }){
-    const [localSearch, setLocalSearch] = useState(search);
-    const searchTimer = useRef(null);
-    useEffect(() => { setLocalSearch(search); }, [search]);
-    const onSearchChange = (v) => {
-      setLocalSearch(v);
-      if(searchTimer.current) clearTimeout(searchTimer.current);
-      searchTimer.current = setTimeout(() => setSearch(v), 250);
-    };
-    return (
-      <div style={{marginBottom:12}}>
-        <input value={localSearch} onChange={e=>onSearchChange(e.target.value)} placeholder="🔍 Поиск по маркировке..." style={{...s.input,marginBottom:8}}/>
-        <div style={{display:"flex",gap:6}}>
-          <button type="button" onClick={()=>{const all={};sortedCategories(safeMarkers).forEach(c=>all[c]=true);setExpandedCats(all);}} style={{...s.btn(),padding:"4px 10px",fontSize:11}}>
-            ▼ Раскрыть все
-          </button>
-          <button type="button" onClick={()=>setExpandedCats({})} style={{...s.btn(),padding:"4px 10px",fontSize:11}}>
-            ▲ Свернуть все
-          </button>
-        </div>
-      </div>
-    );
-  }
+  // ── Панель управления складом: StockControls теперь на уровне модуля (см. выше) ──
 
   // ── Кнопка маркировки в форме записи ──
   function renderMarkerButton(m, isService, yearCount){
@@ -3179,7 +3183,9 @@ export default function App(){
             {stockTab==="ws"&&(
               <div>
                 <div style={{fontSize:13,color:C.textSub,marginBottom:10}}>Остатки · <b style={{color:wsColor}}>{workshop}</b></div>
-                <StockControls search={stockSearch} setSearch={setStockSearch}/>
+                <StockControls search={stockSearch} setSearch={setStockSearch}
+                  onExpandAll={()=>{const all={};sortedCategories(safeMarkers).forEach(c=>all[c]=true);setExpandedCats(all);}}
+                  onCollapseAll={()=>setExpandedCats({})}/>
                 {sortedCategories(safeMarkers).map(cat=>renderStockCategory(cat,wsStock,true))}
                 <div style={{fontSize:11,color:C.textDim,marginTop:4}}>«Прочие услуги» в складе не отображаются</div>
               </div>
@@ -3187,7 +3193,9 @@ export default function App(){
             {stockTab==="main"&&(
               <div>
                 <div style={{fontSize:13,color:C.textSub,marginBottom:10}}>Общий склад</div>
-                <StockControls search={stockSearch} setSearch={setStockSearch}/>
+                <StockControls search={stockSearch} setSearch={setStockSearch}
+                  onExpandAll={()=>{const all={};sortedCategories(safeMarkers).forEach(c=>all[c]=true);setExpandedCats(all);}}
+                  onCollapseAll={()=>setExpandedCats({})}/>
                 {sortedCategories(safeMarkers).map(cat=>renderStockCategory(cat,stockMain,false))}
               </div>
             )}
