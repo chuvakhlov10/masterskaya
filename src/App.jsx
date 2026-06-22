@@ -29,6 +29,14 @@ const INCOME_PCT = 0.4;          // 40% с ключей
 const SHARP_INCOME_PCT = 1.0;    // 100% с заточки
 // Маркировки, которые считаются «заточкой» — Илья получает 100%
 const SHARPING_MARKERS = new Set(["Заточка ножей","Заточка топоров","Заточка садового инструмента","Заточка топора"]);
+// «Услуги» — маркировки, которые не учитываются на складе (не заготовки).
+// Они всегда показываются в форме записи, даже если остаток 0.
+// В разделах склада (общий/мастерская) — не отображаются.
+const SERVICE_MARKERS = new Set([
+  "Нарезка лезвия",
+  "Замена корпуса",
+  // Все маркировки из категории «Прочие услуги» тоже услуги — обрабатываются отдельно по категории
+]);
 const LOCAL_WS_KEY = "workshop_choice_v2";
 const LOCAL_AUTH_KEY = "workshop_auth_v2";
 const DEFAULT_PASSWORDS = { "SMART": "smart123", "Бегемот": "begemot123" };
@@ -70,12 +78,21 @@ function signOf(r){ return r.recordType === "refund" ? -1 : 1; }
 // Сколько заготовок списать со склада:
 // - refund: 0 (заготовка уже списана при продаже)
 // - sale для "Прочие услуги": 0 (это услуги, не заготовки)
+// - sale для SERVICE_MARKERS (Нарезка лезвия, Замена корпуса): 0
 // - sale для обычных категорий: qty + defect (все изготовленные — годные + брак)
 // - sale с qty=0 и defect=0: 0 (пустая запись)
 function stockDelta(r){
   if(r.recordType === "refund") return 0;
   if(r.category === "Прочие услуги") return 0;
+  if(SERVICE_MARKERS.has(r.marker)) return 0;
   return (r.qty || 0) + (r.defect || 0);
+}
+
+// Является ли маркировка услугой (не учитывается на складе)
+function isServiceMarker(marker, category){
+  if(category === "Прочие услуги") return true;
+  if(SERVICE_MARKERS.has(marker)) return true;
+  return false;
 }
 
 // Расчёт зарплаты Ильи (только для SMART):
@@ -2436,7 +2453,7 @@ export default function App(){
   function renderStockCategory(cat, stockObj, isWS){
     // «Прочие услуги» — не показываем в складах (это услуги, не заготовки)
     if(cat === "Прочие услуги") return null;
-    const ms = markers[cat]||[];
+    const ms = (markers[cat]||[]).filter(m => !isServiceMarker(m, cat));
     const search = stockSearch.toLowerCase();
     // Поиск
     let filtered = search ? ms.filter(m=>matchesSearch(m, stockSearch)) : ms.slice();
@@ -2984,7 +3001,8 @@ export default function App(){
                   }
 
                   // Для не-услуг — скрываем маркировки без остатка в этой мастерской
-                  const inStock = allMarkers.filter(m => (wsStock[m]||0) > 0);
+                  // Кроме SERVICE_MARKERS (Нарезка лезвия, Замена корпуса) — они всегда показываются
+                  const inStock = allMarkers.filter(m => (wsStock[m]||0) > 0 || isServiceMarker(m, category));
 
                   // Если показываем все — применяем поиск
                   if(showAllMarkers){
@@ -2995,6 +3013,7 @@ export default function App(){
                   }
 
                   // Иначе — топ-20 за год для этой категории (только из тех, что есть в наличии)
+                  // Плюс услуги (Нарезка лезвия, Замена корпуса) — показываем всегда, даже без остатка
                   const now = new Date();
                   const yearAgo = now.getTime() - 365 * 24 * 60 * 60 * 1000;
                   const counts = {};
@@ -3008,7 +3027,7 @@ export default function App(){
                   const top = Object.entries(counts)
                     .sort((a,b) => b[1] - a[1])
                     .slice(0, 20)
-                    .filter(([m,c]) => c > 0 && (wsStock[m]||0) > 0);
+                    .filter(([m,c]) => c > 0 && ((wsStock[m]||0) > 0 || isServiceMarker(m, category)));
 
                   if(top.length === 0){
                     return <div style={{padding:"8px",color:C.textDim,fontSize:12}}>⭐ Топ-20 появится после первых продаж. Нажмите «📋 Все» выше, чтобы увидеть все маркировки в наличии.</div>;
