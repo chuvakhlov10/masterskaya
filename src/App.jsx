@@ -25,7 +25,10 @@ const DEFAULT_MARKERS = {
   "Прочие услуги": ["Заточка ножей","Заточка топоров","Заточка садового инструмента","Исправление чужой работы","Заточка топора"]
 };
 const WORKSHOPS = ["SMART","Бегемот"];
-const INCOME_PCT = 0.4;
+const INCOME_PCT = 0.4;          // 40% с ключей
+const SHARP_INCOME_PCT = 1.0;    // 100% с заточки
+// Маркировки, которые считаются «заточкой» — Илья получает 100%
+const SHARPING_MARKERS = new Set(["Заточка ножей","Заточка топоров","Заточка садового инструмента","Заточка топора"]);
 const LOCAL_WS_KEY = "workshop_choice_v2";
 const LOCAL_AUTH_KEY = "workshop_auth_v2";
 const DEFAULT_PASSWORDS = { "SMART": "smart123", "Бегемот": "begemot123" };
@@ -73,6 +76,28 @@ function stockDelta(r){
   if(r.recordType === "refund") return 0;
   if(r.category === "Прочие услуги") return 0;
   return (r.qty || 0) + (r.defect || 0);
+}
+
+// Расчёт зарплаты Ильи (только для SMART):
+// - 40% с ключей (обычные категории)
+// - 100% с заточки (маркировки из SHARPING_MARKERS)
+// - «Исправление чужой работы» и другие не-заточечные услуги — 40%
+function calcEarnings(recs){
+  let total = 0;
+  let fromKeys = 0;
+  let fromSharping = 0;
+  for(const r of recs){
+    const sign = signOf(r);
+    const amt = (r.amount || 0) * sign;
+    if(SHARPING_MARKERS.has(r.marker)){
+      total += amt * SHARP_INCOME_PCT;
+      fromSharping += amt * SHARP_INCOME_PCT;
+    } else {
+      total += amt * INCOME_PCT;
+      fromKeys += amt * INCOME_PCT;
+    }
+  }
+  return { total, fromKeys, fromSharping };
 }
 
 // Сортировка категорий по алфавиту (А → Я)
@@ -711,7 +736,7 @@ function YearMonthCard({ monthKey, monthData, monthName, workshop, onEditRecord,
       {!expanded && (
         <div style={{display:"flex",gap:16,padding:"0 14px 10px",fontSize:11,color:C.textDim,flexWrap:"wrap"}}>
           <span>Среднее: {fmt(avgPerDay)} р/день</span>
-          {workshop==="SMART" && <span style={{color:C.success}}>Доход: {fmt(monthData.amount*INCOME_PCT)} р</span>}
+          {workshop==="SMART" && <span style={{color:C.success}}>Зарплата: {fmt(calcEarnings(monthData.recList).total)} р</span>}
         </div>
       )}
       {expanded && (
@@ -723,7 +748,7 @@ function YearMonthCard({ monthKey, monthData, monthName, workshop, onEditRecord,
             <StatCard label="Брак" value={fmt(monthData.defect)} color={monthData.defect>0?C.danger:undefined}/>
             <StatCard label="% брака" value={monthData.qty>0?(monthData.defect/Math.abs(monthData.qty)*100).toFixed(1)+"%":"0%"} color={monthData.defect>0?C.danger:undefined}/>
             <StatCard label="Рабочих дней" value={monthData.days.size} sub="дней с записями"/>
-            {workshop==="SMART"&&<StatCard label="Доход 40%" value={fmt(monthData.amount*INCOME_PCT)+" р"} color={C.success}/>}
+            {workshop==="SMART"&&(() => { const e = calcEarnings(monthData.recList); return <StatCard label="Зарплата" value={fmt(e.total)+" р"} sub={`ключи: ${fmt(e.fromKeys)} · заточка: ${fmt(e.fromSharping)}`} color={C.success}/>; })()}
           </div>
 
           {/* По категориям */}
@@ -2489,7 +2514,7 @@ export default function App(){
             <StatCard label="Брак" value={fmt(totalDef)} color={totalDef>0?C.danger:undefined}/>
             <StatCard label="% брака" value={totalQty>0?(totalDef/Math.abs(totalQty)*100).toFixed(1)+"%":"0%"} color={totalDef>0?C.danger:undefined}/>
             {totalRefundQty > 0 && <StatCard label={`Возвратов: ${totalRefundQty} шт`} value={"−"+fmt(totalRefundAmt)+" р"} color={C.danger}/>}
-            {workshop==="SMART"&&<StatCard label="Доход 40%" value={fmt(totalAmt*INCOME_PCT)+" р"} color={C.success}/>}
+            {workshop==="SMART"&&(() => { const e = calcEarnings(data); return <StatCard label="Зарплата" value={fmt(e.total)+" р"} sub={`ключи: ${fmt(e.fromKeys)} · заточка: ${fmt(e.fromSharping)}`} color={C.success}/>; })()}
           </div>
           <div style={{fontSize:10,fontWeight:700,color:C.textSub,marginBottom:8,textTransform:"uppercase",letterSpacing:"1px"}}>ПО КАТЕГОРИЯМ</div>
           <StatsBreakdown data={data} totalAmt={totalAmt} totalQty={totalQty}/>
@@ -2522,7 +2547,7 @@ export default function App(){
             <StatCard label="% брака" value={totalQty>0?(totalDef/Math.abs(totalQty)*100).toFixed(1)+"%":"0%"} color={totalDef>0?C.danger:undefined}/>
             <StatCard label="Рабочих дней" value={workDays} sub="дней с записями"/>
             {totalRefundQty > 0 && <StatCard label={`Возвратов: ${totalRefundQty} шт`} value={"−"+fmt(totalRefundAmt)+" р"} color={C.danger}/>}
-            {workshop==="SMART"&&<StatCard label="Доход 40%" value={fmt(totalAmt*INCOME_PCT)+" р"} color={C.success}/>}
+            {workshop==="SMART"&&(() => { const e = calcEarnings(data); return <StatCard label="Зарплата" value={fmt(e.total)+" р"} sub={`ключи: ${fmt(e.fromKeys)} · заточка: ${fmt(e.fromSharping)}`} color={C.success}/>; })()}
           </div>
           <div style={{fontSize:10,fontWeight:700,color:C.textSub,marginBottom:8,textTransform:"uppercase",letterSpacing:"1px"}}>ПО КАТЕГОРИЯМ</div>
           <StatsBreakdown data={data} totalAmt={totalAmt} totalQty={totalQty}/>
@@ -2571,7 +2596,7 @@ export default function App(){
             <StatCard label="Брак" value={fmt(totalDef)} color={totalDef>0?C.danger:undefined}/>
             <StatCard label="% брака" value={totalQty>0?(totalDef/Math.abs(totalQty)*100).toFixed(1)+"%":"0%"} color={totalDef>0?C.danger:undefined}/>
             {totalRefundQty > 0 && <StatCard label={`Возвратов: ${totalRefundQty} шт`} value={"−"+fmt(totalRefundAmt)+" р"} color={C.danger}/>}
-            {workshop==="SMART"&&<StatCard label="Доход 40%" value={fmt(totalAmt*INCOME_PCT)+" р"} color={C.success}/>}
+            {workshop==="SMART"&&(() => { const e = calcEarnings(data); return <StatCard label="Зарплата" value={fmt(e.total)+" р"} sub={`ключи: ${fmt(e.fromKeys)} · заточка: ${fmt(e.fromSharping)}`} color={C.success}/>; })()}
           </div>
           <div style={{fontSize:10,fontWeight:700,color:C.textSub,marginBottom:8,textTransform:"uppercase",letterSpacing:"1px"}}>ПО МЕСЯЦАМ — нажмите для раскрытия по дням</div>
           {Object.entries(byMonth).sort((a,b)=>b[0].localeCompare(a[0])).map(([mk,d])=>{
