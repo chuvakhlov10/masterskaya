@@ -242,6 +242,34 @@ async function sGet(key){
   return cacheGet(key);
 }
 
+// Merge function для records: объединяем записи из remote и local по timestamp
+// Если одна запись есть и там и там — берём из local (наша версия новее)
+function mergeRecords(remote, local){
+  if(!Array.isArray(remote)) return local;
+  if(!Array.isArray(local)) return remote;
+  const seen = new Set();
+  const result = [];
+  // Сначала remote
+  for(const r of remote){
+    const id = r.timestamp + '|' + r.marker + '|' + r.workshop;
+    if(!seen.has(id)){
+      seen.add(id);
+      result.push(r);
+    }
+  }
+  // Потом local (перекрывает при дубликате по id)
+  for(const r of local){
+    const id = r.timestamp + '|' + r.marker + '|' + r.workshop;
+    if(!seen.has(id)){
+      seen.add(id);
+      result.push(r);
+    }
+  }
+  // Сортируем по timestamp
+  result.sort((a,b) => (a.timestamp||0) - (b.timestamp||0));
+  return result;
+}
+
 async function sSet(key, val){
   // Всегда обновляем локальный кеш (для мгновенного отображения и офлайн-доступа)
   cacheSet(key, val);
@@ -257,8 +285,10 @@ async function sSet(key, val){
   }
   
   // Онлайн — пишем в GitHub
+  // Для records передаём mergeFn — при 409 conflict смёржим с remote чтобы не потерять чужие записи
+  const mergeFn = key === "records" ? mergeRecords : undefined;
   try {
-    const result = await dbSet(key, val);
+    const result = await dbSet(key, val, mergeFn);
     if (!result.ok) {
       // Не получилось — в очередь на повтор
       const q = getQueue();
@@ -1395,6 +1425,10 @@ export default function App(){
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState("record");
   const [records, setRecords] = useState([]);
+  // recordsRef — всегда актуальная копия records (для debounce saveAndSync)
+  // без этого debounce 400мс может записать устаревший массив поверх свежего
+  const recordsRef = useRef([]);
+  useEffect(() => { recordsRef.current = records; }, [records]);
   const [prices, setPrices] = useState({});
   const [stockMain, setStockMain] = useState({});
   const [stockWS, setStockWS] = useState({SMART:{},Бегемот:{}});
@@ -1606,7 +1640,13 @@ export default function App(){
     return new Promise((resolve) => {
       saveTimersRef.current[key] = setTimeout(async () => {
         delete saveTimersRef.current[key];
-        await sSet(key, value);
+        // Для records — читаем актуальное значение из ref, не захваченное в замыкании
+        // Это защищает от race condition: за 400мс дебаунса могло прийти обновление через Ably
+        let valueToSave = value;
+        if (key === "records") {
+          valueToSave = recordsRef.current;
+        }
+        await sSet(key, valueToSave);
         setPendingCount(getQueue().length);
         resolve();
       }, 400);

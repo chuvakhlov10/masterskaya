@@ -118,7 +118,9 @@ export async function dbGet(key) {
 }
 
 // ── dbSet: записать JSON в файл (с SHA для обновления) ──
-export async function dbSet(key, value) {
+// mergeFn (опционально) — функция (remoteValue, localValue) => mergedValue
+//   используется при 409 conflict чтобы не потерять данные другого устройства
+export async function dbSet(key, value, mergeFn) {
   return withWriteQueue(key, async () => {
     try {
       const path = `${DATA_PREFIX}${keyToFileName(key)}.json`;
@@ -149,15 +151,25 @@ export async function dbSet(key, value) {
       return { ok: true };
     } catch (e) {
       if (e.status === 409 || e.status === 422) {
-        // Conflict — SHA устарел. Сбрасываем кэш и пробуем ещё раз (1 раз)
+        // Conflict — SHA устарел. Перечитаем с сервера и при возможности смёржим
         delete shaCache[key];
         console.warn(`[dbSet] conflict on "${key}", retrying...`);
         try {
           const path = `${DATA_PREFIX}${keyToFileName(key)}.json`;
           const existing = await ghRequest("GET", path);
+          let finalValue = value;
+          if (mergeFn && existing && existing.content) {
+            try {
+              const remoteValue = JSON.parse(decodeB64(existing.content));
+              finalValue = mergeFn(remoteValue, value);
+              console.log(`[dbSet] merged "${key}": remote=${Array.isArray(remoteValue) ? remoteValue.length : Object.keys(remoteValue).length} local=${Array.isArray(value) ? value.length : Object.keys(value).length} merged=${Array.isArray(finalValue) ? finalValue.length : Object.keys(finalValue).length}`);
+            } catch (mergeErr) {
+              console.warn(`[dbSet] merge failed for "${key}":`, mergeErr.message);
+            }
+          }
           const body = {
             message: `update ${key} (retry)`,
-            content: encodeB64(JSON.stringify(value)),
+            content: encodeB64(JSON.stringify(finalValue)),
           };
           if (existing && existing.sha) body.sha = existing.sha;
           const result = await ghRequest("PUT", path, body);
