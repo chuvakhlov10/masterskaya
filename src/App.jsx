@@ -559,7 +559,6 @@ function DayReport({ records, workshop, wsStock, stockCfg, dateStr, onEditRecord
   if(report.length===0) return <div style={{fontSize:13,color:C.textDim,padding:"8px 0"}}>Записей нет</div>;
   return (
     <div>
-      <StatsBreakdown data={dayRecs} totalAmt={totalAmt} totalQty={totalQtySold-totalQtyRefund}/>
       <div style={{fontSize:12,fontWeight:700,color:C.textSub,marginBottom:8,marginTop:12}}>БЫЛО → СТАЛО</div>
       {report.map(([m,d])=>{
         const stockNow=wsStock[m]||0,stockBefore=stockNow+d.stockUsed;
