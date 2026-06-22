@@ -617,8 +617,10 @@ function DayReport({ records, workshop, wsStock, stockCfg, dateStr, onEditRecord
   const totalQtySold = dayRecs.filter(r=>r.recordType!=="refund").reduce((s,r)=>s+r.qty,0);
   const totalQtyRefund = dayRecs.filter(r=>r.recordType==="refund").reduce((s,r)=>s+r.qty,0);
   const byM={};
-  // Для блока «БЫЛО → СТАЛО» — игнорируем «Прочие услуги» (это услуги, не заготовки, склад по ним не ведётся)
-  dayRecs.filter(r=>r.category!=="Прочие услуги").forEach(r=>{
+  // Для блока «БЫЛО → СТАЛО» — игнорируем услуги (не заготовки, склад по ним не ведётся):
+  // - «Прочие услуги» (категория целиком)
+  // - SERVICE_MARKERS (Нарезка лезвия, Замена корпуса)
+  dayRecs.filter(r => !isServiceMarker(r.marker, r.category)).forEach(r=>{
     const sign = signOf(r);
     if(!byM[r.marker]) byM[r.marker]={qty:0,defect:0,amount:0,stockUsed:0,refundQty:0};
     byM[r.marker].qty += r.qty * sign;
