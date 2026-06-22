@@ -1,14 +1,17 @@
 // Service Worker — кеширует статику для офлайн-работы
 // Стратегия: cache-first для статики, network-first для данных (через fetch в самом приложении)
 
-const CACHE_NAME = 'masterskaya-v1';
+const CACHE_NAME = 'masterskaya-v2';
 const PRECACHE_URLS = [
   './',
   './index.html',
   './manifest.json',
   './favicon.svg',
+  './favicon-32.png',
   './icon-192.png',
+  './icon-192-maskable.png',
   './icon-512.png',
+  './icon-512-maskable.png',
 ];
 
 // При установке — кешируем основные файлы
