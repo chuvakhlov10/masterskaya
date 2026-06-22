@@ -1503,6 +1503,17 @@ export default function App(){
 
   // склад
   const [stockTab, setStockTab] = useState("ws");
+  // Запоминаем позицию скролла для каждой вкладки склада
+  const stockScrollRef = useRef({}); // {ws: 0, main: 0, move: 0}
+  const switchStockTab = (newTab) => {
+    // Сохраняем позицию текущей вкладки
+    stockScrollRef.current[stockTab] = window.scrollY;
+    setStockTab(newTab);
+    // Восстанавливаем позицию новой вкладки (после рендера)
+    setTimeout(() => {
+      window.scrollTo(0, stockScrollRef.current[newTab] || 0);
+    }, 0);
+  };
   const [expandedCats, setExpandedCats] = useState({});
   const [expandedSubcats, setExpandedSubcats] = useState({}); // {"cat|subName": true/false}
   const [stockSort, setStockSort] = useState("alpha"); // alpha | qty-desc | qty-asc | empty-first
@@ -2200,10 +2211,49 @@ export default function App(){
     if(avail<moveQty){setMoveMsg({ok:false,text:`На складе только ${avail} шт`});return;}
     const nm = {...stockMain, [moveMarker]: avail-moveQty};
     const ws = {...stockWS[moveTo], [moveMarker]:(stockWS[moveTo][moveMarker]||0)+moveQty};
-    await saveAndSync("stock:main", nm, setStockMain);
-    await saveAndSync(`stock:ws:${moveTo}`, ws, (v)=>setStockWS(p=>({...p,[moveTo]:v})));
+    
+    // Обновляем state мгновенно (UI не ждёт GitHub)
+    setStockMain(nm);
+    setStockWS(p=>({...p,[moveTo]:ws}));
+    
     setMoveMsg({ok:true, text:`${moveQty} шт «${moveMarker}» → ${moveTo}`});
     setMoveQty(1); setMoveMarker(""); setTimeout(()=>setMoveMsg(null), 3000);
+    
+    // Сохраняем оба склада параллельно. Если интернет упал — оба попадут
+    // в очередь офлайн и отправятся при восстановлении сети.
+    // Плюс уведомляем Ably о перемещении (одно сообщение на два склада).
+    try {
+      skipPollRef.current = 3;
+      // Параллельно пишем оба файла в GitHub
+      const [mainResult, wsResult] = await Promise.all([
+        sSet("stock:main", nm),
+        sSet(`stock:ws:${moveTo}`, ws),
+      ]);
+      cacheSet("stock:main", nm);
+      cacheSet(`stock:ws:${moveTo}`, ws);
+      setPendingCount(getQueue().length);
+      
+      // Ably — отправляем оба обновления
+      if (navigator.onLine && ablyChannelRef.current) {
+        try {
+          const ts = Date.now();
+          lastBroadcastTsRef.current["stock:main"] = ts;
+          ablyChannelRef.current.publish('update', { key: "stock:main", value: nm, ts, from: clientIdRef.current });
+          lastBroadcastTsRef.current[`stock:ws:${moveTo}`] = ts;
+          ablyChannelRef.current.publish('update', { key: `stock:ws:${moveTo}`, value: ws, ts, from: clientIdRef.current });
+        } catch {}
+      }
+      
+      // Если что-то не записалось — покажем ошибку (но state уже обновлён, при синхронизации данные вернутся)
+      if(!mainResult.ok || !wsResult.ok){
+        setMoveMsg({ok:false, text:"⚠ Сбой сети. Сохранится автоматически при восстановлении"});
+        setTimeout(()=>setMoveMsg(null), 4000);
+      }
+    } catch(e) {
+      console.error('[doMove] error:', e);
+      setMoveMsg({ok:false, text:"⚠ Сбой. Сохранится автоматически"});
+      setTimeout(()=>setMoveMsg(null), 4000);
+    }
   }
 
   // ── маркировки: добавить / удалить ──
@@ -3192,7 +3242,7 @@ export default function App(){
           <div>
             <div style={{display:"flex",gap:1,marginBottom:16,background:C.border,padding:1,position:"sticky",top:0,zIndex:10}}>
               {[["ws",workshop],["main","Общий склад"],["move","Перемещение"]].map(([id,label])=>(
-                <button key={id} onClick={()=>setStockTab(id)} style={{
+                <button key={id} onClick={()=>switchStockTab(id)} style={{
                   flex:1,padding:"12px 4px",fontSize:12,fontWeight:800,border:"none",cursor:"pointer",
                   background:stockTab===id?C.bgCard:C.bgSection,
                   color:stockTab===id?C.brand:C.textSub,
