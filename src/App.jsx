@@ -1476,8 +1476,18 @@ export default function App(){
   const recordsRef = useRef([]);
   useEffect(() => { recordsRef.current = records; }, [records]);
   const [prices, setPrices] = useState({});
-  const [stockMain, setStockMain] = useState({});
-  const [stockWS, setStockWS] = useState({SMART:{},Бегемот:{}});
+  // Единый объект stock: { main: {...}, ws: { SMART: {...}, Бегемот: {...} } }
+  // Записывается одним файлом stock.json → любая операция атомарна
+  const [stock, setStock] = useState({ main: {}, ws: { SMART: {}, Бегемот: {} } });
+  // Совместимые геттеры для существующего кода
+  const stockMain = stock.main || {};
+  const stockWS = stock.ws || { SMART: {}, Бегемот: {} };
+  const stockRef = useRef(stock);
+  useEffect(() => { stockRef.current = stock; }, [stock]);
+  // Лог перемещений (история + отмена)
+  const [stockMoves, setStockMoves] = useState([]);
+  const stockMovesRef = useRef([]);
+  useEffect(() => { stockMovesRef.current = stockMoves; }, [stockMoves]);
   const [stockCfg, setStockCfg] = useState({});
   const [markers, setMarkers] = useState(DEFAULT_MARKERS);
   const [aliases, setAliases] = useState({});  // {основное_имя: [альтернативные]}
@@ -1713,6 +1723,47 @@ export default function App(){
   // Старое имя для совместимости (3 места уже используют его)
   const silentSaveState = saveAndSync;
 
+  // Атомарное сохранение stock: один файл stock.json для всех складов
+  // Используется при перемещениях и любых изменениях остатков
+  // Гарантирует: либо запишутся ВСЕ склады, либо НИ ОДИН (нет рассинхрона)
+  async function saveStock(newStock, opts = {}) {
+    setStock(newStock);
+    skipPollRef.current = 3;
+    // Ably — мгновенно отправляем новое состояние
+    if (navigator.onLine && ablyChannelRef.current) {
+      try {
+        const ts = Date.now();
+        lastBroadcastTsRef.current["stock"] = ts;
+        const payload = { key: "stock", value: newStock, ts, from: clientIdRef.current };
+        const size = new TextEncoder().encode(JSON.stringify(payload)).length;
+        if (size < 60000) {
+          ablyChannelRef.current.publish('update', payload);
+        } else {
+          ablyChannelRef.current.publish('changed', { key: "stock", ts, from: clientIdRef.current });
+        }
+      } catch {}
+    }
+    // Debounce 400мс на GitHub запись
+    if (saveTimersRef.current["stock"]) clearTimeout(saveTimersRef.current["stock"]);
+    return new Promise((resolve) => {
+      saveTimersRef.current["stock"] = setTimeout(async () => {
+        delete saveTimersRef.current["stock"];
+        const valueToSave = stockRef.current; // актуальное значение
+        const result = await sSet("stock", valueToSave);
+        setPendingCount(getQueue().length);
+        resolve(result);
+      }, 400);
+    });
+  }
+
+  // Лог перемещений: добавляем запись и сохраняем весь лог
+  async function logStockMove(move) {
+    const newMoves = [...stockMovesRef.current, { ...move, id: `${Date.now()}-${Math.random().toString(36).slice(2,6)}` }];
+    setStockMoves(newMoves);
+    // Сохраняем лог (не блокируя UI)
+    saveAndSync("stock-moves", newMoves, setStockMoves).catch(()=>{});
+  }
+
   useEffect(() => {
     if (!authed) return;
 
@@ -1720,7 +1771,8 @@ export default function App(){
     stateSettersRef.current = {
       "records": setRecords,
       "prices": setPrices,
-      "stock:main": setStockMain,
+      "stock": setStock,
+      "stock-moves": setStockMoves,
       "stock:cfg": setStockCfg,
       "custom:markers": setMarkers,
       "marker-aliases": setAliases,
@@ -1750,16 +1802,22 @@ export default function App(){
         const sY = window.scrollY;
         
         // Применяем value через setter
-        if (key.startsWith('stock:ws:')) {
-          const workshop = key.replace('stock:ws:', '');
-          setStockWS(p => ({...p, [workshop]: value}));
-        } else {
-          const setter = stateSettersRef.current[key];
-          if (setter) {
-            setter(value);
+        const setter = stateSettersRef.current[key];
+        if (setter) {
+          // Для stock — нормализуем структуру
+          if (key === "stock") {
+            setStock({
+              main: ensureObj(value?.main),
+              ws: {
+                SMART: ensureObj(value?.ws?.SMART),
+                Бегемот: ensureObj(value?.ws?.Бегемот),
+              }
+            });
           } else {
-            console.warn('[ABLY] Нет setter для ключа:', key);
+            setter(value);
           }
+        } else {
+          console.warn('[ABLY] Нет setter для ключа:', key);
         }
         
         // Восстанавливаем позицию скролла
@@ -1840,12 +1898,13 @@ export default function App(){
       }
       setSyncStatus("syncing");
       try {
-        const [r,p,sm,sS,sCfg,sm2,al,nt] = await Promise.all([
+        const [r,p,stk,sCfg,sm2,al,nt,mvs] = await Promise.all([
           sGet("records"), sGet("prices"),
-          sGet("stock:main"), Promise.all(WORKSHOPS.map(w=>sGet(`stock:ws:${w}`))),
+          sGet("stock"), 
           sGet("stock:cfg"), sGet("custom:markers"), sGet("marker-aliases"), sGet("marker-notes"),
+          sGet("stock-moves"),
         ]);
-        const hash = JSON.stringify({r, p, sm, sS, sCfg, sm2, al, nt});
+        const hash = JSON.stringify({r, p, stk, sCfg, sm2, al, nt, mvs});
         if (hash === lastDataHashRef.current) {
           setSyncStatus(wsConnectedRef.current ? "ws" : "synced");
           return;
@@ -1854,14 +1913,21 @@ export default function App(){
         const sY = window.scrollY;
         if(Array.isArray(r)) setRecords(r);
         if(p && typeof p === "object" && !Array.isArray(p)) setPrices(p);
-        if(sm && typeof sm === "object" && !Array.isArray(sm)) setStockMain(sm);
-        const wsObj = {};
-        WORKSHOPS.forEach((w,i)=>{ wsObj[w] = (sS[i] && typeof sS[i] === "object" && !Array.isArray(sS[i])) ? sS[i] : {}; });
-        setStockWS(wsObj);
+        // stock — единый объект { main, ws }
+        if(stk && typeof stk === "object" && !Array.isArray(stk)){
+          setStock({
+            main: ensureObj(stk.main),
+            ws: {
+              SMART: ensureObj(stk.ws?.SMART),
+              Бегемот: ensureObj(stk.ws?.Бегемот),
+            }
+          });
+        }
         if(sCfg && typeof sCfg === "object" && !Array.isArray(sCfg)) setStockCfg(sCfg);
         if(sm2 && typeof sm2 === "object" && !Array.isArray(sm2)) setMarkers(sm2);
         if(al && typeof al === "object" && !Array.isArray(al)) setAliases(al);
         if(nt && typeof nt === "object" && !Array.isArray(nt)) setNotes(nt);
+        if(Array.isArray(mvs)) setStockMoves(mvs);
         setTimeout(()=>window.scrollTo(0, sY), 0);
         setSyncStatus(wsConnectedRef.current ? "ws" : "synced");
       } catch(e) {
@@ -1968,22 +2034,46 @@ export default function App(){
       setPwdLoaded(true);
 
       // Загружаем остальные данные
-      const [r,p,sm,sS,sCfg,sm2,al,nt,sub] = await Promise.all([
+      const [r,p,stk,sCfg,sm2,al,nt,sub,mvs] = await Promise.all([
         sGet("records"), sGet("prices"),
-        sGet("stock:main"), Promise.all(WORKSHOPS.map(w=>sGet(`stock:ws:${w}`))),
+        sGet("stock"),
         sGet("stock:cfg"), sGet("custom:markers"), sGet("marker-aliases"), sGet("marker-notes"), sGet("subcategories"),
+        sGet("stock-moves"),
       ]);
       // Защита: гарантируем, что у нас правильные типы (массив/объект),
       // иначе рендер упадёт с белым экраном
       if(Array.isArray(r)) setRecords(r);
       if(p && typeof p === "object" && !Array.isArray(p)) setPrices(p);
-      if(sm && typeof sm === "object" && !Array.isArray(sm)) setStockMain(sm);
-      const wsObj = {};
-      WORKSHOPS.forEach((w,i)=>{
-        const v = sS[i];
-        wsObj[w] = (v && typeof v === "object" && !Array.isArray(v)) ? v : {};
-      });
-      setStockWS(wsObj);
+      
+      // Миграция: если stock.json нет, читаем старые stock:main + stock:ws:X
+      if(stk && typeof stk === "object" && !Array.isArray(stk) && stk.main){
+        setStock({
+          main: ensureObj(stk.main),
+          ws: {
+            SMART: ensureObj(stk.ws?.SMART),
+            Бегемот: ensureObj(stk.ws?.Бегемот),
+          }
+        });
+      } else {
+        // Старая схема — миграция
+        const [sm, sS] = await Promise.all([
+          sGet("stock:main"),
+          Promise.all(WORKSHOPS.map(w=>sGet(`stock:ws:${w}`))),
+        ]);
+        const mainObj = ensureObj(sm);
+        const wsObj = {};
+        WORKSHOPS.forEach((w,i)=>{
+          const v = sS[i];
+          wsObj[w] = (v && typeof v === "object" && !Array.isArray(v)) ? v : {};
+        });
+        const newStock = { main: mainObj, ws: wsObj };
+        setStock(newStock);
+        // Сохраняем в новом формате
+        await sSet("stock", newStock);
+        console.log('[MIGRATION] stock.json создан из старых stock:main + stock:ws:X');
+      }
+      
+      if(Array.isArray(mvs)) setStockMoves(mvs);
       if(sCfg && typeof sCfg === "object" && !Array.isArray(sCfg)) setStockCfg(sCfg);
       if(sm2 && typeof sm2 === "object" && !Array.isArray(sm2)) setMarkers(sm2);
       if(al && typeof al === "object" && !Array.isArray(al)) setAliases(al);
@@ -2140,9 +2230,11 @@ export default function App(){
     // Склад: списываем через stockDelta (для refund = 0, для sale = qty или defect)
     const delta = stockDelta(rec);
     if(delta > 0){
-      const wsStk = {...stockWS[workshop]};
-      wsStk[m] = Math.max((wsStk[m]||0) - delta, 0);
-      saveAndSync(`stock:ws:${workshop}`, wsStk, (v)=>setStockWS(p=>({...p,[workshop]:v})));
+      const newStock = {
+        main: stockMain,
+        ws: { ...stockWS, [workshop]: { ...stockWS[workshop], [m]: Math.max((stockWS[workshop]?.[m]||0) - delta, 0) } }
+      };
+      saveStock(newStock);
     }
 
     // Сброс формы — мгновенно, не ждём GitHub
@@ -2177,7 +2269,8 @@ export default function App(){
         ablyChannelRef.current.publish('record-updated', { idx: editRec.globalIdx, rec: updated, from: clientIdRef.current });
       } catch {}
     }
-    saveAndSync(`stock:ws:${updated.workshop}`, wsStk, (v)=>setStockWS(p=>({...p,[updated.workshop]:v})));
+    // Атомарно сохраняем склад одним файлом
+    saveStock({ main: stockMain, ws: { ...stockWS, [updated.workshop]: wsStk } });
     setEditRec(null);
   }
 
@@ -2199,59 +2292,109 @@ export default function App(){
         ablyChannelRef.current.publish('record-deleted', { idx: gi, from: clientIdRef.current });
       } catch {}
     }
-    saveAndSync(`stock:ws:${old.workshop}`, wsStk, (v)=>setStockWS(p=>({...p,[old.workshop]:v})));
+    // Атомарно сохраняем склад одним файлом
+    saveStock({ main: stockMain, ws: { ...stockWS, [old.workshop]: wsStk } });
     setEditRec(null);
   }
 
   // ── склад: перемещение ──
+  // АТОМАРНО: обновляем один stock.json → нет рассинхрона между складами
   async function doMove(){
     if(!moveMarker){setMoveMsg({ok:false,text:"Выберите маркировку"});return;}
     if(moveQty<=0){setMoveMsg({ok:false,text:"Количество > 0"});return;}
     const avail = stockMain[moveMarker]||0;
     if(avail<moveQty){setMoveMsg({ok:false,text:`На складе только ${avail} шт`});return;}
-    const nm = {...stockMain, [moveMarker]: avail-moveQty};
-    const ws = {...stockWS[moveTo], [moveMarker]:(stockWS[moveTo][moveMarker]||0)+moveQty};
     
-    // Обновляем state мгновенно (UI не ждёт GitHub)
-    setStockMain(nm);
-    setStockWS(p=>({...p,[moveTo]:ws}));
+    // Новый stock — один объект, запишется одним файлом
+    const newStock = {
+      main: { ...stockMain, [moveMarker]: avail - moveQty },
+      ws: { ...stockWS, [moveTo]: { ...(stockWS[moveTo]||{}), [moveMarker]: (stockWS[moveTo]?.[moveMarker]||0) + moveQty } }
+    };
+    
+    // Лог перемещения (для истории и отмены)
+    const move = {
+      marker: moveMarker,
+      qty: moveQty,
+      from: "main",
+      to: moveTo,
+      timestamp: Date.now(),
+      type: "move"
+    };
     
     setMoveMsg({ok:true, text:`${moveQty} шт «${moveMarker}» → ${moveTo}`});
     setMoveQty(1); setMoveMarker(""); setTimeout(()=>setMoveMsg(null), 3000);
     
-    // Сохраняем оба склада параллельно. Если интернет упал — оба попадут
-    // в очередь офлайн и отправятся при восстановлении сети.
-    // Плюс уведомляем Ably о перемещении (одно сообщение на два склада).
+    // Атомарная запись одного файла stock.json + лог
     try {
-      skipPollRef.current = 3;
-      // Параллельно пишем оба файла в GitHub
-      const [mainResult, wsResult] = await Promise.all([
-        sSet("stock:main", nm),
-        sSet(`stock:ws:${moveTo}`, ws),
-      ]);
-      cacheSet("stock:main", nm);
-      cacheSet(`stock:ws:${moveTo}`, ws);
-      setPendingCount(getQueue().length);
-      
-      // Ably — отправляем оба обновления
-      if (navigator.onLine && ablyChannelRef.current) {
-        try {
-          const ts = Date.now();
-          lastBroadcastTsRef.current["stock:main"] = ts;
-          ablyChannelRef.current.publish('update', { key: "stock:main", value: nm, ts, from: clientIdRef.current });
-          lastBroadcastTsRef.current[`stock:ws:${moveTo}`] = ts;
-          ablyChannelRef.current.publish('update', { key: `stock:ws:${moveTo}`, value: ws, ts, from: clientIdRef.current });
-        } catch {}
-      }
-      
-      // Если что-то не записалось — покажем ошибку (но state уже обновлён, при синхронизации данные вернутся)
-      if(!mainResult.ok || !wsResult.ok){
-        setMoveMsg({ok:false, text:"⚠ Сбой сети. Сохранится автоматически при восстановлении"});
+      await saveStock(newStock);
+      await logStockMove(move);
+      // Проверка — если в очереди что-то есть, значит записалось не всё
+      const pending = getQueue().length;
+      if (pending > 0) {
+        setMoveMsg({ok:false, text:`⚠ В очереди ${pending} · отправится автоматически`});
         setTimeout(()=>setMoveMsg(null), 4000);
+      } else {
+        setMoveMsg({ok:true, text:`✓ Применено: ${moveQty} шт «${moveMarker}» → ${moveTo}`});
+        setTimeout(()=>setMoveMsg(null), 2500);
       }
     } catch(e) {
       console.error('[doMove] error:', e);
       setMoveMsg({ok:false, text:"⚠ Сбой. Сохранится автоматически"});
+      setTimeout(()=>setMoveMsg(null), 4000);
+    }
+  }
+
+  // ── отмена перемещения (reverse move) ──
+  // Применяет обратное перемещение и помечает оригинал как reverted
+  async function undoMove(originalMove){
+    if(!confirm(`Отменить перемещение ${originalMove.qty} шт «${originalMove.marker}»?`)) return;
+    
+    const m = originalMove.marker;
+    const qty = originalMove.qty;
+    const from = originalMove.from; // "main" или workshop
+    const to = originalMove.to;     // workshop или "main"
+    
+    // Обратное перемещение: from to
+    // Списываем с 'to', добавляем к 'from'
+    const newStock = { main: { ...stockMain }, ws: { ...stockWS } };
+    
+    if(to === "main"){
+      const avail = newStock.main[m] || 0;
+      if(avail < qty){
+        setMoveMsg({ok:false, text:`На общем складе только ${avail} шт — нельзя отменить`});
+        setTimeout(()=>setMoveMsg(null), 4000);
+        return;
+      }
+      newStock.main = { ...newStock.main, [m]: avail - qty };
+    } else {
+      const avail = newStock.ws[to]?.[m] || 0;
+      if(avail < qty){
+        setMoveMsg({ok:false, text:`На складе ${to} только ${avail} шт — нельзя отменить`});
+        setTimeout(()=>setMoveMsg(null), 4000);
+        return;
+      }
+      newStock.ws = { ...newStock.ws, [to]: { ...newStock.ws[to], [m]: avail - qty } };
+    }
+    
+    if(from === "main"){
+      newStock.main = { ...newStock.main, [m]: (newStock.main[m]||0) + qty };
+    } else {
+      newStock.ws = { ...newStock.ws, [from]: { ...newStock.ws[from], [m]: (newStock.ws[from]?.[m]||0) + qty } };
+    }
+    
+    // Помечаем оригинал как reverted
+    const newMoves = stockMoves.map(mv => mv.id === originalMove.id ? { ...mv, reverted: true } : mv);
+    setStockMoves(newMoves);
+    
+    // Атомарно сохраняем stock + обновлённый лог
+    try {
+      await saveStock(newStock);
+      await saveAndSync("stock-moves", newMoves, setStockMoves);
+      setMoveMsg({ok:true, text:`✓ Отменено: ${qty} шт «${m}» вернулись обратно`});
+      setTimeout(()=>setMoveMsg(null), 3000);
+    } catch(e) {
+      console.error('[undoMove] error:', e);
+      setMoveMsg({ok:false, text:"⚠ Сбой отмены. Попробуйте ещё раз"});
       setTimeout(()=>setMoveMsg(null), 4000);
     }
   }
@@ -2344,19 +2487,26 @@ export default function App(){
       await saveAndSync("prices", nextPrices, setPrices);
     }
 
-    // 5. Обновить склады
-    if(stockMain[oldMain] !== undefined){
+    // 5. Обновить склады (атомарно — один файл stock.json)
+    {
+      let stockChanged = false;
       const nextStockMain = {...stockMain};
-      nextStockMain[newMain] = nextStockMain[oldMain];
-      delete nextStockMain[oldMain];
-      await saveAndSync("stock:main", nextStockMain, setStockMain);
-    }
-    for(const ws of WORKSHOPS){
-      if(stockWS[ws] && stockWS[ws][oldMain] !== undefined){
-        const nextWs = {...stockWS[ws]};
-        nextWs[newMain] = nextWs[oldMain];
-        delete nextWs[oldMain];
-        await saveAndSync(`stock:ws:${ws}`, nextWs, (v)=>setStockWS(p=>({...p,[ws]:v})));
+      if(stockMain[oldMain] !== undefined){
+        nextStockMain[newMain] = nextStockMain[oldMain];
+        delete nextStockMain[oldMain];
+        stockChanged = true;
+      }
+      const nextStockWS = {...stockWS};
+      for(const ws of WORKSHOPS){
+        if(stockWS[ws] && stockWS[ws][oldMain] !== undefined){
+          nextStockWS[ws] = {...stockWS[ws]};
+          nextStockWS[ws][newMain] = nextStockWS[ws][oldMain];
+          delete nextStockWS[ws][oldMain];
+          stockChanged = true;
+        }
+      }
+      if(stockChanged){
+        await saveStock({ main: nextStockMain, ws: nextStockWS });
       }
     }
 
@@ -2424,21 +2574,26 @@ export default function App(){
       await saveAndSync("prices", nextPrices, setPrices);
     }
 
-    // 4. stock:main (общий склад)
-    if(stockMain[oldName] !== undefined){
+    // 4-5. Склады (атомарно — один файл stock.json)
+    {
+      let stockChanged = false;
       const nextStockMain = {...stockMain};
-      nextStockMain[newName] = nextStockMain[oldName];
-      delete nextStockMain[oldName];
-      await saveAndSync("stock:main", nextStockMain, setStockMain);
-    }
-
-    // 5. stock:ws:SMART и stock:ws:Бегемот
-    for(const ws of WORKSHOPS){
-      if(stockWS[ws] && stockWS[ws][oldName] !== undefined){
-        const nextWs = {...stockWS[ws]};
-        nextWs[newName] = nextWs[oldName];
-        delete nextWs[oldName];
-        await saveAndSync(`stock:ws:${ws}`, nextWs, (v)=>setStockWS(p=>({...p,[ws]:v})));
+      if(stockMain[oldName] !== undefined){
+        nextStockMain[newName] = nextStockMain[oldName];
+        delete nextStockMain[oldName];
+        stockChanged = true;
+      }
+      const nextStockWS = {...stockWS};
+      for(const ws of WORKSHOPS){
+        if(stockWS[ws] && stockWS[ws][oldName] !== undefined){
+          nextStockWS[ws] = {...stockWS[ws]};
+          nextStockWS[ws][newName] = nextStockWS[ws][oldName];
+          delete nextStockWS[ws][oldName];
+          stockChanged = true;
+        }
+      }
+      if(stockChanged){
+        await saveStock({ main: nextStockMain, ws: nextStockWS });
       }
     }
 
@@ -2591,9 +2746,12 @@ export default function App(){
                     {mNote && <div style={{fontSize:10,color:C.warn,marginTop:2,lineHeight:1.3,fontStyle:"italic"}}>💬 {mNote}</div>}
                   </div>
                   <StepperInput value={q} silentSave={async nq=>{
-                    const ns={...stockObj,[m]:nq};
-                    if(isWS){silentSaveState(`stock:ws:${workshop}`, ns, (v)=>setStockWS(p=>({...p,[workshop]:v})));}
-                    else{silentSaveState("stock:main", ns, setStockMain);}
+                    // Атомарное обновление единого stock.json
+                    if(isWS){
+                      saveStock({ main: stockMain, ws: { ...stockWS, [workshop]: { ...stockWS[workshop], [m]: nq } } });
+                    } else {
+                      saveStock({ main: { ...stockMain, [m]: nq }, ws: stockWS });
+                    }
                   }} inputStyle={{color:q===0?C.danger:C.success}}/>
                   <button onClick={()=>setNoteModal({markerName:m})} title="Комментарий"
                     style={{...s.btn(),padding:"5px 6px",fontSize:11,borderColor:mNote?C.warn+"66":C.border,color:mNote?C.warn:C.textSub}}>💬</button>
@@ -3281,7 +3439,7 @@ export default function App(){
                   <button onClick={async()=>{
                     if(!moveMarker||moveQty<=0){setMoveMsg({ok:false,text:"Заполните поля"});return;}
                     const ns={...stockMain,[moveMarker]:(stockMain[moveMarker]||0)+moveQty};
-                    await saveAndSync("stock:main", ns, setStockMain);
+                    await saveStock({ main: ns, ws: stockWS });
                     setMoveMsg({ok:true,text:`+${moveQty} шт «${moveMarker}» на склад`});
                     setMoveMarker(""); setMoveQty(1); setTimeout(()=>setMoveMsg(null),3000);
                   }} style={{...s.btn("accent"),width:"100%"}}>Добавить на общий склад</button>
@@ -3299,6 +3457,35 @@ export default function App(){
                   <button onClick={doMove} style={{...s.btn("accent"),width:"100%"}}>Переместить</button>
                 </div>
                 {moveMsg&&<div style={{textAlign:"center",marginTop:10,fontSize:13,color:moveMsg.ok?C.success:C.danger}}>{moveMsg.text}</div>}
+                
+                {/* История перемещений */}
+                {stockMoves.length > 0 && (
+                  <div style={{...s.card,marginTop:16}}>
+                    <div style={{fontSize:13,fontWeight:700,marginBottom:10,color:C.textSub}}>ИСТОРИЯ ПЕРЕМЕЩЕНИЙ</div>
+                    <div style={{maxHeight:300,overflowY:"auto"}}>
+                      {stockMoves.slice().reverse().slice(0, 50).map(mv => {
+                        const dt = new Date(mv.timestamp);
+                        const dateStr = `${String(dt.getDate()).padStart(2,'0')}.${String(dt.getMonth()+1).padStart(2,'0')} ${String(dt.getHours()).padStart(2,'0')}:${String(dt.getMinutes()).padStart(2,'0')}`;
+                        const fromLabel = mv.from === "main" ? "Общий склад" : mv.from;
+                        const toLabel = mv.to === "main" ? "Общий склад" : mv.to;
+                        return (
+                          <div key={mv.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+                            padding:"6px 0",borderBottom:`1px solid ${C.border}22`,fontSize:12}}>
+                            <div>
+                              <div style={{fontWeight:600,color:C.text}}>{mv.marker} × {mv.qty} шт</div>
+                              <div style={{color:C.textDim,fontSize:11}}>{dateStr} · {fromLabel} → {toLabel}</div>
+                            </div>
+                            {mv.reverted ? (
+                              <span style={{fontSize:10,color:C.textDim,fontStyle:"italic"}}>отменено</span>
+                            ) : (
+                              <button onClick={()=>undoMove(mv)} style={{...s.btn(),padding:"3px 8px",fontSize:10}}>↶ Отменить</button>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>
