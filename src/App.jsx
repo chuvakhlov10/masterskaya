@@ -1476,18 +1476,24 @@ export default function App(){
   const recordsRef = useRef([]);
   useEffect(() => { recordsRef.current = records; }, [records]);
   const [prices, setPrices] = useState({});
-  // Единый объект stock: { main: {...}, ws: { SMART: {...}, Бегемот: {...} } }
-  // Записывается одним файлом stock.json → любая операция атомарна
+  // ── EVENT SOURCING для склада ──
+  // stockOps — журнал всех операций (источник правды)
+  // stock — пересчитанное состояние (кеш для UI)
+  // Операции только добавляются (append-only), что исключает конфликты при merge
+  const [stockOps, setStockOps] = useState([]);
+  const stockOpsRef = useRef([]);
+  useEffect(() => { stockOpsRef.current = stockOps; }, [stockOps]);
   const [stock, setStock] = useState({ main: {}, ws: { SMART: {}, Бегемот: {} } });
-  // Совместимые геттеры для существующего кода
   const stockMain = stock.main || {};
   const stockWS = stock.ws || { SMART: {}, Бегемот: {} };
   const stockRef = useRef(stock);
   useEffect(() => { stockRef.current = stock; }, [stock]);
-  // Лог перемещений (история + отмена)
+  // Лог перемещений (для истории в UI)
   const [stockMoves, setStockMoves] = useState([]);
   const stockMovesRef = useRef([]);
   useEffect(() => { stockMovesRef.current = stockMoves; }, [stockMoves]);
+  // Конфликты, требующие решения пользователя
+  const [stockConflicts, setStockConflicts] = useState([]);
   const [stockCfg, setStockCfg] = useState({});
   const [markers, setMarkers] = useState(DEFAULT_MARKERS);
   const [aliases, setAliases] = useState({});  // {основное_имя: [альтернативные]}
@@ -1764,6 +1770,177 @@ export default function App(){
     saveAndSync("stock-moves", newMoves, setStockMoves).catch(()=>{});
   }
 
+  // ──────────────────────────────────────────────────────────────
+  // EVENT SOURCING для склада
+  // ──────────────────────────────────────────────────────────────
+  // Все изменения склада = append-only операции в stock-ops.json
+  // Типы операций:
+  //   { type: "set",    location, marker, value, ts, client, opId }
+  //   { type: "delta",  location, marker, delta, ts, client, opId }   delta может быть отрицательным
+  //   { type: "init",   location, marker, value, ts, client, opId }   стартовое значение (миграция)
+  //   { type: "move",   from, to, marker, qty, ts, client, opId }
+  //   { type: "rename", oldMarker, newMarker, ts, client, opId }
+  // location: "main" | "ws:SMART" | "ws:Бегемот"
+  //
+  // Конфликты: только set-операции могут конфликтовать (два устройства установили
+  // разные значения одновременно). move/delta/init — складываются без конфликтов.
+
+  // Пересчёт stock из журнала операций
+  function applyOpsToStock(ops) {
+    const result = { main: {}, ws: { SMART: {}, Бегемот: {} } };
+    const sortedOps = [...ops].sort((a, b) => (a.ts || 0) - (b.ts || 0));
+    
+    for (const op of sortedOps) {
+      if (op.type === "set" || op.type === "init") {
+        const [scope, ws] = parseLocation(op.location);
+        if (scope === "main") {
+          result.main[op.marker] = op.value;
+        } else {
+          result.ws[ws] = result.ws[ws] || {};
+          result.ws[ws][op.marker] = op.value;
+        }
+      } else if (op.type === "delta") {
+        const [scope, ws] = parseLocation(op.location);
+        if (scope === "main") {
+          result.main[op.marker] = Math.max((result.main[op.marker] || 0) + op.delta, 0);
+        } else {
+          result.ws[ws] = result.ws[ws] || {};
+          result.ws[ws][op.marker] = Math.max((result.ws[ws][op.marker] || 0) + op.delta, 0);
+        }
+      } else if (op.type === "move") {
+        // from → to
+        const [fScope, fWs] = parseLocation(op.from);
+        const [tScope, tWs] = parseLocation(op.to);
+        // списываем с from
+        if (fScope === "main") {
+          result.main[op.marker] = Math.max((result.main[op.marker] || 0) - op.qty, 0);
+        } else {
+          result.ws[fWs] = result.ws[fWs] || {};
+          result.ws[fWs][op.marker] = Math.max((result.ws[fWs][op.marker] || 0) - op.qty, 0);
+        }
+        // добавляем к to
+        if (tScope === "main") {
+          result.main[op.marker] = (result.main[op.marker] || 0) + op.qty;
+        } else {
+          result.ws[tWs] = result.ws[tWs] || {};
+          result.ws[tWs][op.marker] = (result.ws[tWs][op.marker] || 0) + op.qty;
+        }
+      } else if (op.type === "rename") {
+        // Перенос значений всех складов со старого имени на новое
+        if (result.main[op.oldMarker] !== undefined) {
+          result.main[op.newMarker] = result.main[op.oldMarker];
+          delete result.main[op.oldMarker];
+        }
+        for (const ws of WORKSHOPS) {
+          if (result.ws[ws] && result.ws[ws][op.oldMarker] !== undefined) {
+            result.ws[ws][op.newMarker] = result.ws[ws][op.oldMarker];
+            delete result.ws[ws][op.oldMarker];
+          }
+        }
+      }
+    }
+    return result;
+  }
+
+  function parseLocation(loc) {
+    if (loc === "main") return ["main", null];
+    if (loc.startsWith("ws:")) return ["ws", loc.slice(3)];
+    return ["main", null];
+  }
+
+  function makeOpId() {
+    return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  // Добавить операцию в журнал и пересчитать stock
+  // type: 'set' | 'delta' | 'move' | 'rename' | 'init'
+  // payload: зависит от type
+  async function appendStockOp(type, payload) {
+    const op = {
+      ...payload,
+      type,
+      ts: Date.now(),
+      client: clientIdRef.current,
+      opId: makeOpId(),
+    };
+    const newOps = [...stockOpsRef.current, op];
+    setStockOps(newOps);
+    // Пересчитываем stock
+    const newStock = applyOpsToStock(newOps);
+    setStock(newStock);
+    // Отправляем через Ably (инкрементально — только новую операцию)
+    if (navigator.onLine && ablyChannelRef.current) {
+      try {
+        ablyChannelRef.current.publish('stock-op', { op, from: clientIdRef.current });
+      } catch {}
+    }
+    // Сохраняем весь журнал (debounce)
+    if (saveTimersRef.current["stock-ops"]) clearTimeout(saveTimersRef.current["stock-ops"]);
+    return new Promise((resolve) => {
+      saveTimersRef.current["stock-ops"] = setTimeout(async () => {
+        delete saveTimersRef.current["stock-ops"];
+        const opsToSave = stockOpsRef.current;
+        const result = await sSet("stock-ops", opsToSave);
+        setPendingCount(getQueue().length);
+        resolve(result);
+      }, 500);
+    });
+  }
+
+  // Применить операцию, пришедшую с другого устройства через Ably
+  function applyRemoteStockOp(op) {
+    // Проверка дубликата по opId
+    if (stockOpsRef.current.some(o => o.opId === op.opId)) return;
+    const newOps = [...stockOpsRef.current, op];
+    setStockOps(newOps);
+    const newStock = applyOpsToStock(newOps);
+    setStock(newStock);
+    // Проверка конфликта: если у нас есть локальная set-операция с тем же marker+location
+    // и близким ts (±5 сек) — это конфликт
+    detectConflict(op);
+  }
+
+  // Обнаружение конфликтов set-операций
+  function detectConflict(newOp) {
+    if (newOp.type !== "set") return;
+    // Ищем локальные set-операции с тем же marker+location за последние 30 сек
+    const conflicting = stockOpsRef.current.find(o =>
+      o.opId !== newOp.opId &&
+      o.type === "set" &&
+      o.marker === newOp.marker &&
+      o.location === newOp.location &&
+      Math.abs((o.ts || 0) - (newOp.ts || 0)) < 30000 &&
+      o.value !== newOp.value
+    );
+    if (conflicting) {
+      setStockConflicts(prev => {
+        // Не добавляем дубликат
+        if (prev.some(c => c.local.opId === conflicting.opId && c.remote.opId === newOp.opId)) return prev;
+        return [...prev, { local: conflicting, remote: newOp }];
+      });
+    }
+  }
+
+  // Разрешение конфликта пользователем
+  async function resolveConflict(conflict, chosenValue) {
+    // Добавляем set-операцию с выбранным значением — она перекроет обе
+    await appendStockOp("set", {
+      location: conflict.local.location,
+      marker: conflict.local.marker,
+      value: chosenValue,
+    });
+    // Убираем из списка конфликтов
+    setStockConflicts(prev => prev.filter(c => !(c.local.opId === conflict.local.opId && c.remote.opId === conflict.remote.opId)));
+  }
+
+  // Сохранить stockOps в GitHub (используется при начальной загрузке и flush)
+  async function saveStockOps() {
+    if (saveTimersRef.current["stock-ops"]) clearTimeout(saveTimersRef.current["stock-ops"]);
+    const result = await sSet("stock-ops", stockOpsRef.current);
+    setPendingCount(getQueue().length);
+    return result;
+  }
+
   useEffect(() => {
     if (!authed) return;
 
@@ -1771,7 +1948,7 @@ export default function App(){
     stateSettersRef.current = {
       "records": setRecords,
       "prices": setPrices,
-      "stock": setStock,
+      "stock-ops": (ops) => { setStockOps(ops); setStock(applyOpsToStock(ops)); },
       "stock-moves": setStockMoves,
       "stock:cfg": setStockCfg,
       "custom:markers": setMarkers,
@@ -1804,18 +1981,7 @@ export default function App(){
         // Применяем value через setter
         const setter = stateSettersRef.current[key];
         if (setter) {
-          // Для stock — нормализуем структуру
-          if (key === "stock") {
-            setStock({
-              main: ensureObj(value?.main),
-              ws: {
-                SMART: ensureObj(value?.ws?.SMART),
-                Бегемот: ensureObj(value?.ws?.Бегемот),
-              }
-            });
-          } else {
-            setter(value);
-          }
+          setter(value);
         } else {
           console.warn('[ABLY] Нет setter для ключа:', key);
         }
@@ -1848,6 +2014,12 @@ export default function App(){
         const sY = window.scrollY;
         setRecords(prev => prev.filter((_, i) => i !== idx));
         setTimeout(() => window.scrollTo(0, sY), 0);
+      } else if (msg.name === 'stock-op' && msg.data && msg.data.op) {
+        // Инкрементальная синхронизация склада через event sourcing
+        const { op } = msg.data;
+        console.log('[ABLY] Stock op:', op.type, op.marker || op.oldMarker);
+        skipPollRef.current = 3;
+        applyRemoteStockOp(op);
       } else if (msg.name === 'changed') {
         // Fallback: большой payload, нужно сделать polling
         console.log('[ABLY] Signal changed для:', msg.data?.key);
@@ -1898,13 +2070,13 @@ export default function App(){
       }
       setSyncStatus("syncing");
       try {
-        const [r,p,stk,sCfg,sm2,al,nt,mvs] = await Promise.all([
+        const [r,p,ops,sCfg,sm2,al,nt,mvs] = await Promise.all([
           sGet("records"), sGet("prices"),
-          sGet("stock"), 
+          sGet("stock-ops"),
           sGet("stock:cfg"), sGet("custom:markers"), sGet("marker-aliases"), sGet("marker-notes"),
           sGet("stock-moves"),
         ]);
-        const hash = JSON.stringify({r, p, stk, sCfg, sm2, al, nt, mvs});
+        const hash = JSON.stringify({r, p, ops, sCfg, sm2, al, nt, mvs});
         if (hash === lastDataHashRef.current) {
           setSyncStatus(wsConnectedRef.current ? "ws" : "synced");
           return;
@@ -1913,15 +2085,10 @@ export default function App(){
         const sY = window.scrollY;
         if(Array.isArray(r)) setRecords(r);
         if(p && typeof p === "object" && !Array.isArray(p)) setPrices(p);
-        // stock — единый объект { main, ws }
-        if(stk && typeof stk === "object" && !Array.isArray(stk)){
-          setStock({
-            main: ensureObj(stk.main),
-            ws: {
-              SMART: ensureObj(stk.ws?.SMART),
-              Бегемот: ensureObj(stk.ws?.Бегемот),
-            }
-          });
+        // Пересчитываем stock из журнала операций
+        if(Array.isArray(ops)){
+          setStockOps(ops);
+          setStock(applyOpsToStock(ops));
         }
         if(sCfg && typeof sCfg === "object" && !Array.isArray(sCfg)) setStockCfg(sCfg);
         if(sm2 && typeof sm2 === "object" && !Array.isArray(sm2)) setMarkers(sm2);
@@ -2034,8 +2201,9 @@ export default function App(){
       setPwdLoaded(true);
 
       // Загружаем остальные данные
-      const [r,p,stk,sCfg,sm2,al,nt,sub,mvs] = await Promise.all([
+      const [r,p,ops,stk,sCfg,sm2,al,nt,sub,mvs] = await Promise.all([
         sGet("records"), sGet("prices"),
+        sGet("stock-ops"),
         sGet("stock"),
         sGet("stock:cfg"), sGet("custom:markers"), sGet("marker-aliases"), sGet("marker-notes"), sGet("subcategories"),
         sGet("stock-moves"),
@@ -2045,32 +2213,75 @@ export default function App(){
       if(Array.isArray(r)) setRecords(r);
       if(p && typeof p === "object" && !Array.isArray(p)) setPrices(p);
       
-      // Миграция: если stock.json нет, читаем старые stock:main + stock:ws:X
-      if(stk && typeof stk === "object" && !Array.isArray(stk) && stk.main){
-        setStock({
-          main: ensureObj(stk.main),
-          ws: {
-            SMART: ensureObj(stk.ws?.SMART),
-            Бегемот: ensureObj(stk.ws?.Бегемот),
-          }
-        });
+      // Миграция на event sourcing:
+      // Если stock-ops.json есть — используем его
+      // Если нет — читаем старые stock.json или stock:main + stock:ws:X
+      // и преобразуем в начальные init-операции
+      if(Array.isArray(ops) && ops.length > 0){
+        setStockOps(ops);
+        setStock(applyOpsToStock(ops));
+        console.log(`[STOCK] Загружено ${ops.length} операций`);
       } else {
-        // Старая схема — миграция
-        const [sm, sS] = await Promise.all([
-          sGet("stock:main"),
-          Promise.all(WORKSHOPS.map(w=>sGet(`stock:ws:${w}`))),
-        ]);
-        const mainObj = ensureObj(sm);
-        const wsObj = {};
-        WORKSHOPS.forEach((w,i)=>{
-          const v = sS[i];
-          wsObj[w] = (v && typeof v === "object" && !Array.isArray(v)) ? v : {};
-        });
-        const newStock = { main: mainObj, ws: wsObj };
-        setStock(newStock);
-        // Сохраняем в новом формате
-        await sSet("stock", newStock);
-        console.log('[MIGRATION] stock.json создан из старых stock:main + stock:ws:X');
+        // Миграция: читаем старые данные
+        let oldStock = null;
+        if(stk && typeof stk === "object" && stk.main){
+          oldStock = stk;
+        } else {
+          const [sm, sS] = await Promise.all([
+            sGet("stock:main"),
+            Promise.all(WORKSHOPS.map(w=>sGet(`stock:ws:${w}`))),
+          ]);
+          if(sm || sS.some(v => v)){
+            oldStock = {
+              main: ensureObj(sm),
+              ws: {}
+            };
+            WORKSHOPS.forEach((w,i)=>{
+              const v = sS[i];
+              oldStock.ws[w] = (v && typeof v === "object" && !Array.isArray(v)) ? v : {};
+            });
+          }
+        }
+        
+        if(oldStock){
+          // Создаём init-операции для каждой маркировки
+          const initOps = [];
+          const initTs = Date.now();
+          for(const [marker, value] of Object.entries(oldStock.main || {})){
+            if(value > 0){
+              initOps.push({
+                type: "init",
+                location: "main",
+                marker,
+                value,
+                ts: initTs,
+                client: "migration",
+                opId: `${initTs}-main-${marker}-${Math.random().toString(36).slice(2,6)}`,
+              });
+            }
+          }
+          for(const ws of WORKSHOPS){
+            for(const [marker, value] of Object.entries(oldStock.ws?.[ws] || {})){
+              if(value > 0){
+                initOps.push({
+                  type: "init",
+                  location: `ws:${ws}`,
+                  marker,
+                  value,
+                  ts: initTs,
+                  client: "migration",
+                  opId: `${initTs}-ws${ws}-${marker}-${Math.random().toString(36).slice(2,6)}`,
+                });
+              }
+            }
+          }
+          setStockOps(initOps);
+          setStock(applyOpsToStock(initOps));
+          await sSet("stock-ops", initOps);
+          console.log(`[MIGRATION] Создано ${initOps.length} init-операций из старого stock`);
+        } else {
+          setStock({ main: {}, ws: { SMART: {}, Бегемот: {} } });
+        }
       }
       
       if(Array.isArray(mvs)) setStockMoves(mvs);
@@ -2230,11 +2441,12 @@ export default function App(){
     // Склад: списываем через stockDelta (для refund = 0, для sale = qty или defect)
     const delta = stockDelta(rec);
     if(delta > 0){
-      const newStock = {
-        main: stockMain,
-        ws: { ...stockWS, [workshop]: { ...stockWS[workshop], [m]: Math.max((stockWS[workshop]?.[m]||0) - delta, 0) } }
-      };
-      saveStock(newStock);
+      // Списание через delta-операцию (не конфликтует с другими устройствами)
+      appendStockOp("delta", {
+        location: `ws:${workshop}`,
+        marker: m,
+        delta: -delta,
+      });
     }
 
     // Сброс формы — мгновенно, не ждём GitHub
@@ -2247,17 +2459,24 @@ export default function App(){
   // ── сохранение редактируемой записи ──
   async function handleEditSave(updated){
     const old = records[editRec.globalIdx];
-    const wsStk = {...(stockWS[updated.workshop]||{})};
 
-    // 1) Возвращаем старое списание (через stockDelta: для refund = 0, для sale = qty или defect)
+    // 1) Возвращаем старое списание (через stockDelta)
     const oldDelta = stockDelta(old);
     if(oldDelta > 0){
-      wsStk[old.marker] = (wsStk[old.marker]||0) + oldDelta;
+      appendStockOp("delta", {
+        location: `ws:${old.workshop}`,
+        marker: old.marker,
+        delta: oldDelta,
+      });
     }
     // 2) Применяем новое списание (через stockDelta)
     const newDelta = stockDelta(updated);
     if(newDelta > 0){
-      wsStk[updated.marker] = Math.max((wsStk[updated.marker]||0) - newDelta, 0);
+      appendStockOp("delta", {
+        location: `ws:${updated.workshop}`,
+        marker: updated.marker,
+        delta: -newDelta,
+      });
     }
 
     const next = records.map((r,i)=>i===editRec.globalIdx?updated:r);
@@ -2269,19 +2488,20 @@ export default function App(){
         ablyChannelRef.current.publish('record-updated', { idx: editRec.globalIdx, rec: updated, from: clientIdRef.current });
       } catch {}
     }
-    // Атомарно сохраняем склад одним файлом
-    saveStock({ main: stockMain, ws: { ...stockWS, [updated.workshop]: wsStk } });
     setEditRec(null);
   }
 
   async function handleEditDelete(gi){
     if(!confirm("Удалить эту запись?")) return;
     const old = records[gi];
-    const wsStk = {...(stockWS[old.workshop]||{})};
-    // Возвращаем списание через stockDelta (для refund = 0, для sale = qty или defect)
+    // Возвращаем списание через stockDelta
     const oldDelta = stockDelta(old);
     if(oldDelta > 0){
-      wsStk[old.marker] = (wsStk[old.marker]||0) + oldDelta;
+      appendStockOp("delta", {
+        location: `ws:${old.workshop}`,
+        marker: old.marker,
+        delta: oldDelta,
+      });
     }
     const next = records.filter((_,i)=>i!==gi);
     // Не await'им — модалка закрывается мгновенно
@@ -2292,43 +2512,34 @@ export default function App(){
         ablyChannelRef.current.publish('record-deleted', { idx: gi, from: clientIdRef.current });
       } catch {}
     }
-    // Атомарно сохраняем склад одним файлом
-    saveStock({ main: stockMain, ws: { ...stockWS, [old.workshop]: wsStk } });
     setEditRec(null);
   }
 
   // ── склад: перемещение ──
-  // АТОМАРНО: обновляем один stock.json → нет рассинхрона между складами
+  // Event Sourcing: одна move-операция = атомарная запись в журнал
+  // Конфликтов не бывает: операции складываются по timestamp
   async function doMove(){
     if(!moveMarker){setMoveMsg({ok:false,text:"Выберите маркировку"});return;}
     if(moveQty<=0){setMoveMsg({ok:false,text:"Количество > 0"});return;}
     const avail = stockMain[moveMarker]||0;
     if(avail<moveQty){setMoveMsg({ok:false,text:`На складе только ${avail} шт`});return;}
     
-    // Новый stock — один объект, запишется одним файлом
-    const newStock = {
-      main: { ...stockMain, [moveMarker]: avail - moveQty },
-      ws: { ...stockWS, [moveTo]: { ...(stockWS[moveTo]||{}), [moveMarker]: (stockWS[moveTo]?.[moveMarker]||0) + moveQty } }
-    };
-    
-    // Лог перемещения (для истории и отмены)
-    const move = {
-      marker: moveMarker,
-      qty: moveQty,
-      from: "main",
-      to: moveTo,
-      timestamp: Date.now(),
-      type: "move"
-    };
-    
     setMoveMsg({ok:true, text:`${moveQty} шт «${moveMarker}» → ${moveTo}`});
     setMoveQty(1); setMoveMarker(""); setTimeout(()=>setMoveMsg(null), 3000);
     
-    // Атомарная запись одного файла stock.json + лог
     try {
-      await saveStock(newStock);
-      await logStockMove(move);
-      // Проверка — если в очереди что-то есть, значит записалось не всё
+      // Добавляем move-операцию в журнал — она атомарно списывает с 'from' и добавляет к 'to'
+      await appendStockOp("move", {
+        from: "main",
+        to: `ws:${moveTo}`,
+        marker: moveMarker,
+        qty: moveQty,
+      });
+      // Лог для UI (история + отмена)
+      await logStockMove({
+        marker: moveMarker, qty: moveQty, from: "main", to: moveTo,
+        timestamp: Date.now(), type: "move"
+      });
       const pending = getQueue().length;
       if (pending > 0) {
         setMoveMsg({ok:false, text:`⚠ В очереди ${pending} · отправится автоматически`});
@@ -2344,51 +2555,37 @@ export default function App(){
     }
   }
 
-  // ── отмена перемещения (reverse move) ──
-  // Применяет обратное перемещение и помечает оригинал как reverted
+  // ── отмена перемещения ──
+  // Применяет обратное move-операцию и помечает оригинал как reverted
   async function undoMove(originalMove){
     if(!confirm(`Отменить перемещение ${originalMove.qty} шт «${originalMove.marker}»?`)) return;
-    
     const m = originalMove.marker;
     const qty = originalMove.qty;
-    const from = originalMove.from; // "main" или workshop
-    const to = originalMove.to;     // workshop или "main"
+    const fromLoc = originalMove.from === "main" ? "main" : `ws:${originalMove.from}`;
+    const toLoc = originalMove.to === "main" ? "main" : `ws:${originalMove.to}`;
     
-    // Обратное перемещение: from to
-    // Списываем с 'to', добавляем к 'from'
-    const newStock = { main: { ...stockMain }, ws: { ...stockWS } };
-    
-    if(to === "main"){
-      const avail = newStock.main[m] || 0;
-      if(avail < qty){
-        setMoveMsg({ok:false, text:`На общем складе только ${avail} шт — нельзя отменить`});
-        setTimeout(()=>setMoveMsg(null), 4000);
-        return;
-      }
-      newStock.main = { ...newStock.main, [m]: avail - qty };
-    } else {
-      const avail = newStock.ws[to]?.[m] || 0;
-      if(avail < qty){
-        setMoveMsg({ok:false, text:`На складе ${to} только ${avail} шт — нельзя отменить`});
-        setTimeout(()=>setMoveMsg(null), 4000);
-        return;
-      }
-      newStock.ws = { ...newStock.ws, [to]: { ...newStock.ws[to], [m]: avail - qty } };
-    }
-    
-    if(from === "main"){
-      newStock.main = { ...newStock.main, [m]: (newStock.main[m]||0) + qty };
-    } else {
-      newStock.ws = { ...newStock.ws, [from]: { ...newStock.ws[from], [m]: (newStock.ws[from]?.[m]||0) + qty } };
+    // Проверяем наличие на 'to' (откуда будем списывать при отмене)
+    const availOnTo = originalMove.to === "main" 
+      ? (stockMain[m]||0)
+      : (stockWS[originalMove.to]?.[m]||0);
+    if(availOnTo < qty){
+      setMoveMsg({ok:false, text:`На складе ${originalMove.to} только ${availOnTo} шт — нельзя отменить`});
+      setTimeout(()=>setMoveMsg(null), 4000);
+      return;
     }
     
     // Помечаем оригинал как reverted
     const newMoves = stockMoves.map(mv => mv.id === originalMove.id ? { ...mv, reverted: true } : mv);
     setStockMoves(newMoves);
     
-    // Атомарно сохраняем stock + обновлённый лог
     try {
-      await saveStock(newStock);
+      // Обратная move-операция
+      await appendStockOp("move", {
+        from: toLoc,
+        to: fromLoc,
+        marker: m,
+        qty: qty,
+      });
       await saveAndSync("stock-moves", newMoves, setStockMoves);
       setMoveMsg({ok:true, text:`✓ Отменено: ${qty} шт «${m}» вернулись обратно`});
       setTimeout(()=>setMoveMsg(null), 3000);
@@ -2487,26 +2684,15 @@ export default function App(){
       await saveAndSync("prices", nextPrices, setPrices);
     }
 
-    // 5. Обновить склады (атомарно — один файл stock.json)
+    // 5. Обновить склады через rename-операцию (event sourcing)
     {
-      let stockChanged = false;
-      const nextStockMain = {...stockMain};
-      if(stockMain[oldMain] !== undefined){
-        nextStockMain[newMain] = nextStockMain[oldMain];
-        delete nextStockMain[oldMain];
-        stockChanged = true;
-      }
-      const nextStockWS = {...stockWS};
-      for(const ws of WORKSHOPS){
-        if(stockWS[ws] && stockWS[ws][oldMain] !== undefined){
-          nextStockWS[ws] = {...stockWS[ws]};
-          nextStockWS[ws][newMain] = nextStockWS[ws][oldMain];
-          delete nextStockWS[ws][oldMain];
-          stockChanged = true;
-        }
-      }
-      if(stockChanged){
-        await saveStock({ main: nextStockMain, ws: nextStockWS });
+      const hasInMain = stockMain[oldMain] !== undefined;
+      const hasInWS = WORKSHOPS.some(ws => stockWS[ws] && stockWS[ws][oldMain] !== undefined);
+      if(hasInMain || hasInWS){
+        await appendStockOp("rename", {
+          oldMarker: oldMain,
+          newMarker: newMain,
+        });
       }
     }
 
@@ -2574,26 +2760,15 @@ export default function App(){
       await saveAndSync("prices", nextPrices, setPrices);
     }
 
-    // 4-5. Склады (атомарно — один файл stock.json)
+    // 4-5. Склады через rename-операцию (event sourcing)
     {
-      let stockChanged = false;
-      const nextStockMain = {...stockMain};
-      if(stockMain[oldName] !== undefined){
-        nextStockMain[newName] = nextStockMain[oldName];
-        delete nextStockMain[oldName];
-        stockChanged = true;
-      }
-      const nextStockWS = {...stockWS};
-      for(const ws of WORKSHOPS){
-        if(stockWS[ws] && stockWS[ws][oldName] !== undefined){
-          nextStockWS[ws] = {...stockWS[ws]};
-          nextStockWS[ws][newName] = nextStockWS[ws][oldName];
-          delete nextStockWS[ws][oldName];
-          stockChanged = true;
-        }
-      }
-      if(stockChanged){
-        await saveStock({ main: nextStockMain, ws: nextStockWS });
+      const hasInMain = stockMain[oldName] !== undefined;
+      const hasInWS = WORKSHOPS.some(ws => stockWS[ws] && stockWS[ws][oldName] !== undefined);
+      if(hasInMain || hasInWS){
+        await appendStockOp("rename", {
+          oldMarker: oldName,
+          newMarker: newName,
+        });
       }
     }
 
@@ -2746,11 +2921,19 @@ export default function App(){
                     {mNote && <div style={{fontSize:10,color:C.warn,marginTop:2,lineHeight:1.3,fontStyle:"italic"}}>💬 {mNote}</div>}
                   </div>
                   <StepperInput value={q} silentSave={async nq=>{
-                    // Атомарное обновление единого stock.json
+                    // Точное значение → set-операция (может конфликтовать при одновременном вводе на двух устройствах)
                     if(isWS){
-                      saveStock({ main: stockMain, ws: { ...stockWS, [workshop]: { ...stockWS[workshop], [m]: nq } } });
+                      appendStockOp("set", {
+                        location: `ws:${workshop}`,
+                        marker: m,
+                        value: nq,
+                      });
                     } else {
-                      saveStock({ main: { ...stockMain, [m]: nq }, ws: stockWS });
+                      appendStockOp("set", {
+                        location: "main",
+                        marker: m,
+                        value: nq,
+                      });
                     }
                   }} inputStyle={{color:q===0?C.danger:C.success}}/>
                   <button onClick={()=>setNoteModal({markerName:m})} title="Комментарий"
@@ -3031,6 +3214,52 @@ export default function App(){
 
   return (
     <div style={s.app}>
+      {/* Модалка разрешения конфликтов склада */}
+      {stockConflicts.length > 0 && (
+        <div style={{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,.5)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+          <div style={{background:C.bgCard,borderRadius:12,padding:20,maxWidth:420,width:"100%",boxShadow:"0 8px 32px rgba(0,0,0,.3)"}}>
+            <div style={{fontSize:16,fontWeight:800,color:C.danger,marginBottom:12}}>⚠ Конфликт склада</div>
+            {stockConflicts.map((conf, i) => {
+              const localDate = new Date(conf.local.ts);
+              const remoteDate = new Date(conf.remote.ts);
+              const locLabel = conf.local.location === "main" ? "Общий склад" : `Склад ${conf.local.location.slice(3)}`;
+              return (
+                <div key={i} style={{...s.card,marginBottom:12,padding:14}}>
+                  <div style={{fontSize:13,fontWeight:700,marginBottom:8}}>
+                    «{conf.local.marker}» — {locLabel}
+                  </div>
+                  <div style={{display:"flex",gap:8,marginBottom:8}}>
+                    <button onClick={()=>resolveConflict(conf, conf.local.value)}
+                      style={{...s.btn(),flex:1,padding:"10px",fontSize:13,fontWeight:700,borderColor:C.brand+"66"}}>
+                      Здесь: {conf.local.value} шт<br/><span style={{fontSize:10,color:C.textDim}}>{localDate.toLocaleTimeString('ru-RU', {hour:'2-digit',minute:'2-digit'})}</span>
+                    </button>
+                    <button onClick={()=>resolveConflict(conf, conf.remote.value)}
+                      style={{...s.btn(),flex:1,padding:"10px",fontSize:13,fontWeight:700,borderColor:C.brand+"66"}}>
+                      Там: {conf.remote.value} шт<br/><span style={{fontSize:10,color:C.textDim}}>{remoteDate.toLocaleTimeString('ru-RU', {hour:'2-digit',minute:'2-digit'})}</span>
+                    </button>
+                  </div>
+                  <input
+                    type="number"
+                    placeholder="Или введите своё значение"
+                    onKeyDown={async (e) => {
+                      if(e.key === "Enter"){
+                        const v = parseInt(e.target.value, 10);
+                        if(!isNaN(v) && v >= 0){
+                          await resolveConflict(conf, v);
+                        }
+                      }
+                    }}
+                    style={{...s.input,fontSize:13}}
+                  />
+                </div>
+              );
+            })}
+            <div style={{fontSize:11,color:C.textDim,textAlign:"center"}}>
+              Выберите, какое значение применить. Конфликт возник из-за одновременного ввода на двух устройствах.
+            </div>
+          </div>
+        </div>
+      )}
       {editRec&&<EditModal record={editRec.record} idx={editRec.globalIdx} markers={safeMarkers}
         onSave={handleEditSave} onDelete={handleEditDelete} onClose={()=>setEditRec(null)}/>}
       {pwdModalOpen&&<PasswordModal workshop={workshop}
@@ -3438,8 +3667,12 @@ export default function App(){
                   <StepperInput value={moveQty} onChange={setMoveQty} min={1} style={{marginBottom:10}}/>
                   <button onClick={async()=>{
                     if(!moveMarker||moveQty<=0){setMoveMsg({ok:false,text:"Заполните поля"});return;}
-                    const ns={...stockMain,[moveMarker]:(stockMain[moveMarker]||0)+moveQty};
-                    await saveStock({ main: ns, ws: stockWS });
+                    // Поступление на склад = delta (никаких конфликтов)
+                    await appendStockOp("delta", {
+                      location: "main",
+                      marker: moveMarker,
+                      delta: moveQty,
+                    });
                     setMoveMsg({ok:true,text:`+${moveQty} шт «${moveMarker}» на склад`});
                     setMoveMarker(""); setMoveQty(1); setTimeout(()=>setMoveMsg(null),3000);
                   }} style={{...s.btn("accent"),width:"100%"}}>Добавить на общий склад</button>
