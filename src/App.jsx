@@ -1961,6 +1961,8 @@ export default function App(){
   // которые мы должны гарантированно доставить на сервер.
   // После успешной записи (или merge) список чистится.
   const unsyncedOpsRef = useRef(new Set()); // Set opId которые ещё не подтверждены на сервере
+  const isSyncingOpsRef = useRef(false); // флаг: идёт ли сейчас синхронизация stock-ops
+  const lastSyncAttemptRef = useRef(0); // timestamp последней попытки (для throttle)
   async function appendStockOp(type, payload) {
     const op = {
       ...payload,
@@ -1987,67 +1989,91 @@ export default function App(){
     return new Promise((resolve) => {
       saveTimersRef.current["stock-ops"] = setTimeout(async () => {
         delete saveTimersRef.current["stock-ops"];
-        // Перед записью — перечитываем сервер, чтобы получить все операции других устройств
-        // Это гарантирует что наша запись будет включать все актуальные данные
-        let opsToSave = stockOpsRef.current;
-        try {
-          const remoteOps = await dbGet("stock-ops");
-          if (Array.isArray(remoteOps)) {
-            // Merge: remote + локальные (включая наши несинхронизированные)
-            const localIds = new Set(opsToSave.map(o => o.opId));
-            const merged = [...remoteOps];
-            for (const op of opsToSave) {
-              if (!remoteOps.some(r => r.opId === op.opId)) {
-                merged.push(op);
-              }
+        await syncStockOps();
+        resolve();
+      }, 500);
+    });
+  }
+
+  // Синхронизация stock-ops с сервером: pre-write merge → write → post-write verify
+  // Защита от параллельных вызовов и throttle (не чаще раза в 2 сек)
+  async function syncStockOps() {
+    // Защита от параллельных вызовов
+    if (isSyncingOpsRef.current) {
+      console.log('[syncStockOps] уже идёт, пропускаем');
+      return;
+    }
+    // Throttle: не чаще раза в 2 секунды
+    const now = Date.now();
+    if (now - lastSyncAttemptRef.current < 2000) {
+      console.log('[syncStockOps] throttle, пропускаем');
+      return;
+    }
+    lastSyncAttemptRef.current = now;
+    isSyncingOpsRef.current = true;
+    
+    try {
+      // Перед записью — перечитываем сервер, чтобы получить все операции других устройств
+      let opsToSave = stockOpsRef.current;
+      try {
+        const remoteOps = await dbGet("stock-ops");
+        if (Array.isArray(remoteOps)) {
+          // Merge: remote + локальные (включая наши несинхронизированные)
+          const merged = [...remoteOps];
+          for (const op of opsToSave) {
+            if (!remoteOps.some(r => r.opId === op.opId)) {
+              merged.push(op);
             }
-            if (merged.length !== opsToSave.length) {
-              console.log(`[appendStockOp] Pre-write merge: ${opsToSave.length} → ${merged.length}`);
-              opsToSave = merged;
-              setStockOps(merged);
-              setStock(applyOpsToStock(merged));
+          }
+          if (merged.length !== opsToSave.length) {
+            console.log(`[syncStockOps] Pre-write merge: ${opsToSave.length} → ${merged.length}`);
+            opsToSave = merged;
+            setStockOps(merged);
+            setStock(applyOpsToStock(merged));
+          }
+        }
+      } catch (e) {
+        console.warn('[syncStockOps] Pre-read failed:', e.message);
+      }
+      
+      const result = await sSet("stock-ops", opsToSave);
+      setPendingCount(getQueue().length);
+      
+      // После записи — проверяем, все ли наши операции дошли
+      // НО только если нет активной параллельной записи (иначе снова 409 шторм)
+      if (result && result.ok && unsyncedOpsRef.current.size > 0) {
+        try {
+          const finalOps = await dbGet("stock-ops");
+          if (Array.isArray(finalOps)) {
+            const serverIds = new Set(finalOps.map(o => o.opId));
+            const stillMissing = [...unsyncedOpsRef.current].filter(id => !serverIds.has(id));
+            if (stillMissing.length === 0) {
+              // Все операции дошли — обновляем state и чистим unsynced
+              unsyncedOpsRef.current.clear();
+              setStockOps(finalOps);
+              setStock(applyOpsToStock(finalOps));
+              console.log(`[syncStockOps] All ops synced (${finalOps.length} total)`);
+            } else if (stillMissing.length < unsyncedOpsRef.current.size) {
+              // Часть дошла — убираем их из unsynced, остальное доберём следующим циклом
+              for (const id of [...unsyncedOpsRef.current]) {
+                if (serverIds.has(id)) unsyncedOpsRef.current.delete(id);
+              }
+              console.log(`[syncStockOps] Partial sync: ${unsyncedOpsRef.current.size} still missing, waiting for next cycle`);
+              // Запланируем retry через 5 секунд (не немедленно!)
+              setTimeout(() => { syncStockOps(); }, 5000);
+            } else {
+              // Ничего не дошло — возможно проблема с сетью, подождём подольше
+              console.warn(`[syncStockOps] ${stillMissing.length} ops still missing, will retry in 10s`);
+              setTimeout(() => { syncStockOps(); }, 10000);
             }
           }
         } catch (e) {
-          console.warn('[appendStockOp] Pre-read failed:', e.message);
+          console.warn('[syncStockOps] Post-write verify failed:', e.message);
         }
-        const result = await sSet("stock-ops", opsToSave);
-        setPendingCount(getQueue().length);
-        // После записи — проверяем, все ли наши операции дошли
-        // Перечитываем сервер и убеждаемся, что все opId из unsyncedOpsRef там есть
-        if (result && (result.ok || result.queued)) {
-          try {
-            const finalOps = await dbGet("stock-ops");
-            if (Array.isArray(finalOps)) {
-              const serverIds = new Set(finalOps.map(o => o.opId));
-              const stillMissing = [...unsyncedOpsRef.current].filter(id => !serverIds.has(id));
-              if (stillMissing.length === 0) {
-                // Все операции дошли — обновляем state и чистим unsynced
-                unsyncedOpsRef.current.clear();
-                setStockOps(finalOps);
-                setStock(applyOpsToStock(finalOps));
-                console.log(`[appendStockOp] All ops synced (${finalOps.length} total)`);
-              } else {
-                console.warn(`[appendStockOp] ${stillMissing.length} ops still missing on server, retrying...`);
-                // Принудительно добавляем недостающие операции и записываем снова
-                const retryOps = [...finalOps];
-                for (const op of opsToSave) {
-                  if (stillMissing.includes(op.opId) && !retryOps.some(r => r.opId === op.opId)) {
-                    retryOps.push(op);
-                  }
-                }
-                setStockOps(retryOps);
-                setStock(applyOpsToStock(retryOps));
-                await sSet("stock-ops", retryOps);
-              }
-            }
-          } catch (e) {
-            console.warn('[appendStockOp] Post-write verify failed:', e.message);
-          }
-        }
-        resolve(result);
-      }, 500);
-    });
+      }
+    } finally {
+      isSyncingOpsRef.current = false;
+    }
   }
 
   // Применить операцию, пришедшую с другого устройства через Ably
