@@ -1963,6 +1963,7 @@ export default function App(){
   const unsyncedOpsRef = useRef(new Set()); // Set opId которые ещё не подтверждены на сервере
   const isSyncingOpsRef = useRef(false); // флаг: идёт ли сейчас синхронизация stock-ops
   const lastSyncAttemptRef = useRef(0); // timestamp последней попытки (для throttle)
+  const isFlushingRef = useRef(false); // флаг: идёт ли сейчас flushQueue
   async function appendStockOp(type, payload) {
     const op = {
       ...payload,
@@ -2280,7 +2281,6 @@ export default function App(){
     doPollRef.current = poll;
 
     // ── flushQueue: отправляет накопленные в офлайне изменения на GitHub ──
-    const isFlushingRef = useRef(false);
     const flushQueue = async () => {
       // Защита от параллельных вызовов
       if (isFlushingRef.current) {
