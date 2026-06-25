@@ -151,38 +151,51 @@ export async function dbSet(key, value, mergeFn) {
       return { ok: true };
     } catch (e) {
       if (e.status === 409 || e.status === 422) {
-        // Conflict — SHA устарел. Перечитаем с сервера и при возможности смёржим
+        // Conflict — SHA устарел. Несколько retry с возрастающей задержкой.
+        // Важно: при одновременной записи двух устройств один retry не помогает —
+        // нужно несколько попыток с разной задержкой чтобы разойтись.
         delete shaCache[key];
-        console.warn(`[dbSet] conflict on "${key}", waiting 500ms before retry...`);
-        // Задержка перед retry чтобы избежать шторма 409 при одновременной записи двух устройств
-        await new Promise(r => setTimeout(r, 500));
-        try {
-          const path = `${DATA_PREFIX}${keyToFileName(key)}.json`;
-          const existing = await ghRequest("GET", path);
-          let finalValue = value;
-          if (mergeFn && existing && existing.content) {
-            try {
-              const remoteValue = JSON.parse(decodeB64(existing.content));
-              finalValue = mergeFn(remoteValue, value);
-              console.log(`[dbSet] merged "${key}": remote=${Array.isArray(remoteValue) ? remoteValue.length : Object.keys(remoteValue).length} local=${Array.isArray(value) ? value.length : Object.keys(value).length} merged=${Array.isArray(finalValue) ? finalValue.length : Object.keys(finalValue).length}`);
-            } catch (mergeErr) {
-              console.warn(`[dbSet] merge failed for "${key}":`, mergeErr.message);
+        const maxRetries = 3;
+        const delays = [500, 1500, 3000]; // возрастающие задержки между попытками
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+          console.warn(`[dbSet] conflict on "${key}", retry ${attempt}/${maxRetries} after ${delays[attempt-1]}ms`);
+          await new Promise(r => setTimeout(r, delays[attempt-1]));
+          try {
+            const path = `${DATA_PREFIX}${keyToFileName(key)}.json`;
+            const existing = await ghRequest("GET", path);
+            let finalValue = value;
+            if (mergeFn && existing && existing.content) {
+              try {
+                const remoteValue = JSON.parse(decodeB64(existing.content));
+                finalValue = mergeFn(remoteValue, value);
+                console.log(`[dbSet] merged "${key}" (attempt ${attempt}): remote=${Array.isArray(remoteValue) ? remoteValue.length : Object.keys(remoteValue).length} local=${Array.isArray(value) ? value.length : Object.keys(value).length} merged=${Array.isArray(finalValue) ? finalValue.length : Object.keys(finalValue).length}`);
+              } catch (mergeErr) {
+                console.warn(`[dbSet] merge failed for "${key}":`, mergeErr.message);
+              }
             }
+            const body = {
+              message: `update ${key} (retry ${attempt})`,
+              content: encodeB64(JSON.stringify(finalValue)),
+            };
+            if (existing && existing.sha) body.sha = existing.sha;
+            const result = await ghRequest("PUT", path, body);
+            if (result && result.content && result.content.sha) {
+              shaCache[key] = result.content.sha;
+            }
+            return { ok: true, merged: mergeFn ? true : false };
+          } catch (e2) {
+            if (e2.status === 409 || e2.status === 422) {
+              // Конфликт снова — пробуем ещё раз
+              delete shaCache[key];
+              if (attempt < maxRetries) continue;
+              console.error(`[dbSet] all retries failed for "${key}"`);
+              return { ok: false, error: e2.message };
+            }
+            console.error(`[dbSet] retry ${attempt} failed for "${key}":`, e2.message);
+            return { ok: false, error: e2.message };
           }
-          const body = {
-            message: `update ${key} (retry)`,
-            content: encodeB64(JSON.stringify(finalValue)),
-          };
-          if (existing && existing.sha) body.sha = existing.sha;
-          const result = await ghRequest("PUT", path, body);
-          if (result && result.content && result.content.sha) {
-            shaCache[key] = result.content.sha;
-          }
-          return { ok: true, merged: mergeFn ? true : false };
-        } catch (e2) {
-          console.error(`[dbSet] retry failed for "${key}":`, e2.message);
-          return { ok: false, error: e2.message };
         }
+        return { ok: false, error: "max retries exceeded" };
       }
       console.error(`[dbSet] "${key}":`, e.message);
       return { ok: false, error: e.message };
