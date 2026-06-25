@@ -151,15 +151,17 @@ export async function dbSet(key, value, mergeFn) {
       return { ok: true };
     } catch (e) {
       if (e.status === 409 || e.status === 422) {
-        // Conflict — SHA устарел. Несколько retry с возрастающей задержкой.
-        // Важно: при одновременной записи двух устройств один retry не помогает —
-        // нужно несколько попыток с разной задержкой чтобы разойтись.
+        // Conflict — SHA устарел. Несколько retry с возрастающей задержкой + jitter.
+        // Jitter (случайность) КРИТИЧЕН: без него два устройства retry-ят одновременно
+        // и снова конфликтуют. С jitter они разойдутся.
         delete shaCache[key];
-        const maxRetries = 3;
-        const delays = [500, 1500, 3000]; // возрастающие задержки между попытками
+        const maxRetries = 5;
+        const baseDelays = [500, 1500, 3000, 5000, 8000];
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
-          console.warn(`[dbSet] conflict on "${key}", retry ${attempt}/${maxRetries} after ${delays[attempt-1]}ms`);
-          await new Promise(r => setTimeout(r, delays[attempt-1]));
+          const jitter = Math.random() * 1000; // 0-1000ms случайности
+          const delay = baseDelays[attempt-1] + jitter;
+          console.warn(`[dbSet] conflict on "${key}", retry ${attempt}/${maxRetries} after ${Math.round(delay)}ms`);
+          await new Promise(r => setTimeout(r, delay));
           try {
             const path = `${DATA_PREFIX}${keyToFileName(key)}.json`;
             const existing = await ghRequest("GET", path);
@@ -185,10 +187,10 @@ export async function dbSet(key, value, mergeFn) {
             return { ok: true, merged: mergeFn ? true : false };
           } catch (e2) {
             if (e2.status === 409 || e2.status === 422) {
-              // Конфликт снова — пробуем ещё раз
+              // Конфликт снова — пробуем ещё раз с большей задержкой
               delete shaCache[key];
               if (attempt < maxRetries) continue;
-              console.error(`[dbSet] all retries failed for "${key}"`);
+              console.error(`[dbSet] all ${maxRetries} retries failed for "${key}"`);
               return { ok: false, error: e2.message };
             }
             console.error(`[dbSet] retry ${attempt} failed for "${key}":`, e2.message);

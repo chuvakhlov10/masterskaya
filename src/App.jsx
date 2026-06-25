@@ -1998,7 +1998,7 @@ export default function App(){
 
   // Синхронизация stock-ops с сервером: write → post-write verify
   // Защита от параллельных вызовов и throttle (не чаще раза в 5 сек)
-  // При 409 conflict — mergeFn в dbSet мёржит remote+local, ретраит 1 раз
+  // При 409 conflict — mergeFn в dbSet мёржит remote+local, ретраит до 5 раз с jitter
   // Если всё равно не получилось — операция остаётся в unsyncedOpsRef, попробуем в следующий цикл
   async function syncStockOps() {
     // Защита от параллельных вызовов
@@ -2006,13 +2006,14 @@ export default function App(){
       console.log('[syncStockOps] уже идёт, пропускаем');
       return;
     }
-    // Throttle: не чаще раза в 5 секунд (увеличили с 2 до 5)
+    // Throttle: не чаще раза в 5 секунд
     const now = Date.now();
     if (now - lastSyncAttemptRef.current < 5000) {
       console.log('[syncStockOps] throttle, пропускаем');
-      // Но если есть unsynced ops — запланируем retry
+      // Но если есть unsynced ops — запланируем retry с jitter
       if (unsyncedOpsRef.current.size > 0) {
-        setTimeout(() => { syncStockOps(); }, 5000);
+        const jitter = 3000 + Math.random() * 4000; // 3-7 сек
+        setTimeout(() => { syncStockOps(); }, jitter);
       }
       return;
     }
@@ -2041,18 +2042,20 @@ export default function App(){
               setStock(applyOpsToStock(finalOps));
               console.log(`[syncStockOps] All ops synced (${finalOps.length} total)`);
             } else {
-              // Часть не дошла — retry через 15 секунд (не немедленно!)
-              console.log(`[syncStockOps] ${unsyncedOpsRef.current.size} ops still missing, retry in 15s`);
-              setTimeout(() => { syncStockOps(); }, 15000);
+              // Часть не дошла — retry с jitter (10-20 сек)
+              const jitter = 10000 + Math.random() * 10000;
+              console.log(`[syncStockOps] ${unsyncedOpsRef.current.size} ops still missing, retry in ${Math.round(jitter/1000)}s`);
+              setTimeout(() => { syncStockOps(); }, jitter);
             }
           }
         } catch (e) {
           console.warn('[syncStockOps] Post-write verify failed:', e.message);
         }
       } else if (result && !result.ok) {
-        // Запись не прошла — retry через 15 секунд
-        console.warn(`[syncStockOps] Write failed, retry in 15s`);
-        setTimeout(() => { syncStockOps(); }, 15000);
+        // Запись не прошла — retry с jitter (10-20 сек)
+        const jitter = 10000 + Math.random() * 10000;
+        console.warn(`[syncStockOps] Write failed, retry in ${Math.round(jitter/1000)}s`);
+        setTimeout(() => { syncStockOps(); }, jitter);
       }
     } finally {
       isSyncingOpsRef.current = false;
