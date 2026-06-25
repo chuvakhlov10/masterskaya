@@ -2223,6 +2223,12 @@ export default function App(){
       const q = getQueue();
       if (q.length === 0) {
         setPendingCount(0);
+        // Даже если очередь пуста — перечитываем данные с сервера
+        // (телефон мог пропустить изменения пока был офлайн)
+        if (doPollRef.current) {
+          console.log('[OFFLINE] Очередь пуста, перечитываем данные с сервера');
+          doPollRef.current();
+        }
         return;
       }
       console.log(`[OFFLINE] Отправляем очередь: ${q.length} элементов`);
@@ -2269,6 +2275,10 @@ export default function App(){
     const handleOnline = () => {
       console.log('[OFFLINE] Сеть восстановлена');
       setIsOnline(true);
+      // Сбрасываем хэш чтобы polling гарантированно применил свежие данные
+      // (даже если серверные данные совпадают с нашими устаревшими по структурам,
+      // но отличаются по содержимому — это заставит poll перечитать и обновить state)
+      lastDataHashRef.current = "";
       // Небольшая задержка чтобы соединение установилось
       setTimeout(() => flushQueueRef.current && flushQueueRef.current(), 1000);
     };
