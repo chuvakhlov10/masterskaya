@@ -1545,6 +1545,8 @@ export default function App(){
   const [authed, setAuthed] = useState(false);
   const [passwordInput, setPasswordInput] = useState("");
   const [passwords, setPasswords] = useState({});      // хэши паролей
+  const passwordsRef = useRef({});
+  useEffect(() => { passwordsRef.current = passwords; }, [passwords]);
   const [authError, setAuthError] = useState("");
   const [pwdLoaded, setPwdLoaded] = useState(false);
 
@@ -1577,7 +1579,14 @@ export default function App(){
   const stockMovesRef = useRef([]);
   useEffect(() => { stockMovesRef.current = stockMoves; }, [stockMoves]);
   // Конфликты, требующие решения пользователя
-  const [stockConflicts, setStockConflicts] = useState([]);
+  // Конфликты склада — персистим в localStorage (M6 fix)
+  const STOCK_CONFLICTS_KEY = "stock_conflicts";
+  const [stockConflicts, setStockConflicts] = useState(() => {
+    try { return JSON.parse(localStorage.getItem(STOCK_CONFLICTS_KEY) || "[]"); } catch { return []; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(STOCK_CONFLICTS_KEY, JSON.stringify(stockConflicts)); } catch {}
+  }, [stockConflicts]);
   const [stockCfg, setStockCfg] = useState({});
   const stockCfgRef = useRef({});
   useEffect(() => { stockCfgRef.current = stockCfg; }, [stockCfg]);
@@ -1819,6 +1828,7 @@ export default function App(){
           "stock:cfg": stockCfgRef,
           "subcategories": subcategoriesRef,
           "stock-moves": stockMovesRef,
+          "passwords": passwordsRef,
           // stock-ops записывается через appendStockOp, не через saveAndSync
         };
         const ref = refMap[key];
@@ -1994,6 +2004,8 @@ export default function App(){
   const unsyncedOpsRef = useRef(new Set()); // Set opId которые ещё не подтверждены на сервере
   const isSyncingOpsRef = useRef(false); // флаг: идёт ли сейчас синхронизация stock-ops
   const lastSyncAttemptRef = useRef(0); // timestamp последней попытки (для throttle)
+  const syncRetriesRef = useRef(0); // количество retry подряд (H3 fix)
+  const MAX_SYNC_RETRIES = 20; // максимум retry, потом сдаёмся
   const isFlushingRef = useRef(false); // флаг: идёт ли сейчас flushQueue
   async function appendStockOp(type, payload) {
     const op = {
@@ -2042,6 +2054,11 @@ export default function App(){
       console.log('[syncStockOps] уже идёт, пропускаем');
       return;
     }
+    // H3: max retries — после 20 попыток сдаёмся (не бесконечный цикл)
+    if (syncRetriesRef.current >= MAX_SYNC_RETRIES) {
+      console.warn(`[syncStockOps] Достигнут максимум retry (${MAX_SYNC_RETRIES}), останавливаемся. Unsynchronized ops: ${unsyncedOpsRef.current.size}`);
+      return;
+    }
     // Throttle: не чаще раза в 5 секунд
     const now = Date.now();
     if (now - lastSyncAttemptRef.current < 5000) {
@@ -2073,24 +2090,30 @@ export default function App(){
             }
             
             if (unsyncedOpsRef.current.size === 0) {
-              // Все операции дошли — обновляем state
+              // Все операции дошли — обновляем state, сбрасываем retry counter
+              syncRetriesRef.current = 0;
               setStockOps(finalOps);
               setStock(applyOpsToStock(finalOps));
               console.log(`[syncStockOps] All ops synced (${finalOps.length} total)`);
             } else {
               // Часть не дошла — retry с jitter (10-20 сек)
+              syncRetriesRef.current++;
               const jitter = 10000 + Math.random() * 10000;
-              console.log(`[syncStockOps] ${unsyncedOpsRef.current.size} ops still missing, retry in ${Math.round(jitter/1000)}s`);
+              console.log(`[syncStockOps] ${unsyncedOpsRef.current.size} ops still missing (retry ${syncRetriesRef.current}/${MAX_SYNC_RETRIES}), retry in ${Math.round(jitter/1000)}s`);
               setTimeout(() => { syncStockOps(); }, jitter);
             }
           }
         } catch (e) {
           console.warn('[syncStockOps] Post-write verify failed:', e.message);
         }
+      } else if (result && result.ok) {
+        // Успешно и нет unsynced ops — сбрасываем counter
+        syncRetriesRef.current = 0;
       } else if (result && !result.ok) {
         // Запись не прошла — retry с jitter (10-20 сек)
+        syncRetriesRef.current++;
         const jitter = 10000 + Math.random() * 10000;
-        console.warn(`[syncStockOps] Write failed, retry in ${Math.round(jitter/1000)}s`);
+        console.warn(`[syncStockOps] Write failed (retry ${syncRetriesRef.current}/${MAX_SYNC_RETRIES}), retry in ${Math.round(jitter/1000)}s`);
         setTimeout(() => { syncStockOps(); }, jitter);
       }
     } finally {

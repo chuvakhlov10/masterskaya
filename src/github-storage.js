@@ -243,38 +243,64 @@ export async function photoGet(marker) {
 }
 
 export async function photoSet(marker, base64data) {
-  try {
-    const path = `${PHOTO_PREFIX}${marker}.txt`;
-    const body = {
-      message: `photo: ${marker}`,
-      content: encodeB64(base64data),
-    };
-    // Если уже есть — получить SHA
+  const path = `${PHOTO_PREFIX}${marker}.txt`;
+  // M1: retry до 3 раз с jitter — иначе теряем фото при concurrent upload
+  const maxRetries = 3;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      const existing = await ghRequest("GET", path);
-      if (existing && existing.sha) body.sha = existing.sha;
+      const body = {
+        message: `photo: ${marker}`,
+        content: encodeB64(base64data),
+      };
+      // Если уже есть — получить SHA
+      try {
+        const existing = await ghRequest("GET", path);
+        if (existing && existing.sha) body.sha = existing.sha;
+      } catch (e) {
+        if (e.status !== 404) console.warn(`[photoSet] get SHA:`, e.message);
+      }
+      const result = await ghRequest("PUT", path, body);
+      return { ok: true };
     } catch (e) {
-      if (e.status !== 404) console.warn(`[photoSet] get SHA:`, e.message);
+      if (e.status === 409 || e.status === 422) {
+        if (attempt < maxRetries) {
+          const jitter = 500 + Math.random() * 1000;
+          console.warn(`[photoSet] conflict "${marker}", retry ${attempt}/${maxRetries} after ${Math.round(jitter)}ms`);
+          await new Promise(r => setTimeout(r, jitter));
+          continue;
+        }
+      }
+      console.error(`[photoSet] "${marker}":`, e.message);
+      return { ok: false, error: e.message };
     }
-    const result = await ghRequest("PUT", path, body);
-    return { ok: true };
-  } catch (e) {
-    console.error(`[photoSet] "${marker}":`, e.message);
-    return { ok: false, error: e.message };
   }
+  return { ok: false, error: "max retries exceeded" };
 }
 
 export async function photoDelete(marker) {
-  try {
-    const path = `${PHOTO_PREFIX}${marker}.txt`;
-    const existing = await ghRequest("GET", path);
-    if (!existing) return { ok: true };
-    await ghRequest("DELETE", path, { message: `delete photo: ${marker}`, sha: existing.sha });
-    return { ok: true };
-  } catch (e) {
-    if (e.status === 404) return { ok: true };
-    return { ok: false, error: e.message };
+  const path = `${PHOTO_PREFIX}${marker}.txt`;
+  const maxRetries = 3;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const existing = await ghRequest("GET", path);
+      if (!existing) return { ok: true };
+      await ghRequest("DELETE", path, { message: `delete photo: ${marker}`, sha: existing.sha });
+      return { ok: true };
+    } catch (e) {
+      if (e.status === 409 || e.status === 422) {
+        if (attempt < maxRetries) {
+          const jitter = 500 + Math.random() * 1000;
+          console.warn(`[photoDelete] conflict "${marker}", retry ${attempt}/${maxRetries} after ${Math.round(jitter)}ms`);
+          await new Promise(r => setTimeout(r, jitter));
+          continue;
+        }
+      }
+      if (e.status === 404) return { ok: true };
+      console.warn(`[photoDelete] "${marker}":`, e.message);
+      return { ok: false, error: e.message };
+    }
   }
+  return { ok: false, error: "max retries exceeded" };
 }
 
 // ── Проверка токена: пробуем получить содержимое репо ──
