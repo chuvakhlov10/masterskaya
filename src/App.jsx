@@ -1955,6 +1955,12 @@ export default function App(){
   // Добавить операцию в журнал и пересчитать stock
   // type: 'set' | 'delta' | 'move' | 'rename' | 'init'
   // payload: зависит от type
+  // ВАЖНО: операция добавляется в local state мгновенно (UI обновляется сразу),
+  // но запись в GitHub может не дойти из-за обрыва сети или 409 конфликта.
+  // Поэтому каждая операция также попадает в unsyncedOpsRef — список операций,
+  // которые мы должны гарантированно доставить на сервер.
+  // После успешной записи (или merge) список чистится.
+  const unsyncedOpsRef = useRef(new Set()); // Set opId которые ещё не подтверждены на сервере
   async function appendStockOp(type, payload) {
     const op = {
       ...payload,
@@ -1963,6 +1969,8 @@ export default function App(){
       client: clientIdRef.current,
       opId: makeOpId(),
     };
+    // Помечаем как несинхронизированную
+    unsyncedOpsRef.current.add(op.opId);
     const newOps = [...stockOpsRef.current, op];
     setStockOps(newOps);
     // Пересчитываем stock
@@ -1979,21 +1987,62 @@ export default function App(){
     return new Promise((resolve) => {
       saveTimersRef.current["stock-ops"] = setTimeout(async () => {
         delete saveTimersRef.current["stock-ops"];
-        const opsToSave = stockOpsRef.current;
+        // Перед записью — перечитываем сервер, чтобы получить все операции других устройств
+        // Это гарантирует что наша запись будет включать все актуальные данные
+        let opsToSave = stockOpsRef.current;
+        try {
+          const remoteOps = await dbGet("stock-ops");
+          if (Array.isArray(remoteOps)) {
+            // Merge: remote + локальные (включая наши несинхронизированные)
+            const localIds = new Set(opsToSave.map(o => o.opId));
+            const merged = [...remoteOps];
+            for (const op of opsToSave) {
+              if (!remoteOps.some(r => r.opId === op.opId)) {
+                merged.push(op);
+              }
+            }
+            if (merged.length !== opsToSave.length) {
+              console.log(`[appendStockOp] Pre-write merge: ${opsToSave.length} → ${merged.length}`);
+              opsToSave = merged;
+              setStockOps(merged);
+              setStock(applyOpsToStock(merged));
+            }
+          }
+        } catch (e) {
+          console.warn('[appendStockOp] Pre-read failed:', e.message);
+        }
         const result = await sSet("stock-ops", opsToSave);
         setPendingCount(getQueue().length);
-        // Если при записи произошёл merge с remote — обновим локальный state
-        // чтобы у нас были все операции от других устройств
-        if (result && result.ok && result.merged) {
+        // После записи — проверяем, все ли наши операции дошли
+        // Перечитываем сервер и убеждаемся, что все opId из unsyncedOpsRef там есть
+        if (result && (result.ok || result.queued)) {
           try {
-            const remoteOps = await dbGet("stock-ops");
-            if (Array.isArray(remoteOps)) {
-              console.log(`[appendStockOp] Merge detected, обновляем локальный журнал: ${stockOpsRef.current.length} → ${remoteOps.length}`);
-              setStockOps(remoteOps);
-              setStock(applyOpsToStock(remoteOps));
+            const finalOps = await dbGet("stock-ops");
+            if (Array.isArray(finalOps)) {
+              const serverIds = new Set(finalOps.map(o => o.opId));
+              const stillMissing = [...unsyncedOpsRef.current].filter(id => !serverIds.has(id));
+              if (stillMissing.length === 0) {
+                // Все операции дошли — обновляем state и чистим unsynced
+                unsyncedOpsRef.current.clear();
+                setStockOps(finalOps);
+                setStock(applyOpsToStock(finalOps));
+                console.log(`[appendStockOp] All ops synced (${finalOps.length} total)`);
+              } else {
+                console.warn(`[appendStockOp] ${stillMissing.length} ops still missing on server, retrying...`);
+                // Принудительно добавляем недостающие операции и записываем снова
+                const retryOps = [...finalOps];
+                for (const op of opsToSave) {
+                  if (stillMissing.includes(op.opId) && !retryOps.some(r => r.opId === op.opId)) {
+                    retryOps.push(op);
+                  }
+                }
+                setStockOps(retryOps);
+                setStock(applyOpsToStock(retryOps));
+                await sSet("stock-ops", retryOps);
+              }
             }
           } catch (e) {
-            console.warn('[appendStockOp] Не удалось перечитать stock-ops:', e.message);
+            console.warn('[appendStockOp] Post-write verify failed:', e.message);
           }
         }
         resolve(result);
