@@ -322,6 +322,34 @@ function mergeStockOps(remote, local){
   return result;
 }
 
+// Merge function для объектов (prices, markers, aliases, notes, stock:cfg, subcategories, passwords)
+// Простое объединение: remote поля + local поля (local перекрывает при конфликте)
+// Не идеально для удаления ключей, но спасает от полной потери данных
+function mergeObject(remote, local){
+  if(!remote || typeof remote !== "object" || Array.isArray(remote)) return local;
+  if(!local || typeof local !== "object" || Array.isArray(local)) return remote;
+  return {...remote, ...local};
+}
+
+// Merge function для массивов с id (stock-moves)
+function mergeById(remote, local){
+  if(!Array.isArray(remote)) return local;
+  if(!Array.isArray(local)) return remote;
+  const map = new Map();
+  for(const x of remote) map.set(x.id, x);
+  for(const x of local) map.set(x.id, x); // local побеждает
+  return [...map.values()];
+}
+
+// Универсальный выбор mergeFn по ключу
+function getMergeFn(key){
+  if (key === "records") return mergeRecords;
+  if (key === "stock-ops") return mergeStockOps;
+  if (key === "stock-moves") return mergeById;
+  if (["prices","custom:markers","marker-aliases","marker-notes","stock:cfg","subcategories","passwords"].includes(key)) return mergeObject;
+  return undefined;
+}
+
 async function sSet(key, val){
   // Всегда обновляем локальный кеш (для мгновенного отображения и офлайн-доступа)
   cacheSet(key, val);
@@ -337,13 +365,9 @@ async function sSet(key, val){
   }
   
   // Онлайн — пишем в GitHub
-  // Для records передаём mergeFn — при 409 conflict смёржим с remote чтобы не потерять чужие записи
-  // Для records и stock-ops — merge при 409 conflict
-  // records: дедупликация по timestamp+marker+workshop
-  // stock-ops: дедупликация по opId + union всех операций (event sourcing)
-  const mergeFn = key === "records" ? mergeRecords 
-                : key === "stock-ops" ? mergeStockOps 
-                : undefined;
+  // Для всех ключей с potential concurrent writes — передаём mergeFn
+  // Это предотвращает потерю данных при 409 conflict (два устройства одновременно пишут)
+  const mergeFn = getMergeFn(key);
   try {
     const result = await dbSet(key, val, mergeFn);
     if (!result.ok) {
@@ -1516,6 +1540,8 @@ export default function App(){
   const recordsRef = useRef([]);
   useEffect(() => { recordsRef.current = records; }, [records]);
   const [prices, setPrices] = useState({});
+  const pricesRef = useRef({});
+  useEffect(() => { pricesRef.current = prices; }, [prices]);
   // ── EVENT SOURCING для склада ──
   // stockOps — журнал всех операций (источник правды)
   // stock — пересчитанное состояние (кеш для UI)
@@ -1535,10 +1561,20 @@ export default function App(){
   // Конфликты, требующие решения пользователя
   const [stockConflicts, setStockConflicts] = useState([]);
   const [stockCfg, setStockCfg] = useState({});
+  const stockCfgRef = useRef({});
+  useEffect(() => { stockCfgRef.current = stockCfg; }, [stockCfg]);
   const [markers, setMarkers] = useState(DEFAULT_MARKERS);
+  const markersRef = useRef(markers);
+  useEffect(() => { markersRef.current = markers; }, [markers]);
   const [aliases, setAliases] = useState({});  // {основное_имя: [альтернативные]}
+  const aliasesRef = useRef({});
+  useEffect(() => { aliasesRef.current = aliases; }, [aliases]);
   const [notes, setNotes] = useState({});      // {маркировка: "комментарий"}
+  const notesRef = useRef({});
+  useEffect(() => { notesRef.current = notes; }, [notes]);
   const [subcategories, setSubcategories] = useState({});  // {категория: {подкатегория: [маркировки]}}
+  const subcategoriesRef = useRef({});
+  useEffect(() => { subcategoriesRef.current = subcategories; }, [subcategories]);
 
   // форма записи
   const [category, setCategory] = useState("Автомобильные");
@@ -1753,14 +1789,38 @@ export default function App(){
     return new Promise((resolve) => {
       saveTimersRef.current[key] = setTimeout(async () => {
         delete saveTimersRef.current[key];
-        // Для records — читаем актуальное значение из ref, не захваченное в замыкании
+        // Читаем актуальное значение из ref, не захваченное в замыкание
         // Это защищает от race condition: за 400мс дебаунса могло прийти обновление через Ably
-        let valueToSave = value;
-        if (key === "records") {
-          valueToSave = recordsRef.current;
-        }
-        await sSet(key, valueToSave);
+        // и state уже обновился, но захваченное value было бы устаревшим
+        const refMap = {
+          "records": recordsRef,
+          "prices": pricesRef,
+          "custom:markers": markersRef,
+          "marker-aliases": aliasesRef,
+          "marker-notes": notesRef,
+          "stock:cfg": stockCfgRef,
+          "subcategories": subcategoriesRef,
+          "stock-moves": stockMovesRef,
+          // stock-ops записывается через appendStockOp, не через saveAndSync
+        };
+        const ref = refMap[key];
+        const valueToSave = ref ? ref.current : value;
+        const result = await sSet(key, valueToSave);
         setPendingCount(getQueue().length);
+        // Если произошёл merge — перечитываем с сервера чтобы получить объединённые данные
+        if (result && result.ok && result.merged && ref) {
+          try {
+            const remoteVal = await dbGet(key);
+            if (remoteVal !== null && remoteVal !== undefined) {
+              console.log(`[saveAndSync] Merge detected for "${key}", обновляем локальный state`);
+              // Обновляем state через соответствующий setter
+              const setterMap = stateSettersRef.current;
+              if (setterMap[key]) setterMap[key](remoteVal);
+            }
+          } catch (e) {
+            console.warn(`[saveAndSync] Не удалось перечитать "${key}":`, e.message);
+          }
+        }
         resolve();
       }, 400);
     });
@@ -2170,10 +2230,8 @@ export default function App(){
       const remaining = [];
       for (const item of q) {
         try {
-          // Для stock-ops передаём mergeFn — иначе теряем ops других устройств
-          const mergeFn = item.key === "records" ? mergeRecords 
-                        : item.key === "stock-ops" ? mergeStockOps 
-                        : undefined;
+          // Используем mergeFn для всех ключей — иначе теряем данные другого устройства
+          const mergeFn = getMergeFn(item.key);
           const result = await dbSet(item.key, item.val, mergeFn);
           if (result.ok) {
             cacheSet(item.key, item.val);
