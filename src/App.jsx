@@ -250,7 +250,25 @@ function getQueue(){
   try { return JSON.parse(localStorage.getItem(PENDING_WRITES_KEY) || "[]"); } catch { return []; }
 }
 function setQueue(q){
-  try { localStorage.setItem(PENDING_WRITES_KEY, JSON.stringify(q)); } catch {}
+  // Защита от переполнения localStorage (H7 fix)
+  // Максимум 50 элементов — если больше, оставляем последние 50
+  if (q.length > 50) {
+    console.warn(`[queue] переполнение: ${q.length} элементов, оставляем последние 50`);
+    q = q.slice(-50);
+  }
+  try {
+    localStorage.setItem(PENDING_WRITES_KEY, JSON.stringify(q));
+  } catch (e) {
+    // QuotaExceededError — пытаемся очистить старые элементы
+    console.error('[queue] localStorage переполнен, очищаем старые элементы:', e.message);
+    while (q.length > 5) {
+      q = q.slice(-Math.floor(q.length / 2));
+      try {
+        localStorage.setItem(PENDING_WRITES_KEY, JSON.stringify(q));
+        break;
+      } catch {}
+    }
+  }
 }
 
 async function sGet(key){
@@ -1886,63 +1904,76 @@ export default function App(){
   // разные значения одновременно). move/delta/init — складываются без конфликтов.
 
   // Пересчёт stock из журнала операций
+  // Защита от повреждённых ops — каждый op обрабатывается в try/catch
+  // Защита от сбитых часов — ops с ts вне разумного диапазона игнорируются
   function applyOpsToStock(ops) {
     const result = { main: {}, ws: { SMART: {}, Бегемот: {} } };
-    const sortedOps = [...ops].sort((a, b) => (a.ts || 0) - (b.ts || 0));
+    if (!Array.isArray(ops)) return result;
+    // Валидный диапазон ts: 2020-01-01 .. now+1day
+    const minTs = new Date("2020-01-01").getTime();
+    const maxTs = Date.now() + 24 * 60 * 60 * 1000;
+    const validOps = ops.filter(op => op && typeof op === "object" && op.type && op.ts >= minTs && op.ts <= maxTs);
+    // Сортировка по ts, при равенстве — по opId для детерминированности
+    const sortedOps = [...validOps].sort((a, b) => {
+      const tsDiff = (a.ts || 0) - (b.ts || 0);
+      if (tsDiff !== 0) return tsDiff;
+      return (a.opId || "").localeCompare(b.opId || "");
+    });
     
     for (const op of sortedOps) {
-      if (op.type === "set" || op.type === "init") {
-        const [scope, ws] = parseLocation(op.location);
-        if (scope === "main") {
-          result.main[op.marker] = op.value;
-        } else {
-          result.ws[ws] = result.ws[ws] || {};
-          result.ws[ws][op.marker] = op.value;
-        }
-      } else if (op.type === "delta") {
-        const [scope, ws] = parseLocation(op.location);
-        if (scope === "main") {
-          result.main[op.marker] = Math.max((result.main[op.marker] || 0) + op.delta, 0);
-        } else {
-          result.ws[ws] = result.ws[ws] || {};
-          result.ws[ws][op.marker] = Math.max((result.ws[ws][op.marker] || 0) + op.delta, 0);
-        }
-      } else if (op.type === "move") {
-        // from → to
-        const [fScope, fWs] = parseLocation(op.from);
-        const [tScope, tWs] = parseLocation(op.to);
-        // списываем с from
-        if (fScope === "main") {
-          result.main[op.marker] = Math.max((result.main[op.marker] || 0) - op.qty, 0);
-        } else {
-          result.ws[fWs] = result.ws[fWs] || {};
-          result.ws[fWs][op.marker] = Math.max((result.ws[fWs][op.marker] || 0) - op.qty, 0);
-        }
-        // добавляем к to
-        if (tScope === "main") {
-          result.main[op.marker] = (result.main[op.marker] || 0) + op.qty;
-        } else {
-          result.ws[tWs] = result.ws[tWs] || {};
-          result.ws[tWs][op.marker] = (result.ws[tWs][op.marker] || 0) + op.qty;
-        }
-      } else if (op.type === "rename") {
-        // Перенос значений всех складов со старого имени на новое
-        if (result.main[op.oldMarker] !== undefined) {
-          result.main[op.newMarker] = result.main[op.oldMarker];
-          delete result.main[op.oldMarker];
-        }
-        for (const ws of WORKSHOPS) {
-          if (result.ws[ws] && result.ws[ws][op.oldMarker] !== undefined) {
-            result.ws[ws][op.newMarker] = result.ws[ws][op.oldMarker];
-            delete result.ws[ws][op.oldMarker];
+      try {
+        if (op.type === "set" || op.type === "init") {
+          const [scope, ws] = parseLocation(op.location);
+          if (scope === "main") {
+            result.main[op.marker] = op.value;
+          } else {
+            result.ws[ws] = result.ws[ws] || {};
+            result.ws[ws][op.marker] = op.value;
+          }
+        } else if (op.type === "delta") {
+          const [scope, ws] = parseLocation(op.location);
+          if (scope === "main") {
+            result.main[op.marker] = Math.max((result.main[op.marker] || 0) + op.delta, 0);
+          } else {
+            result.ws[ws] = result.ws[ws] || {};
+            result.ws[ws][op.marker] = Math.max((result.ws[ws][op.marker] || 0) + op.delta, 0);
+          }
+        } else if (op.type === "move") {
+          const [fScope, fWs] = parseLocation(op.from);
+          const [tScope, tWs] = parseLocation(op.to);
+          if (fScope === "main") {
+            result.main[op.marker] = Math.max((result.main[op.marker] || 0) - op.qty, 0);
+          } else {
+            result.ws[fWs] = result.ws[fWs] || {};
+            result.ws[fWs][op.marker] = Math.max((result.ws[fWs][op.marker] || 0) - op.qty, 0);
+          }
+          if (tScope === "main") {
+            result.main[op.marker] = (result.main[op.marker] || 0) + op.qty;
+          } else {
+            result.ws[tWs] = result.ws[tWs] || {};
+            result.ws[tWs][op.marker] = (result.ws[tWs][op.marker] || 0) + op.qty;
+          }
+        } else if (op.type === "rename") {
+          if (result.main[op.oldMarker] !== undefined) {
+            result.main[op.newMarker] = result.main[op.oldMarker];
+            delete result.main[op.oldMarker];
+          }
+          for (const ws of WORKSHOPS) {
+            if (result.ws[ws] && result.ws[ws][op.oldMarker] !== undefined) {
+              result.ws[ws][op.newMarker] = result.ws[ws][op.oldMarker];
+              delete result.ws[ws][op.oldMarker];
+            }
           }
         }
+      } catch (e) {
+        console.warn('[applyOpsToStock] skipping malformed op:', op, e.message);
       }
     }
     return result;
   }
 
   function parseLocation(loc) {
+    if (typeof loc !== "string") return ["main", null];
     if (loc === "main") return ["main", null];
     if (loc.startsWith("ws:")) return ["ws", loc.slice(3)];
     return ["main", null];
@@ -1974,15 +2005,19 @@ export default function App(){
     };
     // Помечаем как несинхронизированную
     unsyncedOpsRef.current.add(op.opId);
+    // СИНХРОННО обновляем ref (не ждём useEffect, иначе два вызова подряд теряют op)
     const newOps = [...stockOpsRef.current, op];
+    stockOpsRef.current = newOps;
     setStockOps(newOps);
-    // Пересчитываем stock
+    // СИНХРОННО обновляем stock ref
     const newStock = applyOpsToStock(newOps);
+    stockRef.current = newStock;
     setStock(newStock);
     // Отправляем через Ably (инкрементально — только новую операцию)
     if (navigator.onLine && ablyChannelRef.current) {
       try {
-        ablyChannelRef.current.publish('stock-op', { op, from: clientIdRef.current });
+        const p = ablyChannelRef.current.publish('stock-op', { op, from: clientIdRef.current });
+        if (p && p.catch) p.catch(() => {});
       } catch {}
     }
     // Сохраняем весь журнал (debounce 2 секунды для batchинга)
@@ -2396,10 +2431,35 @@ export default function App(){
       clearInterval(interval);
       clearInterval(onlineCheckInterval);
       channel.unsubscribe();
+      // Очищаем Ably connection handlers (H1 fix)
+      ably.connection.off('connected');
+      ably.connection.off('disconnected');
+      ably.connection.off('suspended');
+      ably.connection.off('failed');
+      // Очищаем все debounced save timers (H2 fix)
+      Object.values(saveTimersRef.current).forEach(t => clearTimeout(t));
+      saveTimersRef.current = {};
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
   }, [authed]);
+
+  // beforeunload — предупреждение о несохранённых данных (H5 fix)
+  useEffect(() => {
+    if (!authed) return;
+    const handleBeforeUnload = (e) => {
+      const pending = getQueue().length;
+      const unsynced = unsyncedOpsRef.current.size;
+      if (pending > 0 || unsynced > 0) {
+        e.preventDefault();
+        e.returnValue = `У вас ${pending + unsynced} несохранённых изменений. Покинуть страницу?`;
+        return e.returnValue;
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [authed]);
+
   useEffect(() => {
     const t = setInterval(() => setNowTime(new Date()), 60000);
     return () => clearInterval(t);
@@ -2408,6 +2468,7 @@ export default function App(){
   // ── загрузка при старте ──
   useEffect(()=>{
     (async()=>{
+      try {
       // Загружаем пароли из Supabase (или инициализируем дефолтные)
       let pwd = await sGet("passwords");
       if(!pwd){
@@ -2520,7 +2581,12 @@ export default function App(){
           setAuthed(true);
         }
       }catch{}
-      setLoading(false);
+      } catch (e) {
+        console.error('[INIT] Ошибка при загрузке:', e);
+        // Даже при ошибке — разблокируем UI чтобы пользователь мог хотя бы войти
+      } finally {
+        setLoading(false);
+      }
     })();
   },[]);
 
