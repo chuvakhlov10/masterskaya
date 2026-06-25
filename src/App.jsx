@@ -2280,65 +2280,74 @@ export default function App(){
     doPollRef.current = poll;
 
     // ── flushQueue: отправляет накопленные в офлайне изменения на GitHub ──
+    const isFlushingRef = useRef(false);
     const flushQueue = async () => {
-      const q = getQueue();
-      if (q.length === 0) {
-        setPendingCount(0);
-        // Даже если очередь пуста — перечитываем данные с сервера
-        // (телефон мог пропустить изменения пока был офлайн)
-        if (doPollRef.current) {
-          console.log('[OFFLINE] Очередь пуста, перечитываем данные с сервера');
-          doPollRef.current();
-        }
+      // Защита от параллельных вызовов
+      if (isFlushingRef.current) {
+        console.log('[OFFLINE] flushQueue уже идёт, пропускаем');
         return;
       }
-      console.log(`[OFFLINE] Отправляем очередь: ${q.length} элементов`);
-      setSyncStatus("syncing");
-      const remaining = [];
-      for (const item of q) {
-        try {
-          // Используем mergeFn для всех ключей — иначе теряем данные другого устройства
-          const mergeFn = getMergeFn(item.key);
-          const result = await dbSet(item.key, item.val, mergeFn);
-          if (result.ok) {
-            cacheSet(item.key, item.val);
-            // Рассылаем через Ably — другие устройства тоже получат обновление
-            if (ablyChannelRef.current) {
-              try {
-                const payload = { key: item.key, value: item.val, ts: Date.now(), from: clientIdRef.current };
-                const size = new TextEncoder().encode(JSON.stringify(payload)).length;
-                if (size < 60000) {
-                  ablyChannelRef.current.publish('update', payload);
-                } else {
-                  ablyChannelRef.current.publish('changed', { key: item.key, ts: Date.now(), from: clientIdRef.current });
-                }
-              } catch {}
+      isFlushingRef.current = true;
+      try {
+        const q = getQueue();
+        if (q.length === 0) {
+          setPendingCount(0);
+          // Даже если очередь пуста — перечитываем данные с сервера
+          // (телефон мог пропустить изменения пока был офлайн)
+          if (doPollRef.current) {
+            console.log('[OFFLINE] Очередь пуста, перечитываем данные с сервера');
+            doPollRef.current();
+          }
+          return;
+        }
+        console.log(`[OFFLINE] Отправляем очередь: ${q.length} элементов`);
+        setSyncStatus("syncing");
+        const remaining = [];
+        for (const item of q) {
+          try {
+            // Используем mergeFn для всех ключей — иначе теряем данные другого устройства
+            const mergeFn = getMergeFn(item.key);
+            const result = await dbSet(item.key, item.val, mergeFn);
+            if (result.ok) {
+              cacheSet(item.key, item.val);
+              // Рассылаем через Ably — другие устройства тоже получат обновление
+              if (ablyChannelRef.current) {
+                try {
+                  const payload = { key: item.key, value: item.val, ts: Date.now(), from: clientIdRef.current };
+                  const size = new TextEncoder().encode(JSON.stringify(payload)).length;
+                  if (size < 60000) {
+                    ablyChannelRef.current.publish('update', payload);
+                  } else {
+                    ablyChannelRef.current.publish('changed', { key: item.key, ts: Date.now(), from: clientIdRef.current });
+                  }
+                } catch {}
+              }
+            } else {
+              remaining.push(item);
             }
-          } else {
+          } catch (e) {
+            console.warn(`[OFFLINE] Ошибка отправки "${item.key}":`, e.message);
             remaining.push(item);
           }
-        } catch (e) {
-          console.warn(`[OFFLINE] Ошибка отправки "${item.key}":`, e.message);
-          remaining.push(item);
         }
-      }
-      setQueue(remaining);
-      setPendingCount(remaining.length);
-      setSyncStatus(remaining.length === 0 ? (wsConnectedRef.current ? "ws" : "synced") : "offline");
-      if (remaining.length === 0 && doPollRef.current) {
-        // После успешной отправки — подтянем свежие данные
-        setTimeout(() => doPollRef.current && doPollRef.current(), 500);
+        setQueue(remaining);
+        setPendingCount(remaining.length);
+        setSyncStatus(remaining.length === 0 ? (wsConnectedRef.current ? "ws" : "synced") : "offline");
+        if (remaining.length === 0 && doPollRef.current) {
+          // После успешной отправки — подтянем свежие данные
+          setTimeout(() => doPollRef.current && doPollRef.current(), 500);
+        }
+      } finally {
+        isFlushingRef.current = false;
       }
     };
     flushQueueRef.current = flushQueue;
 
     // ── Слушатели online/offline ──
     const handleOnline = () => {
-      console.log('[OFFLINE] Сеть восстановлена');
+      console.log('[OFFLINE] Сеть восстановлена (событие online)');
       setIsOnline(true);
       // Сбрасываем хэш чтобы polling гарантированно применил свежие данные
-      // (даже если серверные данные совпадают с нашими устаревшими по структурам,
-      // но отличаются по содержимому — это заставит poll перечитать и обновить state)
       lastDataHashRef.current = "";
       // Небольшая задержка чтобы соединение установилось
       setTimeout(() => flushQueueRef.current && flushQueueRef.current(), 1000);
@@ -2351,6 +2360,29 @@ export default function App(){
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
     
+    // На мобильных браузерах событие 'online' срабатывает не всегда.
+    // Делаем periodic check navigator.onLine каждые 5 секунд.
+    // Если состояние изменилось — вручную вызываем обработчик.
+    let lastOnlineState = navigator.onLine;
+    const onlineCheckInterval = setInterval(() => {
+      const currentState = navigator.onLine;
+      if (currentState !== lastOnlineState) {
+        console.log(`[OFFLINE] Periodic check: ${lastOnlineState} → ${currentState}`);
+        lastOnlineState = currentState;
+        if (currentState) {
+          handleOnline();
+        } else {
+          handleOffline();
+        }
+      }
+      // Также если мы "онлайн" но pendingCount > 0 — попробуем flush
+      // (возможно flushQueue не сработал ранее)
+      if (currentState && getQueue().length > 0 && !isSyncingOpsRef.current) {
+        console.log(`[OFFLINE] Periodic check: очередь не пуста (${getQueue().length}), flush`);
+        flushQueueRef.current && flushQueueRef.current();
+      }
+    }, 5000);
+    
     // Если стартовали онлайн, но в очереди что-то есть — отправим
     if (navigator.onLine && getQueue().length > 0) {
       setTimeout(() => flushQueueRef.current && flushQueueRef.current(), 2000);
@@ -2362,6 +2394,7 @@ export default function App(){
     return () => {
       clearTimeout(initialTimer);
       clearInterval(interval);
+      clearInterval(onlineCheckInterval);
       channel.unsubscribe();
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
