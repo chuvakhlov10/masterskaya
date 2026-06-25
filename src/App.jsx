@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, Component } from "react";
+import { useState, useEffect, useRef, Component } from "react";
 import { dbGet, dbSet, hasToken, setToken, clearToken, verifyToken, photoGet, photoSet, photoDelete } from "./github-storage.js";
 import Ably from "ably";
 
@@ -439,7 +439,7 @@ const C = {
   begemotDim:"#f3e8ff",
   // Типы записей
   refund:"#f97316",      // возврат — оранжевый
-  dangerDim:"#fff7ed",
+  refundDim:"#fff7ed",   // фон для возврата (H9 fix — было dangerDim, конфликтовало)
 };
 
 const s = {
@@ -448,7 +448,7 @@ const s = {
   label:{ fontSize:10, color:C.textSub, marginBottom:6, display:"block", fontWeight:700, textTransform:"uppercase", letterSpacing:"1px" },
   input:{ background:C.bgInput, border:`1px solid ${C.border}`, borderRadius:0, color:C.text, padding:"8px 12px", fontSize:14, width:"100%", boxSizing:"border-box", outline:"none", fontFamily:"inherit" },
   btn:(v="default")=>({
-    background:v==="accent"?C.brand:v==="danger"?C.dangerDim:v==="warn"?C.warnDim:v==="refund"?C.dangerDim:v==="success"?C.success:v==="dark"?C.text:C.bgCard,
+    background:v==="accent"?C.brand:v==="danger"?C.dangerDim:v==="warn"?C.warnDim:v==="refund"?C.refundDim:v==="success"?C.success:v==="dark"?C.text:C.bgCard,
     color:v==="accent"?"#fff":v==="danger"?C.danger:v==="warn"?C.warn:v==="refund"?C.danger:v==="success"?"#fff":v==="dark"?"#fff":C.text,
     border:`1px solid ${v==="accent"?C.brand:v==="danger"?C.danger:v==="warn"?C.warn:v==="refund"?C.danger:v==="success"?C.success:v==="dark"?C.text:C.border}`,
     borderRadius:0, padding:"8px 14px", fontSize:13, cursor:"pointer", fontWeight:700, textTransform:"uppercase", letterSpacing:"0.5px",
@@ -574,7 +574,7 @@ function EditModal({ record, idx, markers, onSave, onDelete, onClose }){
             <button key={id} type="button" onClick={()=>setRecordType(id)} style={{
               flex:1,padding:"7px 0",fontSize:12,fontWeight:600,borderRadius:8,cursor:"pointer",
               border:`1px solid ${recordType===id?(id==="refund"?C.danger:C.brand):C.border}`,
-              background:recordType===id?(id==="refund"?C.dangerDim:C.brandDim):C.bgInput,
+              background:recordType===id?(id==="refund"?C.refundDim:C.brandDim):C.bgInput,
               color:recordType===id?(id==="refund"?C.danger:C.brand):C.textSub
             }}>{label}</button>
           ))}
@@ -1661,36 +1661,6 @@ export default function App(){
   // ── Дебаунс-система для отложенного сохранения в GitHub ──
   // Решает проблему race condition при быстром вводе цифр
   const [saveStatus, setSaveStatus] = useState({}); // {key: "saving" | "saved" | "error"}
-  const saveTimers = useRef({});
-  function debouncedSave(key, value, delayMs = 800){
-    // Мгновенно обновляем UI-статус
-    setSaveStatus(p => ({...p, [key]: "saving"}));
-    // Отменяем предыдущий таймер
-    if(saveTimers.current[key]){
-      clearTimeout(saveTimers.current[key]);
-    }
-    // Ставим новый
-    saveTimers.current[key] = setTimeout(async () => {
-      const result = await sSet(key, value);
-      setSaveStatus(p => ({...p, [key]: result.ok ? "saved" : "error"}));
-      // Через 2 сек убираем статус "saved"
-      if(result.ok){
-        setTimeout(() => {
-          setSaveStatus(p => {
-            const np = {...p};
-            delete np[key];
-            return np;
-          });
-        }, 2000);
-      }
-    }, delayMs);
-  }
-  // Эффект для очистки таймеров при размонтировании
-  useEffect(() => {
-    return () => {
-      Object.values(saveTimers.current).forEach(t => clearTimeout(t));
-    };
-  }, []);
 
   // ── Подкатегории: создать / удалить / добавить маркировку / убрать ──
   async function createSubcategory(cat, subName){
@@ -1775,7 +1745,6 @@ export default function App(){
   const [pendingCount, setPendingCount] = useState(() => getQueue().length);
   const lastDataHashRef = useRef("");
   const skipPollRef = useRef(0);
-  const wsRef = useRef(null);
   const wsConnectedRef = useRef(false);
   const ablyChannelRef = useRef(null);
   const doPollRef = useRef(null); // ссылка на функцию poll для вызова из WS
@@ -1856,39 +1825,6 @@ export default function App(){
 
   // Старое имя для совместимости (3 места уже используют его)
   const silentSaveState = saveAndSync;
-
-  // Атомарное сохранение stock: один файл stock.json для всех складов
-  // Используется при перемещениях и любых изменениях остатков
-  // Гарантирует: либо запишутся ВСЕ склады, либо НИ ОДИН (нет рассинхрона)
-  async function saveStock(newStock, opts = {}) {
-    setStock(newStock);
-    skipPollRef.current = 3;
-    // Ably — мгновенно отправляем новое состояние
-    if (navigator.onLine && ablyChannelRef.current) {
-      try {
-        const ts = Date.now();
-        lastBroadcastTsRef.current["stock"] = ts;
-        const payload = { key: "stock", value: newStock, ts, from: clientIdRef.current };
-        const size = new TextEncoder().encode(JSON.stringify(payload)).length;
-        if (size < 60000) {
-          ablyChannelRef.current.publish('update', payload);
-        } else {
-          ablyChannelRef.current.publish('changed', { key: "stock", ts, from: clientIdRef.current });
-        }
-      } catch {}
-    }
-    // Debounce 400мс на GitHub запись
-    if (saveTimersRef.current["stock"]) clearTimeout(saveTimersRef.current["stock"]);
-    return new Promise((resolve) => {
-      saveTimersRef.current["stock"] = setTimeout(async () => {
-        delete saveTimersRef.current["stock"];
-        const valueToSave = stockRef.current; // актуальное значение
-        const result = await sSet("stock", valueToSave);
-        setPendingCount(getQueue().length);
-        resolve(result);
-      }, 400);
-    });
-  }
 
   // Лог перемещений: добавляем запись и сохраняем весь лог
   async function logStockMove(move) {
@@ -2165,14 +2101,6 @@ export default function App(){
     });
     // Убираем из списка конфликтов
     setStockConflicts(prev => prev.filter(c => !(c.local.opId === conflict.local.opId && c.remote.opId === conflict.remote.opId)));
-  }
-
-  // Сохранить stockOps в GitHub (используется при начальной загрузке и flush)
-  async function saveStockOps() {
-    if (saveTimersRef.current["stock-ops"]) clearTimeout(saveTimersRef.current["stock-ops"]);
-    const result = await sSet("stock-ops", stockOpsRef.current);
-    setPendingCount(getQueue().length);
-    return result;
   }
 
   useEffect(() => {
@@ -3685,7 +3613,7 @@ export default function App(){
                   }} style={{
                     flex:1,padding:"8px 0",fontSize:12,fontWeight:600,borderRadius:8,cursor:"pointer",
                     border:`1px solid ${recordType===id?(id==="refund"?C.danger:C.brand):C.border}`,
-                    background:recordType===id?(id==="refund"?C.dangerDim:C.brandDim):C.bgInput,
+                    background:recordType===id?(id==="refund"?C.refundDim:C.brandDim):C.bgInput,
                     color:recordType===id?(id==="refund"?C.danger:C.brand):C.textSub
                   }}>{label}</button>
                 ))}
