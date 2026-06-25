@@ -153,9 +153,9 @@ export async function dbSet(key, value, mergeFn) {
       if (e.status === 409 || e.status === 422) {
         // Conflict — SHA устарел. Перечитаем с сервера и при возможности смёржим
         delete shaCache[key];
-        console.warn(`[dbSet] conflict on "${key}", waiting 300ms before retry...`);
-        // Небольшая задержка перед retry чтобы избежать шторма 409 при одновременной записи
-        await new Promise(r => setTimeout(r, 300));
+        console.warn(`[dbSet] conflict on "${key}", waiting 500ms before retry...`);
+        // Задержка перед retry чтобы избежать шторма 409 при одновременной записи двух устройств
+        await new Promise(r => setTimeout(r, 500));
         try {
           const path = `${DATA_PREFIX}${keyToFileName(key)}.json`;
           const existing = await ghRequest("GET", path);
