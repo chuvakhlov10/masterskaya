@@ -151,30 +151,42 @@ function NumInput({ value, onChange, style, min="0", placeholder="" }) {
 }
 
 // ── Инпут с кнопками + и - ──
-// silentSave — функция для тихого сохранения (без setState, без ре-рендера)
-function StepperInput({ value, onChange, step = 1, min = 0, style, inputStyle, silentSave = null }) {
+// silentSave(v) — вызывается при вводе точного значения в поле (set)
+// silentSaveDelta(delta) — вызывается при нажатии +/- (delta, не конфликтует)
+// Если silentSaveDelta передан — кнопки +/- используют delta (надёжная синхронизация)
+// Если нет — кнопки используют silentSave/set (старое поведение)
+function StepperInput({ value, onChange, step = 1, min = 0, style, inputStyle, silentSave = null, silentSaveDelta = null }) {
   const [localVal, setLocalVal] = useState(String(value ?? ""));
 
   useEffect(() => {
     setLocalVal(String(value ?? ""));
   }, [value]);
 
-  const doSave = (v) => {
-    setLocalVal(String(v));
-    if (silentSave) {
-      silentSave(v);
-    } else {
-      onChange(v);
-    }
-  };
-
   const dec = () => {
     const cur = parseInt(localVal || "0", 10);
-    doSave(Math.max(cur - step, min));
+    const newVal = Math.max(cur - step, min);
+    setLocalVal(String(newVal));
+    if (silentSaveDelta && cur > min) {
+      // Используем delta (-step), не конфликтует с другими устройствами
+      silentSaveDelta(-step);
+    } else if (silentSave) {
+      silentSave(newVal);
+    } else {
+      onChange(newVal);
+    }
   };
   const inc = () => {
     const cur = parseInt(localVal || "0", 10);
-    doSave(cur + step);
+    const newVal = cur + step;
+    setLocalVal(String(newVal));
+    if (silentSaveDelta) {
+      // Используем delta (+step), не конфликтует с другими устройствами
+      silentSaveDelta(step);
+    } else if (silentSave) {
+      silentSave(newVal);
+    } else {
+      onChange(newVal);
+    }
   };
 
   const btnStyle = {
@@ -208,8 +220,9 @@ function StepperInput({ value, onChange, step = 1, min = 0, style, inputStyle, s
           const n = localVal===""?0:parseInt(localVal,10);
           const final = isNaN(n)||n<min ? min : n;
           setLocalVal(String(final));
+          // Поле ввода = точное значение → set (может конфликтовать, покажет модалку)
           if (silentSave) silentSave(final);
-          else onChange(final);
+          else if (onChange) onChange(final);
         }}
         style={{ textAlign: "center", width: 50, padding: "6px 4px", fontSize: 14, fontWeight: 700, border: "none", borderLeft: `1px solid ${C.border}`, borderRight: `1px solid ${C.border}`, background: C.bgCard, fontVariantNumeric: "tabular-nums", outline: "none", ...inputStyle }}/>
       <button type="button" onClick={inc} style={btnStyle}
@@ -2920,22 +2933,25 @@ export default function App(){
                     {mAliases.length > 0 && <div style={{fontSize:10,color:C.textDim,marginTop:2,lineHeight:1.3}}>= {mAliases.join(", ")}</div>}
                     {mNote && <div style={{fontSize:10,color:C.warn,marginTop:2,lineHeight:1.3,fontStyle:"italic"}}>💬 {mNote}</div>}
                   </div>
-                  <StepperInput value={q} silentSave={async nq=>{
-                    // Точное значение → set-операция (может конфликтовать при одновременном вводе на двух устройствах)
-                    if(isWS){
+                  <StepperInput
+                    value={q}
+                    // Кнопки +/- → delta (не конфликтует, складывается с действиями отца)
+                    silentSaveDelta={async (delta) => {
+                      appendStockOp("delta", {
+                        location: isWS ? `ws:${workshop}` : "main",
+                        marker: m,
+                        delta,
+                      });
+                    }}
+                    // Ввод точного значения через поле → set (при конфликте покажет модалку)
+                    silentSave={async nq => {
                       appendStockOp("set", {
-                        location: `ws:${workshop}`,
+                        location: isWS ? `ws:${workshop}` : "main",
                         marker: m,
                         value: nq,
                       });
-                    } else {
-                      appendStockOp("set", {
-                        location: "main",
-                        marker: m,
-                        value: nq,
-                      });
-                    }
-                  }} inputStyle={{color:q===0?C.danger:C.success}}/>
+                    }}
+                    inputStyle={{color:q===0?C.danger:C.success}}/>
                   <button onClick={()=>setNoteModal({markerName:m})} title="Комментарий"
                     style={{...s.btn(),padding:"5px 6px",fontSize:11,borderColor:mNote?C.warn+"66":C.border,color:mNote?C.warn:C.textSub}}>💬</button>
                 </div>
