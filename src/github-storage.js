@@ -176,7 +176,7 @@ export async function dbSet(key, value, mergeFn) {
           if (result && result.content && result.content.sha) {
             shaCache[key] = result.content.sha;
           }
-          return { ok: true };
+          return { ok: true, merged: mergeFn ? true : false };
         } catch (e2) {
           console.error(`[dbSet] retry failed for "${key}":`, e2.message);
           return { ok: false, error: e2.message };

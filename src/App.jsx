@@ -300,6 +300,28 @@ function mergeRecords(remote, local){
   return result;
 }
 
+// Merge function для stock-ops: union всех операций по opId (event sourcing)
+// КРИТИЧНО: при 409 conflict нельзя перезаписывать — иначе теряем ops другого устройства
+// Правильно: берём все уникальные операции из remote + local, сортируем по ts
+function mergeStockOps(remote, local){
+  if(!Array.isArray(remote)) return local;
+  if(!Array.isArray(local)) return remote;
+  const seen = new Set();
+  const result = [];
+  // Добавляем все операции (дедупликация по opId)
+  for(const op of [...remote, ...local]){
+    const id = op.opId || (op.ts + '|' + op.type + '|' + (op.marker || op.oldMarker || '') + '|' + (op.location || op.from || '') + '|' + (op.client || ''));
+    if(!seen.has(id)){
+      seen.add(id);
+      result.push(op);
+    }
+  }
+  // Сортируем по ts для детерминированности
+  result.sort((a,b) => (a.ts||0) - (b.ts||0));
+  console.log(`[mergeStockOps] remote=${remote.length} local=${local.length} merged=${result.length}`);
+  return result;
+}
+
 async function sSet(key, val){
   // Всегда обновляем локальный кеш (для мгновенного отображения и офлайн-доступа)
   cacheSet(key, val);
@@ -316,7 +338,12 @@ async function sSet(key, val){
   
   // Онлайн — пишем в GitHub
   // Для records передаём mergeFn — при 409 conflict смёржим с remote чтобы не потерять чужие записи
-  const mergeFn = key === "records" ? mergeRecords : undefined;
+  // Для records и stock-ops — merge при 409 conflict
+  // records: дедупликация по timestamp+marker+workshop
+  // stock-ops: дедупликация по opId + union всех операций (event sourcing)
+  const mergeFn = key === "records" ? mergeRecords 
+                : key === "stock-ops" ? mergeStockOps 
+                : undefined;
   try {
     const result = await dbSet(key, val, mergeFn);
     if (!result.ok) {
@@ -1895,6 +1922,20 @@ export default function App(){
         const opsToSave = stockOpsRef.current;
         const result = await sSet("stock-ops", opsToSave);
         setPendingCount(getQueue().length);
+        // Если при записи произошёл merge с remote — обновим локальный state
+        // чтобы у нас были все операции от других устройств
+        if (result && result.ok && result.merged) {
+          try {
+            const remoteOps = await dbGet("stock-ops");
+            if (Array.isArray(remoteOps)) {
+              console.log(`[appendStockOp] Merge detected, обновляем локальный журнал: ${stockOpsRef.current.length} → ${remoteOps.length}`);
+              setStockOps(remoteOps);
+              setStock(applyOpsToStock(remoteOps));
+            }
+          } catch (e) {
+            console.warn('[appendStockOp] Не удалось перечитать stock-ops:', e.message);
+          }
+        }
         resolve(result);
       }, 500);
     });
@@ -2129,7 +2170,11 @@ export default function App(){
       const remaining = [];
       for (const item of q) {
         try {
-          const result = await dbSet(item.key, item.val);
+          // Для stock-ops передаём mergeFn — иначе теряем ops других устройств
+          const mergeFn = item.key === "records" ? mergeRecords 
+                        : item.key === "stock-ops" ? mergeStockOps 
+                        : undefined;
+          const result = await dbSet(item.key, item.val, mergeFn);
           if (result.ok) {
             cacheSet(item.key, item.val);
             // Рассылаем через Ably — другие устройства тоже получат обновление
