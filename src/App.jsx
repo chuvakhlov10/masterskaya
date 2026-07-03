@@ -2657,6 +2657,128 @@ export default function App(){
     }catch{}
   }
 
+  // ── Резервная копия всех данных (скачать JSON) ──
+  async function downloadBackup(){
+    try {
+      const [r, p, ops, sm2, al, nt, sub, mvs, cfg] = await Promise.all([
+        sGet("records"), sGet("prices"), sGet("stock-ops"),
+        sGet("custom:markers"), sGet("marker-aliases"), sGet("marker-notes"),
+        sGet("subcategories"), sGet("stock-moves"), sGet("stock:cfg"),
+      ]);
+      const backup = {
+        version: 2,
+        exportedAt: new Date().toISOString(),
+        records: r || [],
+        prices: p || {},
+        stockOps: ops || [],
+        markers: sm2 || {},
+        aliases: al || {},
+        notes: nt || {},
+        subcategories: sub || {},
+        stockMoves: mvs || [],
+        stockCfg: cfg || {},
+      };
+      const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const d = new Date();
+      a.download = `masterskaya-backup-${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch(e) {
+      alert("Ошибка экспорта: " + e.message);
+    }
+  }
+
+  // ── Экспорт статистики в CSV (открывается в Excel) ──
+  function exportStatsCSV(){
+    try {
+      const wsRecs = records.filter(r => r.workshop === workshop);
+      // Заголовки
+      let csv = "Дата;Время;Мастерская;Тип;Категория;Маркировка;Кол-во;Брак;Сумма;Комментарий\n";
+      // Сортируем по дате (новые сверху)
+      const sorted = [...wsRecs].sort((a,b) => (b.timestamp||0) - (a.timestamp||0));
+      for(const r of sorted){
+        const d = new Date(r.timestamp);
+        const dateStr = `${String(d.getDate()).padStart(2,'0')}.${String(d.getMonth()+1).padStart(2,'0')}.${d.getFullYear()}`;
+        const timeStr = `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+        const type = r.recordType === "refund" ? "Возврат" : "Продажа";
+        // Экранируем точку с запятой в полях
+        const esc = (s) => String(s||"").replace(/;/g, ",");
+        csv += [dateStr, timeStr, esc(r.workshop), type, esc(r.category), esc(r.marker), r.qty||0, r.defect||0, r.amount||0, esc(r.comment)].join(";") + "\n";
+      }
+      // Добавляем итоговую строку
+      const totalAmt = wsRecs.reduce((s,r) => s + r.amount * signOf(r), 0);
+      csv += `\n;ИТОГО:;;;;;;${wsRecs.length} записей;;${totalAmt} руб;\n`;
+      
+      // BOM для корректного открытия в Excel с кириллицей
+      const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const d = new Date();
+      a.download = `statistika-${workshop}-${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch(e) {
+      alert("Ошибка экспорта: " + e.message);
+    }
+  }
+
+  // ── Касса дня (сумма продаж за сегодня) ──
+  function getTodayEarnings(){
+    const today = todayStr();
+    const dayRecs = records.filter(r => r.workshop === workshop && dateOf(r.timestamp) === today);
+    const total = dayRecs.reduce((s, r) => s + r.amount * signOf(r), 0);
+    const count = dayRecs.length;
+    return { total, count };
+  }
+
+  // ── Последняя продажа (для кнопки «повторить») ──
+  function getLastSale(){
+    const sales = records.filter(r => r.workshop === workshop && r.recordType !== "refund");
+    if(sales.length === 0) return null;
+    return sales[sales.length - 1];
+  }
+
+  // ── Повторить последнюю продажу ──
+  async function repeatLastSale(){
+    const last = getLastSale();
+    if(!last) return;
+    const rec = {
+      id: `rec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      workshop: last.workshop,
+      category: last.category,
+      marker: last.marker,
+      qty: last.qty,
+      defect: last.defect,
+      amount: last.amount,
+      comment: last.comment || "",
+      recordType: last.recordType || "sale",
+      timestamp: Date.now(),
+    };
+    const next = [...records, rec];
+    saveAndSync("records", next, setRecords);
+    if (ablyChannelRef.current && navigator.onLine) {
+      try {
+        const p = ablyChannelRef.current.publish('record-added', { rec, from: clientIdRef.current });
+        if (p && p.catch) p.catch(() => {});
+      } catch {}
+    }
+    // Списываем со склада
+    const delta = stockDelta(rec);
+    if(delta > 0){
+      appendStockOp("delta", {
+        location: `ws:${workshop}`,
+        marker: rec.marker,
+        delta: -delta,
+      });
+    }
+    setSubmitMsg({ok:true, text: `✓ Повтор: ${rec.qty}× ${rec.marker} = ${fmt(rec.amount)}₽`});
+    setTimeout(() => setSubmitMsg(null), 2500);
+  }
+
   // ── смена пароля ──
   const [pwdModalOpen, setPwdModalOpen] = useState(false);
   async function handleChangePassword(oldPwd, newPwd, confirmPwd){
@@ -3719,6 +3841,7 @@ export default function App(){
             </div>
           </div>
           <div style={{display:"flex",gap:6,alignItems:"center"}}>
+            <button onClick={downloadBackup} title="Скачать резервную копию всех данных" style={{background:"transparent",color:C.textSub,border:`1px solid ${C.border}`,padding:"6px 10px",fontSize:10,cursor:"pointer",borderRadius:0,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.5px"}}>💾</button>
             <button onClick={handleLogout} title="Переключиться на другую мастерскую" style={{background:"transparent",color:C.textSub,border:`1px solid ${C.border}`,padding:"6px 10px",fontSize:10,cursor:"pointer",borderRadius:0,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.5px"}}>
               🔄 → {workshop==="SMART" ? "Бегемот" : "SMART"}
             </button>
@@ -3787,6 +3910,37 @@ export default function App(){
         {/* ══ ЗАПИСЬ ══ */}
         {tab==="record"&&(
           <div>
+            {/* Касса дня */}
+            {(() => {
+              const { total, count } = getTodayEarnings();
+              const lastSale = getLastSale();
+              return (
+                <div style={{...s.card, marginBottom:12, background:C.brandDim, borderColor:C.brand+"44"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                    <div>
+                      <div style={{fontSize:10,color:C.brand,fontWeight:700,textTransform:"uppercase",letterSpacing:"1px"}}>Касса за сегодня</div>
+                      <div style={{fontSize:28,fontWeight:800,color:C.brand,lineHeight:1.1,marginTop:2}}>
+                        {fmt(total)} ₽
+                      </div>
+                      <div style={{fontSize:11,color:C.textSub,marginTop:2}}>
+                        {count > 0 ? `${count} ${count === 1 ? "запись" : count < 5 ? "записи" : "записей"}` : "пока нет записей"}
+                      </div>
+                    </div>
+                    {lastSale && (
+                      <button onClick={repeatLastSale} style={{
+                        background:C.brand,color:"#fff",border:"none",padding:"10px 14px",
+                        borderRadius:0,cursor:"pointer",fontWeight:700,fontSize:11,textAlign:"right",
+                        textTransform:"uppercase",letterSpacing:"0.5px",lineHeight:1.3
+                      }}>
+                        ↻ Повторить<br/>
+                        <span style={{fontSize:13}}>{lastSale.qty}× {lastSale.marker}</span><br/>
+                        <span style={{fontSize:11,opacity:0.9}}>= {fmt(lastSale.amount)} ₽</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
             {/* Тип записи */}
             <div style={{marginBottom:12}}>
               <label style={s.label}>Тип записи</label>
@@ -4051,6 +4205,14 @@ export default function App(){
               )}
             </div>
             {renderStats()}
+            {/* Кнопка экспорта в CSV */}
+            <button onClick={exportStatsCSV} style={{
+              ...s.btn(), marginTop:16, width:"100%", padding:"12px",
+              background:C.success, color:"#fff", border:"none",
+              fontSize:12, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.5px"
+            }}>
+              📊 Скачать статистику в Excel (CSV)
+            </button>
           </div>
         )}
 
