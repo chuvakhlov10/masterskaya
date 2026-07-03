@@ -3449,6 +3449,161 @@ export default function App(){
     );
   }
 
+  // ── рендер тренда: график по неделям + динамика по категориям ──
+  function renderTrend(){
+    const wsRecs = records.filter(r => r.workshop === workshop);
+    if(wsRecs.length === 0){
+      return <div style={{...s.card, textAlign:"center", color:C.textDim, padding:24}}>Пока нет данных для тренда</div>;
+    }
+    
+    // ── График по неделям (последние 12 недель) ──
+    const now = new Date();
+    const weeks = [];
+    for(let i = 11; i >= 0; i--){
+      const weekEnd = new Date(now);
+      weekEnd.setDate(now.getDate() - i * 7);
+      const weekStart = new Date(weekEnd);
+      weekStart.setDate(weekEnd.getDate() - 6);
+      const weekRecs = wsRecs.filter(r => {
+        const rd = new Date(r.timestamp);
+        return rd >= weekStart && rd <= weekEnd;
+      });
+      const sum = weekRecs.reduce((s, r) => s + r.amount * signOf(r), 0);
+      const weekNum = getWeekNumber(weekStart);
+      weeks.push({
+        label: `${String(weekStart.getDate()).padStart(2,'0')}.${String(weekStart.getMonth()+1).padStart(2,'0')}`,
+        weekNum,
+        sum,
+        count: weekRecs.length,
+      });
+    }
+    const maxSum = Math.max(...weeks.map(w => w.sum), 1);
+    
+    // ── Динамика по категориям (последние 30 дней vs предыдущие 30) ──
+    const last30End = new Date(now);
+    const last30Start = new Date(now);
+    last30Start.setDate(now.getDate() - 30);
+    const prev30End = new Date(last30Start);
+    prev30End.setDate(last30Start.getDate() - 1);
+    const prev30Start = new Date(prev30End);
+    prev30Start.setDate(prev30End.getDate() - 30);
+    
+    const byCat = {};
+    for(const r of wsRecs){
+      const sign = signOf(r);
+      const amt = (r.amount || 0) * sign;
+      if(!byCat[r.category]) byCat[r.category] = { last30: 0, prev30: 0, markers: {} };
+      const rd = new Date(r.timestamp);
+      if(rd >= last30Start && rd <= last30End) byCat[r.category].last30 += amt;
+      if(rd >= prev30Start && rd <= prev30End) byCat[r.category].prev30 += amt;
+      // Топ маркеры по категории
+      if(rd >= last30Start && rd <= last30End){
+        if(!byCat[r.category].markers[r.marker]) byCat[r.category].markers[r.marker] = 0;
+        byCat[r.category].markers[r.marker] += amt;
+      }
+    }
+    
+    return (
+      <div>
+        {/* График по неделям */}
+        <div style={{...s.card, marginBottom:12}}>
+          <div style={{fontSize:13, fontWeight:700, color:C.textSub, marginBottom:12, textTransform:"uppercase", letterSpacing:"0.5px"}}>
+            📈 Выручка по неделям (12 недель)
+          </div>
+          <div style={{display:"flex", alignItems:"flex-end", gap:4, height:140, padding:"0 4px"}}>
+            {weeks.map((w, i) => {
+              const heightPct = (w.sum / maxSum) * 100;
+              const isLast = i === weeks.length - 1;
+              return (
+                <div key={i} style={{flex:1, display:"flex", flexDirection:"column", alignItems:"center", gap:4, height:"100%", justifyContent:"flex-end"}}>
+                  <div style={{fontSize:9, color:isLast ? C.brand : C.textDim, fontWeight:isLast ? 700 : 600, whiteSpace:"nowrap"}}>
+                    {w.sum > 0 ? fmt(w.sum) : ""}
+                  </div>
+                  <div style={{
+                    width:"100%", 
+                    height:`${Math.max(heightPct, 2)}%`,
+                    background: isLast ? C.brand : (w.sum > 0 ? C.brand + "66" : C.border),
+                    minHeight: 3,
+                    borderRadius: "2px 2px 0 0",
+                    transition: "height .3s",
+                  }} title={`${w.label}: ${fmt(w.sum)} ₽, ${w.count} записей`}/>
+                  <div style={{fontSize:9, color:C.textDim, whiteSpace:"nowrap", transform:"rotate(-45deg)", transformOrigin:"center", marginTop:4}}>
+                    {w.label}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+        
+        {/* Динамика по категориям */}
+        <div style={{...s.card}}>
+          <div style={{fontSize:13, fontWeight:700, color:C.textSub, marginBottom:10, textTransform:"uppercase", letterSpacing:"0.5px"}}>
+            📊 Динамика по категориям
+          </div>
+          <div style={{fontSize:11, color:C.textDim, marginBottom:12}}>
+            Последние 30 дней vs предыдущие 30 дней
+          </div>
+          {Object.entries(byCat)
+            .filter(([_, d]) => d.last30 > 0 || d.prev30 > 0)
+            .sort((a, b) => b[1].last30 - a[1].last30)
+            .map(([cat, d]) => {
+              const diff = d.last30 - d.prev30;
+              const pct = d.prev30 > 0 ? Math.round((diff / d.prev30) * 100) : (d.last30 > 0 ? 100 : 0);
+              const isUp = diff > 0;
+              const isFlat = Math.abs(diff) < 100;
+              const arrow = isFlat ? "→" : (isUp ? "↑" : "↓");
+              const color = isFlat ? C.textSub : (isUp ? C.success : C.danger);
+              // Топ-3 маркера в категории
+              const topMarkers = Object.entries(d.markers)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 3)
+                .map(([m, v]) => m);
+              return (
+                <div key={cat} style={{padding:"10px 0", borderTop:`1px solid ${C.border}22`}}>
+                  <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:4}}>
+                    <span style={{fontWeight:700, fontSize:13, color:C.text}}>{cat}</span>
+                    <div style={{textAlign:"right"}}>
+                      <span style={{fontWeight:700, fontSize:13, color:C.text}}>{fmt(d.last30)} ₽</span>
+                      <span style={{fontSize:11, color, fontWeight:700, marginLeft:8}}>
+                        {arrow} {Math.abs(pct)}%
+                      </span>
+                    </div>
+                  </div>
+                  <div style={{fontSize:11, color:C.textDim}}>
+                    Было: {fmt(d.prev30)} ₽
+                    {topMarkers.length > 0 && (
+                      <span style={{marginLeft:8, color:C.textSub}}>
+                        · топ: {topMarkers.join(", ")}
+                      </span>
+                    )}
+                  </div>
+                  {/* Полоса прогресса */}
+                  <div style={{marginTop:6, height:4, background:C.bgSection, borderRadius:2, overflow:"hidden"}}>
+                    <div style={{
+                      height:"100%",
+                      width: `${Math.min((d.last30 / Math.max(d.prev30, d.last30, 1)) * 100, 100)}%`,
+                      background: isFlat ? C.textSub : (isUp ? C.success : C.danger),
+                      transition: "width .3s",
+                    }}/>
+                  </div>
+                </div>
+              );
+            })}
+        </div>
+      </div>
+    );
+  }
+
+  // Вспомогательная функция: номер недели
+  function getWeekNumber(d){
+    const date = new Date(d);
+    date.setHours(0, 0, 0, 0);
+    date.setDate(date.getDate() + 3 - (date.getDay() + 6) % 7);
+    const week1 = new Date(date.getFullYear(), 0, 4);
+    return 1 + Math.round(((date - week1) / 86400000 - 3 + (week1.getDay() + 6) % 7) / 7);
+  }
+
   // ── рендер статистики ──
   function renderStats(){
     // L4: валидация statsDate — fallback на сегодня если невалидная
@@ -4094,7 +4249,7 @@ export default function App(){
         {tab==="stats"&&(
           <div>
             <div style={{display:"flex",gap:1,marginBottom:16,background:C.border,padding:1}}>
-              {[["day","День"],["month","Месяц"],["year","Год"]].map(([id,label])=>(
+              {[["day","День"],["month","Месяц"],["year","Год"],["trend","Тренд"]].map(([id,label])=>(
                 <button key={id} onClick={()=>setStatsPeriod(id)} style={{
                   flex:1,padding:"12px 4px",fontSize:12,fontWeight:800,border:"none",cursor:"pointer",
                   background:statsPeriod===id?C.bgCard:C.bgSection,
@@ -4104,18 +4259,19 @@ export default function App(){
                 }}>{label}</button>
               ))}
             </div>
-            <div style={{marginBottom:14}}>
-              {statsPeriod==="day" ? (
-                <input type="date" value={statsDate} onChange={e=>setStatsDate(e.target.value)}
-                  style={{...s.input,cursor:"pointer",colorScheme:"dark",color:C.text,fontWeight:500}}/>
-              ) : statsPeriod==="month" ? (
-                <select value={statsDate.slice(0,7)} onChange={e=>setStatsDate(e.target.value+"-15")}
-                  style={s.input}>
-                  {(() => {
-                    const months = [];
-                    const now = new Date();
-                    for(let year = now.getFullYear(); year >= 2025; year--){
-                      for(let month = 11; month >= 0; month--){
+            {statsPeriod !== "trend" && (
+              <div style={{marginBottom:14}}>
+                {statsPeriod==="day" ? (
+                  <input type="date" value={statsDate} onChange={e=>setStatsDate(e.target.value)}
+                    style={{...s.input,cursor:"pointer",colorScheme:"dark",color:C.text,fontWeight:500}}/>
+                ) : statsPeriod==="month" ? (
+                  <select value={statsDate.slice(0,7)} onChange={e=>setStatsDate(e.target.value+"-15")}
+                    style={s.input}>
+                    {(() => {
+                      const months = [];
+                      const now = new Date();
+                      for(let year = now.getFullYear(); year >= 2025; year--){
+                        for(let month = 11; month >= 0; month--){
                         if(year === now.getFullYear() && month > now.getMonth()) continue;
                         const val = `${year}-${String(month+1).padStart(2,"0")}`;
                         const label = `${MONTH_NAMES[month]} ${year}`;
@@ -4138,16 +4294,19 @@ export default function App(){
                   })()}
                 </select>
               )}
-            </div>
-            {renderStats()}
-            {/* Кнопка экспорта в CSV */}
-            <button onClick={exportStatsCSV} style={{
-              ...s.btn(), marginTop:16, width:"100%", padding:"12px",
-              background:C.success, color:"#fff", border:"none",
-              fontSize:12, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.5px"
-            }}>
+              </div>
+            )}
+            {statsPeriod === "trend" ? renderTrend() : renderStats()}
+            {/* Кнопка экспорта в CSV — только не в тренд-режиме */}
+            {statsPeriod !== "trend" && (
+              <button onClick={exportStatsCSV} style={{
+                ...s.btn(), marginTop:16, width:"100%", padding:"12px",
+                background:C.success, color:"#fff", border:"none",
+                fontSize:12, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.5px"
+              }}>
               📊 Скачать статистику в Excel (CSV)
-            </button>
+              </button>
+            )}
           </div>
         )}
 
