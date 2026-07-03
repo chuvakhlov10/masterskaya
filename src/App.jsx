@@ -3865,6 +3865,16 @@ export default function App(){
             <span style={{fontSize:13,color:C.brand,fontWeight:800,fontVariantNumeric:"tabular-nums"}}>
               {`${String(nowTime.getHours()).padStart(2,"0")}:${String(nowTime.getMinutes()).padStart(2,"0")}`}
             </span>
+            {/* Компактная касса дня — надпись чёрная, сумма зелёная */}
+            {(() => {
+              const { total } = getTodayEarnings();
+              return (
+                <span style={{fontSize:13,fontWeight:700,marginLeft:4}}>
+                  <span style={{color:C.textSub,fontWeight:600}}>Сегодня:</span>{" "}
+                  <span style={{color:C.success,fontWeight:800}}>{fmt(total)} ₽</span>
+                </span>
+              );
+            })()}
             {/* Индикатор статуса сохранения */}
             {Object.entries(saveStatus).map(([key, status]) => (
               <span key={key} style={{
@@ -3910,37 +3920,21 @@ export default function App(){
         {/* ══ ЗАПИСЬ ══ */}
         {tab==="record"&&(
           <div>
-            {/* Касса дня */}
-            {(() => {
-              const { total, count } = getTodayEarnings();
-              const lastSale = getLastSale();
-              return (
-                <div style={{...s.card, marginBottom:12, background:C.brandDim, borderColor:C.brand+"44"}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                    <div>
-                      <div style={{fontSize:10,color:C.brand,fontWeight:700,textTransform:"uppercase",letterSpacing:"1px"}}>Касса за сегодня</div>
-                      <div style={{fontSize:28,fontWeight:800,color:C.brand,lineHeight:1.1,marginTop:2}}>
-                        {fmt(total)} ₽
-                      </div>
-                      <div style={{fontSize:11,color:C.textSub,marginTop:2}}>
-                        {count > 0 ? `${count} ${count === 1 ? "запись" : count < 5 ? "записи" : "записей"}` : "пока нет записей"}
-                      </div>
-                    </div>
-                    {lastSale && (
-                      <button onClick={repeatLastSale} style={{
-                        background:C.brand,color:"#fff",border:"none",padding:"10px 14px",
-                        borderRadius:0,cursor:"pointer",fontWeight:700,fontSize:11,textAlign:"right",
-                        textTransform:"uppercase",letterSpacing:"0.5px",lineHeight:1.3
-                      }}>
-                        ↻ Повторить<br/>
-                        <span style={{fontSize:13}}>{lastSale.qty}× {lastSale.marker}</span><br/>
-                        <span style={{fontSize:11,opacity:0.9}}>= {fmt(lastSale.amount)} ₽</span>
-                      </button>
-                    )}
-                  </div>
-                </div>
-              );
-            })()}
+            {/* Кнопка повторить последнюю продажу */}
+            {getLastSale() && (
+              <button onClick={repeatLastSale} style={{
+                width:"100%", marginBottom:12, padding:"10px 14px",
+                background:C.bgCard, border:`1px solid ${C.brand}44`,
+                cursor:"pointer", fontWeight:700, fontSize:12,
+                display:"flex", justifyContent:"space-between", alignItems:"center",
+                color:C.text,
+              }}>
+                <span style={{color:C.brand}}>↻ Повторить последнюю</span>
+                <span style={{color:C.success, fontWeight:800}}>
+                  {getLastSale().qty}× {getLastSale().marker} = {fmt(getLastSale().amount)} ₽
+                </span>
+              </button>
+            )}
             {/* Тип записи */}
             <div style={{marginBottom:12}}>
               <label style={s.label}>Тип записи</label>
