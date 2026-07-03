@@ -3456,23 +3456,33 @@ export default function App(){
       return <div style={{...s.card, textAlign:"center", color:C.textDim, padding:24}}>Пока нет данных для тренда</div>;
     }
     
-    // ── График по неделям (последние 12 недель) ──
+    // ── График по неделям (последние 12 КАЛЕНДАРНЫХ недель) ──
+    // ВАЖНО: используем календарные недели (Пн-Вс), не скользящее окно от now.
+    // Иначе границы зависят от времени суток и при добавлении записи
+    // числа за прошлые недели могут меняться.
     const now = new Date();
+    now.setHours(23, 59, 59, 999); // конец сегодняшнего дня
+    // Находим понедельник текущей недели
+    const dayOfWeek = now.getDay(); // 0=Вс, 1=Пн, ..., 6=Сб
+    const daysSinceMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+    const currentWeekMonday = new Date(now);
+    currentWeekMonday.setDate(now.getDate() - daysSinceMonday);
+    currentWeekMonday.setHours(0, 0, 0, 0);
+    
     const weeks = [];
     for(let i = 11; i >= 0; i--){
-      const weekEnd = new Date(now);
-      weekEnd.setDate(now.getDate() - i * 7);
-      const weekStart = new Date(weekEnd);
-      weekStart.setDate(weekEnd.getDate() - 6);
+      const weekStart = new Date(currentWeekMonday);
+      weekStart.setDate(currentWeekMonday.getDate() - i * 7);
+      const weekEnd = new Date(weekStart);
+      weekEnd.setDate(weekStart.getDate() + 6);
+      weekEnd.setHours(23, 59, 59, 999);
       const weekRecs = wsRecs.filter(r => {
         const rd = new Date(r.timestamp);
         return rd >= weekStart && rd <= weekEnd;
       });
       const sum = weekRecs.reduce((s, r) => s + r.amount * signOf(r), 0);
-      const weekNum = getWeekNumber(weekStart);
       weeks.push({
         label: `${String(weekStart.getDate()).padStart(2,'0')}.${String(weekStart.getMonth()+1).padStart(2,'0')}`,
-        weekNum,
         sum,
         count: weekRecs.length,
       });
@@ -3480,13 +3490,18 @@ export default function App(){
     const maxSum = Math.max(...weeks.map(w => w.sum), 1);
     
     // ── Динамика по категориям (последние 30 дней vs предыдущие 30) ──
+    // Нормализуем границы по началу/концу дня — не зависят от времени суток
     const last30End = new Date(now);
-    const last30Start = new Date(now);
-    last30Start.setDate(now.getDate() - 30);
+    last30End.setHours(23, 59, 59, 999);
+    const last30Start = new Date(last30End);
+    last30Start.setDate(last30End.getDate() - 29); // 30 дней включая сегодня
+    last30Start.setHours(0, 0, 0, 0);
     const prev30End = new Date(last30Start);
     prev30End.setDate(last30Start.getDate() - 1);
+    prev30End.setHours(23, 59, 59, 999);
     const prev30Start = new Date(prev30End);
-    prev30Start.setDate(prev30End.getDate() - 30);
+    prev30Start.setDate(prev30End.getDate() - 29);
+    prev30Start.setHours(0, 0, 0, 0);
     
     const byCat = {};
     for(const r of wsRecs){
