@@ -2735,50 +2735,6 @@ export default function App(){
     return { total, count };
   }
 
-  // ── Последняя продажа (для кнопки «повторить») ──
-  function getLastSale(){
-    const sales = records.filter(r => r.workshop === workshop && r.recordType !== "refund");
-    if(sales.length === 0) return null;
-    return sales[sales.length - 1];
-  }
-
-  // ── Повторить последнюю продажу ──
-  async function repeatLastSale(){
-    const last = getLastSale();
-    if(!last) return;
-    const rec = {
-      id: `rec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      workshop: last.workshop,
-      category: last.category,
-      marker: last.marker,
-      qty: last.qty,
-      defect: last.defect,
-      amount: last.amount,
-      comment: last.comment || "",
-      recordType: last.recordType || "sale",
-      timestamp: Date.now(),
-    };
-    const next = [...records, rec];
-    saveAndSync("records", next, setRecords);
-    if (ablyChannelRef.current && navigator.onLine) {
-      try {
-        const p = ablyChannelRef.current.publish('record-added', { rec, from: clientIdRef.current });
-        if (p && p.catch) p.catch(() => {});
-      } catch {}
-    }
-    // Списываем со склада
-    const delta = stockDelta(rec);
-    if(delta > 0){
-      appendStockOp("delta", {
-        location: `ws:${workshop}`,
-        marker: rec.marker,
-        delta: -delta,
-      });
-    }
-    setSubmitMsg({ok:true, text: `✓ Повтор: ${rec.qty}× ${rec.marker} = ${fmt(rec.amount)}₽`});
-    setTimeout(() => setSubmitMsg(null), 2500);
-  }
-
   // ── смена пароля ──
   const [pwdModalOpen, setPwdModalOpen] = useState(false);
   async function handleChangePassword(oldPwd, newPwd, confirmPwd){
@@ -3920,21 +3876,6 @@ export default function App(){
         {/* ══ ЗАПИСЬ ══ */}
         {tab==="record"&&(
           <div>
-            {/* Кнопка повторить последнюю продажу */}
-            {getLastSale() && (
-              <button onClick={repeatLastSale} style={{
-                width:"100%", marginBottom:12, padding:"10px 14px",
-                background:C.bgCard, border:`1px solid ${C.brand}44`,
-                cursor:"pointer", fontWeight:700, fontSize:12,
-                display:"flex", justifyContent:"space-between", alignItems:"center",
-                color:C.text,
-              }}>
-                <span style={{color:C.brand}}>↻ Повторить последнюю</span>
-                <span style={{color:C.success, fontWeight:800}}>
-                  {getLastSale().qty}× {getLastSale().marker} = {fmt(getLastSale().amount)} ₽
-                </span>
-              </button>
-            )}
             {/* Тип записи */}
             <div style={{marginBottom:12}}>
               <label style={s.label}>Тип записи</label>
