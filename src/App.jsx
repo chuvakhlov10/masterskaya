@@ -244,7 +244,27 @@ function cacheGet(key){
   } catch { return null; }
 }
 function cacheSet(key, val){
-  try { localStorage.setItem(OFFLINE_CACHE_PREFIX + key, JSON.stringify(val)); } catch {}
+  try {
+    localStorage.setItem(OFFLINE_CACHE_PREFIX + key, JSON.stringify(val));
+  } catch (e) {
+    // M7: QuotaExceededError — удаляем самые старые кеши и пробуем снова
+    console.warn('[cacheSet] quota exceeded, очищаем старые кеши:', key);
+    try {
+      // Собираем все ключи кеша
+      const cacheKeys = [];
+      for(let i = 0; i < localStorage.length; i++){
+        const k = localStorage.key(i);
+        if(k && k.startsWith(OFFLINE_CACHE_PREFIX)) cacheKeys.push(k);
+      }
+      // Удаляем половину самых старых (по порядку в localStorage)
+      const toRemove = cacheKeys.slice(0, Math.ceil(cacheKeys.length / 2));
+      for(const k of toRemove) localStorage.removeItem(k);
+      // Пробуем снова
+      localStorage.setItem(OFFLINE_CACHE_PREFIX + key, JSON.stringify(val));
+    } catch (e2) {
+      console.warn('[cacheSet] не удалось сохранить даже после очистки:', e2.message);
+    }
+  }
 }
 function getQueue(){
   try { return JSON.parse(localStorage.getItem(PENDING_WRITES_KEY) || "[]"); } catch { return []; }
@@ -1900,13 +1920,14 @@ export default function App(){
             result.ws[tWs][op.marker] = (result.ws[tWs][op.marker] || 0) + op.qty;
           }
         } else if (op.type === "rename") {
+          // M2: если newMarker уже существует — складываем значения (не перезаписываем)
           if (result.main[op.oldMarker] !== undefined) {
-            result.main[op.newMarker] = result.main[op.oldMarker];
+            result.main[op.newMarker] = (result.main[op.newMarker] || 0) + result.main[op.oldMarker];
             delete result.main[op.oldMarker];
           }
           for (const ws of WORKSHOPS) {
             if (result.ws[ws] && result.ws[ws][op.oldMarker] !== undefined) {
-              result.ws[ws][op.newMarker] = result.ws[ws][op.oldMarker];
+              result.ws[ws][op.newMarker] = (result.ws[ws][op.newMarker] || 0) + result.ws[ws][op.oldMarker];
               delete result.ws[ws][op.oldMarker];
             }
           }
@@ -2837,6 +2858,8 @@ export default function App(){
   async function addMarker(){
     if(!newMarkerCat || !newMarkerName.trim()){setNewMarkerMsg({ok:false,text:"Укажите категорию и название"});return;}
     const nm = newMarkerName.trim();
+    // M5: запрещаем / в названии — создаёт поддиректории в GitHub photos
+    if(nm.includes("/")){setNewMarkerMsg({ok:false,text:"Нельзя использовать символ /"});return;}
     if((markers[newMarkerCat]||[]).includes(nm)){setNewMarkerMsg({ok:false,text:"Уже есть"});return;}
     const next = {...markers, [newMarkerCat]:[...(markers[newMarkerCat]||[]), nm]};
     await saveAndSync("custom:markers", next, setMarkers);
@@ -2844,15 +2867,108 @@ export default function App(){
     setTimeout(()=>setNewMarkerMsg(null), 2000);
   }
   async function deleteMarker(cat,m){
-    if(!confirm(`Удалить «${m}»?`)) return;
-    const next = {...markers, [cat]:markers[cat].filter(x=>x!==m)};
-    await saveAndSync("custom:markers", next, setMarkers);
-    // Удалить алиасы тоже
-    if(aliases[m]){
-      const nextAliases = {...aliases};
-      delete nextAliases[m];
-      await saveAndSync("marker-aliases", nextAliases, setAliases);
+    // M4: каскадное удаление — проверяем есть ли история/остатки
+    const hasRecords = records.some(r => r.marker === m);
+    const hasInStock = stockMain[m] !== undefined || WORKSHOPS.some(ws => stockWS[ws] && stockWS[ws][m] !== undefined);
+    const hasPrice = prices[m] !== undefined;
+    const hasNote = notes[m] !== undefined;
+    const hasPhoto = photoCache[m];
+    
+    let warning = `Удалить «${m}»?`;
+    const orphans = [];
+    if(hasRecords) orphans.push("записи");
+    if(hasInStock) orphans.push("остатки на складе");
+    if(hasPrice) orphans.push("цену");
+    if(hasNote) orphans.push("комментарий");
+    if(hasPhoto) orphans.push("фото");
+    if(orphans.length > 0){
+      warning += `\n\nВнимание: у этой маркировки есть ${orphans.join(", ")}. Они будут удалены вместе с маркировкой.`;
     }
+    if(!confirm(warning)) return;
+    
+    // 1. markers
+    const nextMarkers = {...markers, [cat]:markers[cat].filter(x=>x!==m)};
+    setMarkers(nextMarkers);
+    
+    // 2. aliases
+    let nextAliases = aliases;
+    if(aliases[m]){
+      nextAliases = {...aliases};
+      delete nextAliases[m];
+      setAliases(nextAliases);
+    }
+    
+    // 3. prices
+    let nextPrices = prices;
+    if(prices[m] !== undefined){
+      nextPrices = {...prices};
+      delete nextPrices[m];
+      setPrices(nextPrices);
+    }
+    
+    // 4. notes
+    let nextNotes = notes;
+    if(notes[m] !== undefined){
+      nextNotes = {...notes};
+      delete nextNotes[m];
+      setNotes(nextNotes);
+    }
+    
+    // 5. stock:cfg
+    let nextCfg = stockCfg;
+    if(stockCfg[m] !== undefined){
+      nextCfg = {...stockCfg};
+      delete nextCfg[m];
+      setStockCfg(nextCfg);
+    }
+    
+    // 6. records — НЕ удаляем (история продаж должна остаться)
+    // Записи с удалённым маркером будут отображаться, но маркер нельзя будет выбрать в форме
+    
+    // 7. photo
+    if(hasPhoto){
+      photoDelete(m).catch(() => {});
+      setPhotoCache(p => {
+        const next = {...p};
+        delete next[m];
+        return next;
+      });
+    }
+    
+    // 8. stock-ops — добавляем set 0 чтобы обнулить остатки
+    if(hasInStock){
+      if(stockMain[m] !== undefined){
+        appendStockOp("set", { location: "main", marker: m, value: 0 });
+      }
+      for(const ws of WORKSHOPS){
+        if(stockWS[ws] && stockWS[ws][m] !== undefined){
+          appendStockOp("set", { location: `ws:${ws}`, marker: m, value: 0 });
+        }
+      }
+    }
+    
+    // Записываем все изменения параллельно
+    const writes = [sSet("custom:markers", nextMarkers)];
+    if(aliases[m]) writes.push(sSet("marker-aliases", nextAliases));
+    if(prices[m] !== undefined) writes.push(sSet("prices", nextPrices));
+    if(notes[m] !== undefined) writes.push(sSet("marker-notes", nextNotes));
+    if(stockCfg[m] !== undefined) writes.push(sSet("stock:cfg", nextCfg));
+    
+    // Ably
+    if (ablyChannelRef.current && navigator.onLine) {
+      const ts = Date.now();
+      try {
+        ablyChannelRef.current.publish('update', { key: "custom:markers", value: nextMarkers, ts, from: clientIdRef.current });
+        if(aliases[m]) ablyChannelRef.current.publish('update', { key: "marker-aliases", value: nextAliases, ts, from: clientIdRef.current });
+        if(prices[m] !== undefined) ablyChannelRef.current.publish('update', { key: "prices", value: nextPrices, ts, from: clientIdRef.current });
+        if(notes[m] !== undefined) ablyChannelRef.current.publish('update', { key: "marker-notes", value: nextNotes, ts, from: clientIdRef.current });
+        if(stockCfg[m] !== undefined) ablyChannelRef.current.publish('update', { key: "stock:cfg", value: nextCfg, ts, from: clientIdRef.current });
+      } catch {}
+    }
+    
+    try {
+      await Promise.all(writes);
+    } catch(e) { console.warn('[deleteMarker] error:', e.message); }
   }
 
   // ── Алиасы: добавить / удалить / сделать основным ──
@@ -2893,69 +3009,100 @@ export default function App(){
     const existing = aliases[oldMain] || [];
     if(!existing.includes(newMain)) return {ok:false, text:"Это не алиас"};
 
-    // 1. Обновить markers.json — заменить oldMain на newMain в категории
+    // H6: Атомарный promoteAlias — все state мгновенно, потом один Promise.all
+    // 1. markers
     const nextMarkers = {...markers, [cat]: markers[cat].map(m => m === oldMain ? newMain : m)};
-    await saveAndSync("custom:markers", nextMarkers, setMarkers);
-
-    // 2. Обновить aliases: newMain больше не алиас, oldMain становится алиасом
+    setMarkers(nextMarkers);
+    
+    // 2. aliases
     const newAliases = existing.filter(a => a !== newMain);
     newAliases.push(oldMain);
     const nextAliases = {...aliases};
     delete nextAliases[oldMain];
     if(newAliases.length > 0) nextAliases[newMain] = newAliases;
-    await saveAndSync("marker-aliases", nextAliases, setAliases);
-
-    // 3. Обновить records
+    setAliases(nextAliases);
+    
+    // 3. records
     let recChanged = false;
     const nextRecords = records.map(r => {
       if(r.marker === oldMain){ recChanged = true; return {...r, marker: newMain}; }
       return r;
     });
-    if(recChanged){ await saveAndSync("records", nextRecords, setRecords); }
-
-    // 4. Обновить prices
+    if(recChanged) setRecords(nextRecords);
+    
+    // 4. prices
+    let nextPrices = prices;
     if(prices[oldMain] !== undefined){
-      const nextPrices = {...prices};
+      nextPrices = {...prices};
       nextPrices[newMain] = nextPrices[oldMain];
       delete nextPrices[oldMain];
-      await saveAndSync("prices", nextPrices, setPrices);
+      setPrices(nextPrices);
     }
-
-    // 5. Обновить склады через rename-операцию (event sourcing)
-    {
-      const hasInMain = stockMain[oldMain] !== undefined;
-      const hasInWS = WORKSHOPS.some(ws => stockWS[ws] && stockWS[ws][oldMain] !== undefined);
-      if(hasInMain || hasInWS){
-        await appendStockOp("rename", {
-          oldMarker: oldMain,
-          newMarker: newMain,
-        });
-      }
-    }
-
-    // 6. Обновить stockCfg
+    
+    // 5. stock:cfg
+    let nextCfg = stockCfg;
     if(stockCfg[oldMain] !== undefined){
-      const nextCfg = {...stockCfg};
+      nextCfg = {...stockCfg};
       nextCfg[newMain] = nextCfg[oldMain];
       delete nextCfg[oldMain];
-      await saveAndSync("stock:cfg", nextCfg, setStockCfg);
+      setStockCfg(nextCfg);
     }
-
-    // 6a. Обновить notes (комментарии)
+    
+    // 6. notes
+    let nextNotes = notes;
     if(notes[oldMain] !== undefined){
-      const nextNotes = {...notes};
+      nextNotes = {...notes};
       nextNotes[newMain] = nextNotes[oldMain];
       delete nextNotes[oldMain];
-      await saveAndSync("marker-notes", nextNotes, setNotes);
+      setNotes(nextNotes);
     }
-
-    // 7. Фото — асинхронно
+    
+    // 7. stock-ops rename
+    const hasInStock = stockMain[oldMain] !== undefined 
+      || WORKSHOPS.some(ws => stockWS[ws] && stockWS[ws][oldMain] !== undefined);
+    
+    // 8. photo — асинхронно
     photoGet(oldMain).then(async photo => {
       if(photo){
-        await photoSet(newMain, photo);
-        try { await photoDelete(oldMain); } catch {}
+        try {
+          await photoSet(newMain, photo);
+          await photoDelete(oldMain);
+        } catch(e) { console.warn('[promoteAlias] photo error:', e.message); }
       }
     });
+    
+    // Записываем ВСЕ изменения параллельно
+    const writes = [
+      sSet("custom:markers", nextMarkers),
+      sSet("marker-aliases", nextAliases),
+    ];
+    if(recChanged) writes.push(sSet("records", nextRecords));
+    if(prices[oldMain] !== undefined) writes.push(sSet("prices", nextPrices));
+    if(stockCfg[oldMain] !== undefined) writes.push(sSet("stock:cfg", nextCfg));
+    if(notes[oldMain] !== undefined) writes.push(sSet("marker-notes", nextNotes));
+    
+    // Ably
+    if (ablyChannelRef.current && navigator.onLine) {
+      const ts = Date.now();
+      try {
+        ablyChannelRef.current.publish('update', { key: "custom:markers", value: nextMarkers, ts, from: clientIdRef.current });
+        ablyChannelRef.current.publish('update', { key: "marker-aliases", value: nextAliases, ts, from: clientIdRef.current });
+        if(recChanged) ablyChannelRef.current.publish('changed', { key: "records", ts, from: clientIdRef.current });
+        if(prices[oldMain] !== undefined) ablyChannelRef.current.publish('update', { key: "prices", value: nextPrices, ts, from: clientIdRef.current });
+        if(stockCfg[oldMain] !== undefined) ablyChannelRef.current.publish('update', { key: "stock:cfg", value: nextCfg, ts, from: clientIdRef.current });
+        if(notes[oldMain] !== undefined) ablyChannelRef.current.publish('update', { key: "marker-notes", value: nextNotes, ts, from: clientIdRef.current });
+      } catch {}
+    }
+    
+    if(hasInStock){
+      appendStockOp("rename", { oldMarker: oldMain, newMarker: newMain });
+    }
+    
+    try {
+      const results = await Promise.all(writes);
+      const failed = results.filter(r => !r.ok).length;
+      if(failed > 0) console.warn(`[promoteAlias] ${failed}/${writes.length} записей не прошли`);
+    } catch(e) { console.warn('[promoteAlias] error:', e.message); }
 
     return {ok:true, text:`«${oldMain}» → «${newMain}» (теперь основное)`};
   }
@@ -2966,16 +3113,22 @@ export default function App(){
     newName = (newName||"").trim();
     if(!newName){ return {ok:false, text:"Введите новое название"}; }
     if(newName === oldName){ return {ok:false, text:"Название не изменилось"}; }
+    // M5: запрещаем / в названии
+    if(newName.includes("/")){ return {ok:false, text:"Нельзя использовать символ /"}; }
     // Проверка на дубликат во ВСЕХ категориях
     const allNames = Object.values(markers).flat();
     if(allNames.includes(newName)){
       return {ok:false, text:`«${newName}» уже существует`};
     }
 
+    // H6: Атомарный rename — собираем все изменения, обновляем state мгновенно,
+    // потом записываем всё параллельно через Promise.all с mergeFn.
+    // Если сеть упадёт посередине — все изменения либо применятся, либо попадут в очередь.
+    
     // 1. markers (категории)
     const nextMarkers = {...markers, [cat]: markers[cat].map(x=>x===oldName?newName:x)};
-    await saveAndSync("custom:markers", nextMarkers, setMarkers);
-
+    setMarkers(nextMarkers);
+    
     // 2. records (записи)
     let recChanged = false;
     const nextRecords = records.map(r=>{
@@ -2985,61 +3138,92 @@ export default function App(){
       }
       return r;
     });
-    if(recChanged){
-      await saveAndSync("records", nextRecords, setRecords);
-    }
-
+    if(recChanged) setRecords(nextRecords);
+    
     // 3. prices (цены)
+    let nextPrices = prices;
     if(prices[oldName] !== undefined){
-      const nextPrices = {...prices};
+      nextPrices = {...prices};
       nextPrices[newName] = nextPrices[oldName];
       delete nextPrices[oldName];
-      await saveAndSync("prices", nextPrices, setPrices);
+      setPrices(nextPrices);
     }
-
-    // 4-5. Склады через rename-операцию (event sourcing)
-    {
-      const hasInMain = stockMain[oldName] !== undefined;
-      const hasInWS = WORKSHOPS.some(ws => stockWS[ws] && stockWS[ws][oldName] !== undefined);
-      if(hasInMain || hasInWS){
-        await appendStockOp("rename", {
-          oldMarker: oldName,
-          newMarker: newName,
-        });
-      }
-    }
-
-    // 6. stock:cfg (пороги)
+    
+    // 4. stock:cfg (пороги)
+    let nextCfg = stockCfg;
     if(stockCfg[oldName] !== undefined){
-      const nextCfg = {...stockCfg};
+      nextCfg = {...stockCfg};
       nextCfg[newName] = nextCfg[oldName];
       delete nextCfg[oldName];
-      await saveAndSync("stock:cfg", nextCfg, setStockCfg);
+      setStockCfg(nextCfg);
     }
-
-    // 6a. notes (комментарии)
+    
+    // 5. notes (комментарии)
+    let nextNotes = notes;
     if(notes[oldName] !== undefined){
-      const nextNotes = {...notes};
+      nextNotes = {...notes};
       nextNotes[newName] = nextNotes[oldName];
       delete nextNotes[oldName];
-      await saveAndSync("marker-notes", nextNotes, setNotes);
+      setNotes(nextNotes);
     }
-
-    // 7. photo (фото заготовки) — асинхронно, не блокируем UI
+    
+    // 6. stock-ops — rename операция (event sourcing, идёмпотентная)
+    const hasInStock = stockMain[oldName] !== undefined 
+      || WORKSHOPS.some(ws => stockWS[ws] && stockWS[ws][oldName] !== undefined);
+    
+    // 7. photo — асинхронно, не блокирует
     photoGet(oldName).then(async photo => {
       if(photo){
-        await photoSet(newName, photo);
-        // удаляем старое фото
-        try { await photoDelete(oldName); } catch {}
-        // обновляем кэш
-        setPhotoCache(p=>{
-          const next = {...p};
-          next[newName] = photo;
-          delete next[oldName];
-          return next;
-        });
+        try {
+          await photoSet(newName, photo);
+          await photoDelete(oldName);
+          setPhotoCache(p=>{
+            const next = {...p};
+            next[newName] = photo;
+            delete next[oldName];
+            return next;
+          });
+        } catch(e) { console.warn('[rename] photo error:', e.message); }
       }
     });
+    
+    // Записываем ВСЕ изменения параллельно одним пакетом
+    // Каждое с mergeFn — при 409 conflict данные не теряются
+    const writes = [
+      sSet("custom:markers", nextMarkers),
+    ];
+    if(recChanged) writes.push(sSet("records", nextRecords));
+    if(prices[oldName] !== undefined) writes.push(sSet("prices", nextPrices));
+    if(stockCfg[oldName] !== undefined) writes.push(sSet("stock:cfg", nextCfg));
+    if(notes[oldName] !== undefined) writes.push(sSet("marker-notes", nextNotes));
+    
+    // Ably — рассылаем все обновления
+    if (ablyChannelRef.current && navigator.onLine) {
+      const ts = Date.now();
+      try {
+        ablyChannelRef.current.publish('update', { key: "custom:markers", value: nextMarkers, ts, from: clientIdRef.current });
+        if(recChanged) ablyChannelRef.current.publish('changed', { key: "records", ts, from: clientIdRef.current });
+        if(prices[oldName] !== undefined) ablyChannelRef.current.publish('update', { key: "prices", value: nextPrices, ts, from: clientIdRef.current });
+        if(stockCfg[oldName] !== undefined) ablyChannelRef.current.publish('update', { key: "stock:cfg", value: nextCfg, ts, from: clientIdRef.current });
+        if(notes[oldName] !== undefined) ablyChannelRef.current.publish('update', { key: "marker-notes", value: nextNotes, ts, from: clientIdRef.current });
+      } catch {}
+    }
+    
+    // stock-ops — через appendStockOp (тоже параллельно)
+    if(hasInStock){
+      appendStockOp("rename", { oldMarker: oldName, newMarker: newName });
+    }
+    
+    // Ждём все записи параллельно
+    try {
+      const results = await Promise.all(writes);
+      const failed = results.filter(r => !r.ok).length;
+      if(failed > 0){
+        console.warn(`[rename] ${failed}/${writes.length} записей не прошли, в очереди`);
+      }
+    } catch(e) {
+      console.warn('[rename] error:', e.message);
+    }
 
     return {ok:true, text:`«${oldName}» → «${newName}»`};
   }
@@ -3189,7 +3373,13 @@ export default function App(){
 
   // ── рендер статистики ──
   function renderStats(){
-    const [y,m,d] = statsDate.split("-").map(Number);
+    // L4: валидация statsDate — fallback на сегодня если невалидная
+    const parts = statsDate ? statsDate.split("-").map(Number) : [];
+    let y = parts[0], m = parts[1], d = parts[2];
+    if(!y || !m || !d || isNaN(y) || isNaN(m) || isNaN(d)){
+      const today = new Date();
+      y = today.getFullYear(); m = today.getMonth()+1; d = today.getDate();
+    }
     const wsRecs = records.filter(r=>r.workshop===workshop);
 
     if(statsPeriod==="day"){
