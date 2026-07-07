@@ -76,10 +76,10 @@ const MONTH_NAMES = ["Январь","Февраль","Март","Апрель","
 function signOf(r){ return r.recordType === "refund" ? -1 : 1; }
 
 // Это запись о ключе (не услуга)?
-// Услуги: "Прочие услуги" (заточка, брелоки) + SERVICE_MARKERS (Нарезка лезвия, Замена корпуса)
+// Услуги: только "Прочие услуги" (заточка ножей, заточка топоров, брелоки и т.д.)
+// Нарезка лезвия, Замена корпуса, Proxy — это операции с ключами, включаем в "Всего ключей"
 function isKeyRecord(r){
   if(r.category === "Прочие услуги") return false;
-  if(SERVICE_MARKERS.has(r.marker)) return false;
   return true;
 }
 
@@ -3676,7 +3676,7 @@ export default function App(){
       const workDays = new Set(data.map(r=>dateOf(r.timestamp))).size;
       const avgPerDay = workDays>0 ? totalAmt/workDays : 0;
       const byDay = {};
-      data.forEach(r=>{ const dk=dateOf(r.timestamp); if(!byDay[dk]) byDay[dk]={qty:0,amount:0,defect:0}; const s=signOf(r); byDay[dk].qty+=r.qty*s; byDay[dk].amount+=r.amount*s; byDay[dk].defect+=r.defect; });
+      data.forEach(r=>{ const dk=dateOf(r.timestamp); if(!byDay[dk]) byDay[dk]={qty:0,amount:0,defect:0}; const s=signOf(r); if(isKeyRecord(r)){ byDay[dk].qty+=r.qty*s; byDay[dk].defect+=r.defect; } byDay[dk].amount+=r.amount*s; });
       const refundRecs = data.filter(r=>r.recordType==="refund");
       const totalRefundQty = refundRecs.reduce((s,r)=>s+r.qty,0);
       const totalRefundAmt = refundRecs.reduce((s,r)=>s+r.amount,0);
