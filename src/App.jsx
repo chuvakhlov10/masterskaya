@@ -75,6 +75,14 @@ const MONTH_NAMES = ["Январь","Февраль","Март","Апрель","
 // Знак для агрегации: продажа = +1, возврат = -1
 function signOf(r){ return r.recordType === "refund" ? -1 : 1; }
 
+// Это запись о ключе (не услуга)?
+// Услуги: "Прочие услуги" (заточка, брелоки) + SERVICE_MARKERS (Нарезка лезвия, Замена корпуса)
+function isKeyRecord(r){
+  if(r.category === "Прочие услуги") return false;
+  if(SERVICE_MARKERS.has(r.marker)) return false;
+  return true;
+}
+
 // Сколько заготовок списать со склада:
 // - refund: 0 (заготовка уже списана при продаже)
 // - sale для "Прочие услуги": 0 (это услуги, не заготовки)
@@ -3632,8 +3640,9 @@ export default function App(){
 
     if(statsPeriod==="day"){
       const data = wsRecs.filter(r=>{ const rd=new Date(r.timestamp); return rd.getFullYear()===y&&rd.getMonth()+1===m&&rd.getDate()===d; });
-      const totalQty = data.reduce((s,r)=>s+r.qty*signOf(r),0);
-      const totalDef = data.reduce((s,r)=>s+r.defect,0);
+      const keyData = data.filter(isKeyRecord);
+      const totalQty = keyData.reduce((s,r)=>s+r.qty*signOf(r),0);
+      const totalDef = keyData.reduce((s,r)=>s+r.defect,0);
       const totalAmt = data.reduce((s,r)=>s+r.amount*signOf(r),0);
       const refundRecs = data.filter(r=>r.recordType==="refund");
       const totalRefundQty = refundRecs.reduce((s,r)=>s+r.qty,0);
@@ -3660,8 +3669,9 @@ export default function App(){
 
     if(statsPeriod==="month"){
       const data = wsRecs.filter(r=>{ const rd=new Date(r.timestamp); return rd.getFullYear()===y&&rd.getMonth()+1===m; });
-      const totalQty = data.reduce((s,r)=>s+r.qty*signOf(r),0);
-      const totalDef = data.reduce((s,r)=>s+r.defect,0);
+      const keyData = data.filter(isKeyRecord);
+      const totalQty = keyData.reduce((s,r)=>s+r.qty*signOf(r),0);
+      const totalDef = keyData.reduce((s,r)=>s+r.defect,0);
       const totalAmt = data.reduce((s,r)=>s+r.amount*signOf(r),0);
       const workDays = new Set(data.map(r=>dateOf(r.timestamp))).size;
       const avgPerDay = workDays>0 ? totalAmt/workDays : 0;
@@ -3678,6 +3688,7 @@ export default function App(){
             <StatCard label="Брак" value={fmt(totalDef)} color={totalDef>0?C.danger:undefined}/>
             <StatCard label="% брака" value={totalQty>0?(totalDef/Math.abs(totalQty)*100).toFixed(1)+"%":"0%"} color={totalDef>0?C.danger:undefined}/>
             <StatCard label="Рабочих дней" value={workDays} sub="дней с записями"/>
+            <StatCard label="Среднее в день" value={fmt(Math.round(avgPerDay))+" р"} sub="сумма ÷ раб. дни" color={C.smart}/>
             {totalRefundQty > 0 && <StatCard label={`Возвратов: ${totalRefundQty} шт`} value={"−"+fmt(totalRefundAmt)+" р"} color={C.danger}/>}
             {workshop==="SMART"&&(() => { const e = calcEarnings(data); return <StatCard label="Зарплата" value={fmt(e.total)+" р"} sub={`ключи: ${fmt(e.fromKeys)} · заточка: ${fmt(e.fromSharping)}`} color={C.success}/>; })()}
           </div>
@@ -3703,8 +3714,9 @@ export default function App(){
 
     if(statsPeriod==="year"){
       const data = wsRecs.filter(r=>new Date(r.timestamp).getFullYear()===y);
-      const totalQty = data.reduce((s,r)=>s+r.qty*signOf(r),0);
-      const totalDef = data.reduce((s,r)=>s+r.defect,0);
+      const keyData = data.filter(isKeyRecord);
+      const totalQty = keyData.reduce((s,r)=>s+r.qty*signOf(r),0);
+      const totalDef = keyData.reduce((s,r)=>s+r.defect,0);
       const totalAmt = data.reduce((s,r)=>s+r.amount*signOf(r),0);
       const refundRecs = data.filter(r=>r.recordType==="refund");
       const totalRefundQty = refundRecs.reduce((s,r)=>s+r.qty,0);
@@ -3714,9 +3726,12 @@ export default function App(){
         const mk = monthOf(r.timestamp);
         if(!byMonth[mk]) byMonth[mk] = { qty:0, amount:0, defect:0, days:new Set(), recList:[] };
         const s = signOf(r);
-        byMonth[mk].qty += r.qty * s;
+        // qty и defect считаем только для ключей (без Прочих услуг)
+        if(isKeyRecord(r)){
+          byMonth[mk].qty += r.qty * s;
+          byMonth[mk].defect += r.defect;
+        }
         byMonth[mk].amount += r.amount * s;
-        byMonth[mk].defect += r.defect;
         byMonth[mk].days.add(dateOf(r.timestamp));
         byMonth[mk].recList.push(r);
       });
