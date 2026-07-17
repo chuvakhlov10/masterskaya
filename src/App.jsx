@@ -229,8 +229,13 @@ function StepperInput({ value, onChange, step = 1, min = 0, style, inputStyle, s
           const final = isNaN(n)||n<min ? min : n;
           setLocalVal(String(final));
           // Поле ввода = точное значение → set (может конфликтовать, покажет модалку)
-          if (silentSave) silentSave(final);
-          else if (onChange) onChange(final);
+          // ВАЖНО: только если значение действительно изменилось!
+          // Иначе при потере фокуса создаётся set со старым значением,
+          // который перезаписывает свежие delta-операции другого устройства
+          if (final !== value) {
+            if (silentSave) silentSave(final);
+            else if (onChange) onChange(final);
+          }
         }}
         style={{ textAlign: "center", width: 50, padding: "6px 4px", fontSize: 14, fontWeight: 700, border: "none", borderLeft: `1px solid ${C.border}`, borderRight: `1px solid ${C.border}`, background: C.bgCard, fontVariantNumeric: "tabular-nums", outline: "none", ...inputStyle }}/>
       <button type="button" onClick={inc} style={btnStyle}
