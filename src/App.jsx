@@ -1661,6 +1661,7 @@ export default function App(){
 
   // статистика
   const [statsPeriod, setStatsPeriod] = useState("day");
+  const [comparePeriod, setComparePeriod] = useState("month");
   const [statsDate, setStatsDate] = useState(todayStr());
 
   // склад
@@ -3598,9 +3599,6 @@ export default function App(){
 
   // ── рендер сравнения мастерских ──
   function renderCompare(){
-    // Период: месяц, год, всё время
-    const [comparePeriod, setComparePeriod] = useState("month");
-    
     // Дата из statsDate
     const parts = statsDate ? statsDate.split("-").map(Number) : [];
     const y = parts[0] || new Date().getFullYear();
@@ -3719,36 +3717,70 @@ export default function App(){
           })}
         </div>
         
-        {/* Топ-10 позиций (все категории, обе мастерские вместе) */}
+        {/* Топ-10 позиций по мастерским */}
         <div style={{...s.card, marginBottom:12}}>
           <div style={{fontSize:13, fontWeight:700, color:C.textSub, marginBottom:10, textTransform:"uppercase", letterSpacing:"0.5px"}}>
             🏆 Топ-10 позиций — {periodLabel}
           </div>
-          {(() => {
-            const byMarker = {};
-            [...smartRecs, ...begemotRecs].forEach(r => {
-              const sign = signOf(r);
-              if(!byMarker[r.marker]) byMarker[r.marker] = { amt: 0, qty: 0, cat: r.category };
-              byMarker[r.marker].amt += r.amount * sign;
-              byMarker[r.marker].qty += r.qty * sign;
-            });
-            return Object.entries(byMarker)
-              .sort((a,b) => b[1].amt - a[1].amt)
-              .slice(0, 10)
-              .map(([marker, d], i) => (
-                <div key={marker} style={{display:"flex", justifyContent:"space-between", alignItems:"center", padding:"6px 0", borderBottom:`1px solid ${C.border}11`}}>
-                  <div style={{display:"flex", alignItems:"center", gap:8, flex:1, minWidth:0}}>
-                    <span style={{fontSize:11, fontWeight:800, color:C.brand, minWidth:18}}>{i+1}.</span>
-                    <span style={{fontSize:12, fontWeight:600, color:C.text, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>{marker}</span>
-                    <span style={{fontSize:10, color:C.textDim, flexShrink:0}}>{d.cat}</span>
+          <div style={{display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:8}}>
+            {/* SMART */}
+            <div>
+              <div style={{fontSize:10, fontWeight:700, color:C.smart, marginBottom:4, textTransform:"uppercase"}}>SMART</div>
+              {(() => {
+                const byMarker = {};
+                smartRecs.forEach(r => {
+                  const sign = signOf(r);
+                  if(!byMarker[r.marker]) byMarker[r.marker] = { amt: 0, qty: 0 };
+                  byMarker[r.marker].amt += r.amount * sign;
+                  byMarker[r.marker].qty += r.qty * sign;
+                });
+                return Object.entries(byMarker).sort((a,b) => b[1].amt - a[1].amt).slice(0, 10).map(([marker, d], i) => (
+                  <div key={marker} style={{display:"flex", justifyContent:"space-between", padding:"3px 0", fontSize:10, borderBottom:`1px solid ${C.border}08`}}>
+                    <span style={{color:C.text, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>{i+1}. {marker}</span>
+                    <span style={{fontWeight:700, color:C.success, flexShrink:0, marginLeft:4}}>{fmt(d.amt)}₽</span>
                   </div>
-                  <div style={{textAlign:"right", flexShrink:0}}>
-                    <div style={{fontSize:12, fontWeight:700, color:C.success}}>{fmt(d.amt)} ₽</div>
-                    <div style={{fontSize:10, color:C.textDim}}>{d.qty} шт</div>
+                ));
+              })()}
+            </div>
+            {/* Бегемот */}
+            <div>
+              <div style={{fontSize:10, fontWeight:700, color:C.begemot, marginBottom:4, textTransform:"uppercase"}}>Бегемот</div>
+              {(() => {
+                const byMarker = {};
+                begemotRecs.forEach(r => {
+                  const sign = signOf(r);
+                  if(!byMarker[r.marker]) byMarker[r.marker] = { amt: 0, qty: 0 };
+                  byMarker[r.marker].amt += r.amount * sign;
+                  byMarker[r.marker].qty += r.qty * sign;
+                });
+                return Object.entries(byMarker).sort((a,b) => b[1].amt - a[1].amt).slice(0, 10).map(([marker, d], i) => (
+                  <div key={marker} style={{display:"flex", justifyContent:"space-between", padding:"3px 0", fontSize:10, borderBottom:`1px solid ${C.border}08`}}>
+                    <span style={{color:C.text, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>{i+1}. {marker}</span>
+                    <span style={{fontWeight:700, color:C.success, flexShrink:0, marginLeft:4}}>{fmt(d.amt)}₽</span>
                   </div>
-                </div>
-              ));
-          })()}
+                ));
+              })()}
+            </div>
+            {/* Общий */}
+            <div>
+              <div style={{fontSize:10, fontWeight:700, color:C.brand, marginBottom:4, textTransform:"uppercase"}}>Общий</div>
+              {(() => {
+                const byMarker = {};
+                [...smartRecs, ...begemotRecs].forEach(r => {
+                  const sign = signOf(r);
+                  if(!byMarker[r.marker]) byMarker[r.marker] = { amt: 0, qty: 0 };
+                  byMarker[r.marker].amt += r.amount * sign;
+                  byMarker[r.marker].qty += r.qty * sign;
+                });
+                return Object.entries(byMarker).sort((a,b) => b[1].amt - a[1].amt).slice(0, 10).map(([marker, d], i) => (
+                  <div key={marker} style={{display:"flex", justifyContent:"space-between", padding:"3px 0", fontSize:10, borderBottom:`1px solid ${C.border}08`}}>
+                    <span style={{color:C.text, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>{i+1}. {marker}</span>
+                    <span style={{fontWeight:700, color:C.success, flexShrink:0, marginLeft:4}}>{fmt(d.amt)}₽</span>
+                  </div>
+                ));
+              })()}
+            </div>
+          </div>
         </div>
         
         {/* Топ-категории (все, не только 5) */}
