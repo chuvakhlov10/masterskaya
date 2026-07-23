@@ -1795,7 +1795,7 @@ export default function App(){
   const saveTimersRef = useRef({}); // {key: setTimeout_id}
   async function saveAndSync(key, value, setter) {
     if (setter) setter(value);
-    skipPollRef.current = 3;
+    skipPollRef.current = 1;
     
     // Ably publish — мгновенно, без debounce (другое устройство должно видеть сразу)
     if (navigator.onLine && ablyChannelRef.current) {
@@ -1984,7 +1984,7 @@ export default function App(){
   const syncStockOpsRef = useRef(null); // ссылка на syncStockOps для вызова из init
   async function appendStockOp(type, payload) {
     // БАГ#4a: предотвращаем polling от перезаписи наших несинхронизированных ops
-    skipPollRef.current = 3;
+    skipPollRef.current = 1;
     const op = {
       ...payload,
       type,
@@ -1998,7 +1998,20 @@ export default function App(){
     const newOps = [...stockOpsRef.current, op];
     stockOpsRef.current = newOps;
     // БАГ#5: персистим в localStorage синхронно — переживает reload
-    try { localStorage.setItem("stock_ops_local", JSON.stringify(newOps)); } catch {}
+    // BUG-D: с trimming при quota exceeded
+    try {
+      localStorage.setItem("stock_ops_local", JSON.stringify(newOps));
+    } catch {
+      try {
+        // Оставляем последние 2000 ops
+        const trimmed = newOps.slice(-2000);
+        localStorage.setItem("stock_ops_local", JSON.stringify(trimmed));
+      } catch {
+        // Очищаем старые кеши и пробуем снова
+        Object.keys(localStorage).filter(k => k.startsWith(OFFLINE_CACHE_PREFIX)).forEach(k => { try{localStorage.removeItem(k);}catch{} });
+        try { localStorage.setItem("stock_ops_local", JSON.stringify(newOps.slice(-1000))); } catch {}
+      }
+    }
     setStockOps(newOps);
     // СИНХРОННО обновляем stock ref
     const newStock = applyOpsToStock(newOps);
@@ -2069,10 +2082,13 @@ export default function App(){
             }
             
             if (unsyncedOpsRef.current.size === 0) {
-              // Все операции дошли — обновляем state, сбрасываем retry counter
+              // Все операции дошли — обновляем state + refs синхронно (BUG-B)
               syncRetriesRef.current = 0;
+              stockOpsRef.current = finalOps;
+              const verifiedStock = applyOpsToStock(finalOps);
+              stockRef.current = verifiedStock;
               setStockOps(finalOps);
-              setStock(applyOpsToStock(finalOps));
+              setStock(verifiedStock);
               console.log(`[syncStockOps] All ops synced (${finalOps.length} total)`);
             } else {
               // Часть не дошла — retry с jitter (10-20 сек)
@@ -2180,7 +2196,7 @@ export default function App(){
         lastBroadcastTsRef.current[key] = ts;
         
         console.log('[ABLY] Получено обновление для:', key);
-        skipPollRef.current = 3; // не даём polling'у перезаписать наши данные
+        skipPollRef.current = 1; // не даём polling'у перезаписать наши данные
         
         // Сохраняем позицию скролла
         const sY = window.scrollY;
@@ -2199,7 +2215,7 @@ export default function App(){
         // Инкрементальное обновление records — не тянем весь массив с GitHub
         const { rec } = msg.data;
         console.log('[ABLY] Новая запись:', rec.marker);
-        skipPollRef.current = 3;
+        skipPollRef.current = 1;
         const sY = window.scrollY;
         setRecords(prev => {
           // Защита от дублей (по timestamp)
@@ -2210,14 +2226,14 @@ export default function App(){
       } else if (msg.name === 'record-updated' && msg.data && msg.data.idx !== undefined) {
         const { idx, rec } = msg.data;
         console.log('[ABLY] Обновлена запись:', idx, rec.marker);
-        skipPollRef.current = 3;
+        skipPollRef.current = 1;
         const sY = window.scrollY;
         setRecords(prev => prev.map((r, i) => i === idx ? rec : r));
         setTimeout(() => window.scrollTo(0, sY), 0);
       } else if (msg.name === 'record-deleted' && msg.data && msg.data.idx !== undefined) {
         const { idx } = msg.data;
         console.log('[ABLY] Удалена запись:', idx);
-        skipPollRef.current = 3;
+        skipPollRef.current = 1;
         const sY = window.scrollY;
         setRecords(prev => prev.filter((_, i) => i !== idx));
         setTimeout(() => window.scrollTo(0, sY), 0);
@@ -2225,7 +2241,7 @@ export default function App(){
         // Инкрементальная синхронизация склада через event sourcing
         const { op } = msg.data;
         console.log('[ABLY] Stock op:', op.type, op.marker || op.oldMarker);
-        skipPollRef.current = 3;
+        skipPollRef.current = 1;
         applyRemoteStockOp(op);
       } else if (msg.name === 'changed') {
         // Fallback: большой payload, нужно сделать polling
@@ -2292,20 +2308,26 @@ export default function App(){
         const sY = window.scrollY;
         if(Array.isArray(r)) setRecords(r);
         if(p && typeof p === "object" && !Array.isArray(p)) setPrices(p);
-        // БАГ#4b: МЁРЖИМ stock-ops с локальными, не перезаписываем!
-        // Иначе несинхронизированные ops теряются
+        // BUG-A FIX: ВСЕГДА мёржим stock-ops, не сравниваем длины
         if(Array.isArray(ops)){
           const localOps = stockOpsRef.current;
-          if(localOps.length > ops.length){
-            // У нас больше ops чем на сервере — мёржим
+          // Проверяем есть ли локальные ops, которых нет на сервере
+          const serverIds = new Set(ops.map(o => o.opId));
+          const hasLocalUnsynced = localOps.some(o => !serverIds.has(o.opId));
+          if(hasLocalUnsynced || localOps.length > ops.length){
+            // Мёржим — не теряем локальные unsynced ops
             const merged = mergeStockOps(ops, localOps);
             stockOpsRef.current = merged;
+            const mergedStock = applyOpsToStock(merged);
+            stockRef.current = mergedStock;
             setStockOps(merged);
-            setStock(applyOpsToStock(merged));
+            setStock(mergedStock);
           } else {
             stockOpsRef.current = ops;
+            const serverStock = applyOpsToStock(ops);
+            stockRef.current = serverStock;
             setStockOps(ops);
-            setStock(applyOpsToStock(ops));
+            setStock(serverStock);
           }
         }
         if(sCfg && typeof sCfg === "object" && !Array.isArray(sCfg)) setStockCfg(sCfg);
@@ -2506,29 +2528,26 @@ export default function App(){
       // Если нет — читаем старые stock.json или stock:main + stock:ws:X
       // и преобразуем в начальные init-операции
       if(Array.isArray(ops) && ops.length > 0){
-        // БАГ#5: мёржим с локальным кешем из localStorage — могли быть несинхронизированные ops
+        // BUG-A FIX: ВСЕГДА мёржим с локальным кешем, не сравниваем длины!
+        // Локальный массив может быть короче, но содержать уникальные unsynced ops
         let localCached = [];
         try { localCached = JSON.parse(localStorage.getItem("stock_ops_local") || "[]"); } catch {}
-        if(localCached.length > ops.length){
-          const merged = mergeStockOps(ops, localCached);
-          stockOpsRef.current = merged;
-          setStockOps(merged);
-          setStock(applyOpsToStock(merged));
-          // Помечаем недостающие на сервере как unsynced
-          const serverIds = new Set(ops.map(o => o.opId));
-          for(const op of localCached){
-            if(!serverIds.has(op.opId)) unsyncedOpsRef.current.add(op.opId);
-          }
-          if(unsyncedOpsRef.current.size > 0){
-            console.log(`[STOCK] Восстановлено ${unsyncedOpsRef.current.size} несинхронизированных ops из localStorage`);
-            setTimeout(() => syncStockOpsRef.current && syncStockOpsRef.current(), 2000);
-          }
-        } else {
-          stockOpsRef.current = ops;
-          setStockOps(ops);
-          setStock(applyOpsToStock(ops));
+        const merged = mergeStockOps(ops, localCached);
+        stockOpsRef.current = merged;
+        const mergedStock = applyOpsToStock(merged);
+        stockRef.current = mergedStock;
+        setStockOps(merged);
+        setStock(mergedStock);
+        // Помечаем недостающие на сервере как unsynced
+        const serverIds = new Set(ops.map(o => o.opId));
+        for(const op of localCached){
+          if(!serverIds.has(op.opId)) unsyncedOpsRef.current.add(op.opId);
         }
-        console.log(`[STOCK] Загружено ${ops.length} операций (local: ${localCached.length})`);
+        if(unsyncedOpsRef.current.size > 0){
+          console.log(`[STOCK] Восстановлено ${unsyncedOpsRef.current.size} несинхронизированных ops из localStorage`);
+          setTimeout(() => syncStockOpsRef.current && syncStockOpsRef.current(), 2000);
+        }
+        console.log(`[STOCK] Загружено ${ops.length} операций (local: ${localCached.length}, merged: ${merged.length})`);
       } else {
         // Миграция: читаем старые данные
         let oldStock = null;
@@ -2583,8 +2602,13 @@ export default function App(){
               }
             }
           }
+          // BUG-C: синхронно обновляем refs + персистим
+          stockOpsRef.current = initOps;
+          const initStock = applyOpsToStock(initOps);
+          stockRef.current = initStock;
           setStockOps(initOps);
-          setStock(applyOpsToStock(initOps));
+          setStock(initStock);
+          try { localStorage.setItem("stock_ops_local", JSON.stringify(initOps)); } catch {}
           await sSet("stock-ops", initOps);
           console.log(`[MIGRATION] Создано ${initOps.length} init-операций из старого stock`);
         } else {
