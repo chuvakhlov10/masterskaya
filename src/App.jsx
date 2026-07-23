@@ -2171,7 +2171,15 @@ export default function App(){
     stateSettersRef.current = {
       "records": setRecords,
       "prices": setPrices,
-      "stock-ops": (ops) => { setStockOps(ops); setStock(applyOpsToStock(ops)); },
+      "stock-ops": (ops) => {
+        // Merge с локальными unsynced ops, не перезаписываем!
+        const merged = mergeStockOps(ops, stockOpsRef.current);
+        stockOpsRef.current = merged;
+        const ms = applyOpsToStock(merged);
+        stockRef.current = ms;
+        setStockOps(merged);
+        setStock(ms);
+      },
       "stock-moves": setStockMoves,
       "stock:cfg": setStockCfg,
       "custom:markers": setMarkers,
