@@ -586,7 +586,7 @@ function MarkerPicker({ markers, value, onChange, extraLabel }){
   );
 }
 
-function EditModal({ record, idx, markers, onSave, onDelete, onClose }){
+function EditModal({ record, id, markers, onSave, onDelete, onClose }){
   const [cat, setCat] = useState(record.category);
   const [mrk, setMrk] = useState(record.marker);
   const [qty, setQty] = useState(record.qty);
@@ -648,7 +648,7 @@ function EditModal({ record, idx, markers, onSave, onDelete, onClose }){
         <div style={{display:"flex",gap:8}}>
           <button onClick={()=>onSave({...record,category:cat,marker:mrk.trim(),qty,defect,amount,comment,recordType})}
             style={{...s.btn("accent"),flex:1,padding:"10px 0"}}>Сохранить</button>
-          <button onClick={()=>onDelete(idx)} style={{...s.btn("danger"),padding:"10px 14px"}}>Удалить</button>
+          <button onClick={()=>onDelete(id)} style={{...s.btn("danger"),padding:"10px 14px"}}>Удалить</button>
         </div>
         {recordType==="refund"&&(
           <div style={{marginTop:10,fontSize:11,color:C.textDim,lineHeight:1.5}}>
@@ -804,11 +804,10 @@ function DayRecordsList({ dayRecs, records, onEditRecord }){
         <div style={{marginTop:8}}>
           <div style={{fontSize:11,color:C.textDim,marginBottom:8}}>Нажмите на запись, чтобы изменить или удалить</div>
           {dayRecs.map((r,i)=>{
-            const globalIdx = records.findIndex(rr=>rr===r);
             const isRefund = r.recordType === "refund";
             const isOnlyDefect = !isRefund && r.qty === 0 && r.defect > 0;
             return (
-              <div key={i} onClick={()=>onEditRecord({record:r,globalIdx})}
+              <div key={r.id || i} onClick={()=>onEditRecord({record:r, id: r.id})}
                 style={{...s.card,cursor:"pointer",borderLeft:`3px solid ${isRefund?C.danger:isOnlyDefect?C.warn:C.brand+"88"}`}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                   <div style={{display:"flex",alignItems:"center",gap:8}}>
@@ -956,11 +955,10 @@ function DayRow({ dateLabel, dayData, workshop, onEditRecord, allRecords }){
       {expanded && (
         <div style={{padding:"6px 12px 10px"}}>
           {dayData.records.map((r,i)=>{
-            const globalIdx = allRecords.findIndex(rr=>rr===r);
             const isRefund = r.recordType === "refund";
             const isOnlyDefect = !isRefund && r.qty === 0 && r.defect > 0;
             return (
-              <div key={i} onClick={()=>onEditRecord({record:r,globalIdx})}
+              <div key={r.id || i} onClick={()=>onEditRecord({record:r, id: r.id})}
                 style={{display:"flex",justifyContent:"space-between",alignItems:"center",
                   padding:"5px 0",cursor:"pointer",borderBottom:`1px solid ${C.border}22`}}>
                 <div style={{display:"flex",alignItems:"center",gap:6,fontSize:12}}>
@@ -2231,19 +2229,19 @@ export default function App(){
           return [...prev, rec];
         });
         setTimeout(() => window.scrollTo(0, sY), 0);
-      } else if (msg.name === 'record-updated' && msg.data && msg.data.idx !== undefined) {
-        const { idx, rec } = msg.data;
-        console.log('[ABLY] Обновлена запись:', idx, rec.marker);
+      } else if (msg.name === 'record-updated' && msg.data && msg.data.id) {
+        const { id, rec } = msg.data;
+        console.log('[ABLY] Обновлена запись:', id, rec.marker);
         skipPollRef.current = 1;
         const sY = window.scrollY;
-        setRecords(prev => prev.map((r, i) => i === idx ? rec : r));
+        setRecords(prev => prev.map(r => r.id === id ? rec : r));
         setTimeout(() => window.scrollTo(0, sY), 0);
-      } else if (msg.name === 'record-deleted' && msg.data && msg.data.idx !== undefined) {
-        const { idx } = msg.data;
-        console.log('[ABLY] Удалена запись:', idx);
+      } else if (msg.name === 'record-deleted' && msg.data && msg.data.id) {
+        const { id } = msg.data;
+        console.log('[ABLY] Удалена запись:', id);
         skipPollRef.current = 1;
         const sY = window.scrollY;
-        setRecords(prev => prev.filter((_, i) => i !== idx));
+        setRecords(prev => prev.filter(r => r.id !== id));
         setTimeout(() => window.scrollTo(0, sY), 0);
       } else if (msg.name === 'stock-op' && msg.data && msg.data.op) {
         // Инкрементальная синхронизация склада через event sourcing
@@ -2848,6 +2846,7 @@ export default function App(){
 
     const m = marker.trim();
     const rec = {
+      id: `rec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       workshop, category, marker: m, qty, defect, amount, comment,
       recordType, timestamp: Date.now()
     };
@@ -2880,8 +2879,17 @@ export default function App(){
   }
 
   // ── сохранение редактируемой записи ──
+  // Поиск по ID записи (не по индексу — индекс может измениться при синхронизации)
   async function handleEditSave(updated){
-    const old = records[editRec.globalIdx];
+    if (!updated.id) updated.id = editRec.record.id || `rec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const recId = updated.id;
+    const oldIdx = records.findIndex(r => r.id === recId);
+    if (oldIdx === -1) {
+      console.warn('[handleEditSave] запись не найдена по id:', recId);
+      setEditRec(null);
+      return;
+    }
+    const old = records[oldIdx];
 
     // 1) Возвращаем старое списание (через stockDelta)
     const oldDelta = stockDelta(old);
@@ -2902,21 +2910,28 @@ export default function App(){
       });
     }
 
-    const next = records.map((r,i)=>i===editRec.globalIdx?updated:r);
+    const next = records.map(r => r.id === recId ? updated : r);
     // Не await'им — модалка закрывается мгновенно
     saveAndSync("records", next, setRecords);
-    // Отправляем только обновлённую запись через Ably
+    // Отправляем обновлённую запись по ID через Ably
     if (ablyChannelRef.current && navigator.onLine) {
       try {
-        ablyChannelRef.current.publish('record-updated', { idx: editRec.globalIdx, rec: updated, from: clientIdRef.current });
+        const p = ablyChannelRef.current.publish('record-updated', { id: recId, rec: updated, from: clientIdRef.current });
+        if (p && p.catch) p.catch(() => {});
       } catch {}
     }
     setEditRec(null);
   }
 
-  async function handleEditDelete(gi){
+  async function handleEditDelete(recId){
     if(!confirm("Удалить эту запись?")) return;
-    const old = records[gi];
+    const oldIdx = records.findIndex(r => r.id === recId);
+    if (oldIdx === -1) {
+      console.warn('[handleEditDelete] запись не найдена по id:', recId);
+      setEditRec(null);
+      return;
+    }
+    const old = records[oldIdx];
     // Возвращаем списание через stockDelta
     const oldDelta = stockDelta(old);
     if(oldDelta > 0){
@@ -2926,13 +2941,14 @@ export default function App(){
         delta: oldDelta,
       });
     }
-    const next = records.filter((_,i)=>i!==gi);
+    const next = records.filter(r => r.id !== recId);
     // Не await'им — модалка закрывается мгновенно
     saveAndSync("records", next, setRecords);
-    // Отправляем только индекс удалённой записи через Ably
+    // Отправляем ID удалённой записи через Ably
     if (ablyChannelRef.current && navigator.onLine) {
       try {
-        ablyChannelRef.current.publish('record-deleted', { idx: gi, from: clientIdRef.current });
+        const p = ablyChannelRef.current.publish('record-deleted', { id: recId, from: clientIdRef.current });
+        if (p && p.catch) p.catch(() => {});
       } catch {}
     }
     setEditRec(null);
@@ -4025,7 +4041,7 @@ export default function App(){
           </div>
         </div>
       )}
-      {editRec&&<EditModal record={editRec.record} idx={editRec.globalIdx} markers={safeMarkers}
+      {editRec&&<EditModal record={editRec.record} id={editRec.id} markers={safeMarkers}
         onSave={handleEditSave} onDelete={handleEditDelete} onClose={()=>setEditRec(null)}/>}
       {pwdModalOpen&&<PasswordModal workshop={workshop}
         onChange={handleChangePassword} onClose={()=>setPwdModalOpen(false)}/>}
@@ -4326,7 +4342,7 @@ export default function App(){
                 {records.map((r,gi)=>r.workshop===workshop?{r,gi}:null).filter(Boolean).slice(-5).reverse().map(({r,gi})=>{
                   const isRefund = r.recordType==="refund";
                   return (
-                    <div key={gi} style={{...s.card,cursor:"pointer",borderLeft:`3px solid ${isRefund?C.danger:C.brand+"88"}`}} onClick={()=>setEditRec({record:r,globalIdx:gi})}>
+                    <div key={r.id || gi} style={{...s.card,cursor:"pointer",borderLeft:`3px solid ${isRefund?C.danger:C.brand+"88"}`}} onClick={()=>setEditRec({record:r, id: r.id})}>
                       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                         <div style={{display:"flex",alignItems:"center",gap:8}}>
                           <span style={{color:isRefund?C.danger:C.success,fontWeight:700,fontSize:16}}>{isRefund?"↩":"↑"}</span>
