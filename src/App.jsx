@@ -3691,8 +3691,6 @@ export default function App(){
           {[
             { label: "Выручка", smart: smartM.totalAmt, begemot: begemotM.totalAmt, fmt: v => fmt(v) + " ₽", isMoney: true },
             { label: "Ключей", smart: smartM.totalQty, begemot: begemotM.totalQty, fmt: v => String(v) },
-            { label: "Записей", smart: smartM.count, begemot: begemotM.count, fmt: v => String(v) },
-            { label: "Ср. чек", smart: smartM.avgCheck, begemot: begemotM.avgCheck, fmt: v => fmt(Math.round(v)) + " ₽" },
             { label: "Ср. в день", smart: smartM.avgPerDay, begemot: begemotM.avgPerDay, fmt: v => fmt(Math.round(v)) + " ₽" },
             { label: "Брак", smart: smartM.totalDef, begemot: begemotM.totalDef, fmt: v => String(v), danger: true },
             { label: "Возвраты", smart: smartM.refundQty, begemot: begemotM.refundQty, fmt: v => String(v) },
@@ -3714,23 +3712,6 @@ export default function App(){
               </div>
             );
           })}
-          
-          {/* Зарплата для SMART */}
-          {smartM.earnings && (
-            <div style={{display:"grid", gridTemplateColumns:"1fr 80px 80px 80px", padding:"8px 14px", borderTop:`2px solid ${C.border}`, alignItems:"center", background:C.successDim}}>
-              <div style={{fontSize:12, fontWeight:700, color:C.success}}>💰 Зарплата Ильи</div>
-              <div style={{textAlign:"center", fontSize:13, fontWeight:800, color:C.success}}>
-                {fmt(smartM.earnings.total)} ₽
-              </div>
-              <div style={{textAlign:"center", fontSize:11, color:C.textDim}}>—</div>
-              <div style={{textAlign:"center", fontSize:11, color:C.textDim}}>—</div>
-            </div>
-          )}
-          {smartM.earnings && (
-            <div style={{padding:"4px 14px 8px", fontSize:10, color:C.textDim, display:"grid", gridTemplateColumns:"1fr 80px 80px 80px"}}>
-              <div style={{gridColumn:"2", textAlign:"center"}}>ключи: {fmt(smartM.earnings.fromKeys)}₽ · заточка: {fmt(smartM.earnings.fromSharping)}₽</div>
-            </div>
-          )}
         </div>
         
         {/* График по неделям — две мастерские */}
