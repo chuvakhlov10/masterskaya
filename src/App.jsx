@@ -172,10 +172,10 @@ function StepperInput({ value, onChange, step = 1, min = 0, style, inputStyle, s
 
   const dec = () => {
     const cur = parseInt(localVal || "0", 10);
-    const newVal = Math.max(cur - step, min);
+    if (cur <= min) return; // БАГ#2: не делаем ничего на минимуме — иначе создаётся set=0
+    const newVal = cur - step;
     setLocalVal(String(newVal));
-    if (silentSaveDelta && cur > min) {
-      // Используем delta (-step), не конфликтует с другими устройствами
+    if (silentSaveDelta) {
       silentSaveDelta(-step);
     } else if (silentSave) {
       silentSave(newVal);
@@ -188,7 +188,6 @@ function StepperInput({ value, onChange, step = 1, min = 0, style, inputStyle, s
     const newVal = cur + step;
     setLocalVal(String(newVal));
     if (silentSaveDelta) {
-      // Используем delta (+step), не конфликтует с другими устройствами
       silentSaveDelta(step);
     } else if (silentSave) {
       silentSave(newVal);
@@ -216,7 +215,7 @@ function StepperInput({ value, onChange, step = 1, min = 0, style, inputStyle, s
   };
   return (
     <div style={{ display: "inline-flex", alignItems: "center", gap: 0, background: C.bgCard, border: `1px solid ${C.border}`, ...style }}>
-      <button type="button" onClick={dec} style={{ ...btnStyle, opacity: parseInt(localVal||"0") <= min ? 0.4 : 1 }}
+      <button type="button" onClick={dec} disabled={parseInt(localVal||"0") <= min} style={{ ...btnStyle, opacity: parseInt(localVal||"0") <= min ? 0.4 : 1, cursor: parseInt(localVal||"0") <= min ? "not-allowed" : "pointer" }}
         onMouseEnter={e=>{if(parseInt(localVal||"0")>min){e.target.style.background=C.brand;e.target.style.color="#fff";}}}
         onMouseLeave={e=>{e.target.style.background=C.bgSection;e.target.style.color=C.textSub;}}>−</button>
       <input type="text" inputMode="numeric" value={localVal}
@@ -228,13 +227,18 @@ function StepperInput({ value, onChange, step = 1, min = 0, style, inputStyle, s
           const n = localVal===""?0:parseInt(localVal,10);
           const final = isNaN(n)||n<min ? min : n;
           setLocalVal(String(final));
-          // Поле ввода = точное значение → set (может конфликтовать, покажет модалку)
-          // ВАЖНО: только если значение действительно изменилось!
-          // Иначе при потере фокуса создаётся set со старым значением,
-          // который перезаписывает свежие delta-операции другого устройства
+          // БАГ#1: НЕ создаём set-операцию! Вычисляем delta и используем delta.
+          // set перезаписывает все delta от других устройств → откат.
+          // delta складывается с другими → корректно.
           if (final !== value) {
-            if (silentSave) silentSave(final);
-            else if (onChange) onChange(final);
+            if (silentSaveDelta) {
+              // Вычисляем разницу и отправляем как delta
+              silentSaveDelta(final - value);
+            } else if (silentSave) {
+              silentSave(final);
+            } else if (onChange) {
+              onChange(final);
+            }
           }
         }}
         style={{ textAlign: "center", width: 50, padding: "6px 4px", fontSize: 14, fontWeight: 700, border: "none", borderLeft: `1px solid ${C.border}`, borderRight: `1px solid ${C.border}`, background: C.bgCard, fontVariantNumeric: "tabular-nums", outline: "none", ...inputStyle }}/>
@@ -1977,7 +1981,10 @@ export default function App(){
   const syncRetriesRef = useRef(0); // количество retry подряд (H3 fix)
   const MAX_SYNC_RETRIES = 20; // максимум retry, потом сдаёмся
   const isFlushingRef = useRef(false); // флаг: идёт ли сейчас flushQueue
+  const syncStockOpsRef = useRef(null); // ссылка на syncStockOps для вызова из init
   async function appendStockOp(type, payload) {
+    // БАГ#4a: предотвращаем polling от перезаписи наших несинхронизированных ops
+    skipPollRef.current = 3;
     const op = {
       ...payload,
       type,
@@ -1990,6 +1997,8 @@ export default function App(){
     // СИНХРОННО обновляем ref (не ждём useEffect, иначе два вызова подряд теряют op)
     const newOps = [...stockOpsRef.current, op];
     stockOpsRef.current = newOps;
+    // БАГ#5: персистим в localStorage синхронно — переживает reload
+    try { localStorage.setItem("stock_ops_local", JSON.stringify(newOps)); } catch {}
     setStockOps(newOps);
     // СИНХРОННО обновляем stock ref
     const newStock = applyOpsToStock(newOps);
@@ -2090,17 +2099,19 @@ export default function App(){
       isSyncingOpsRef.current = false;
     }
   }
+  syncStockOpsRef.current = syncStockOps;
 
   // Применить операцию, пришедшую с другого устройства через Ably
   function applyRemoteStockOp(op) {
     // Проверка дубликата по opId
     if (stockOpsRef.current.some(o => o.opId === op.opId)) return;
     const newOps = [...stockOpsRef.current, op];
+    // БАГ#3: СИНХРОННО обновляем refs — иначе быстрые Ably-сообщения теряют ops
+    stockOpsRef.current = newOps;
     setStockOps(newOps);
     const newStock = applyOpsToStock(newOps);
+    stockRef.current = newStock;
     setStock(newStock);
-    // Проверка конфликта: если у нас есть локальная set-операция с тем же marker+location
-    // и близким ts (±5 сек) — это конфликт
     detectConflict(op);
   }
 
@@ -2281,10 +2292,21 @@ export default function App(){
         const sY = window.scrollY;
         if(Array.isArray(r)) setRecords(r);
         if(p && typeof p === "object" && !Array.isArray(p)) setPrices(p);
-        // Пересчитываем stock из журнала операций
+        // БАГ#4b: МЁРЖИМ stock-ops с локальными, не перезаписываем!
+        // Иначе несинхронизированные ops теряются
         if(Array.isArray(ops)){
-          setStockOps(ops);
-          setStock(applyOpsToStock(ops));
+          const localOps = stockOpsRef.current;
+          if(localOps.length > ops.length){
+            // У нас больше ops чем на сервере — мёржим
+            const merged = mergeStockOps(ops, localOps);
+            stockOpsRef.current = merged;
+            setStockOps(merged);
+            setStock(applyOpsToStock(merged));
+          } else {
+            stockOpsRef.current = ops;
+            setStockOps(ops);
+            setStock(applyOpsToStock(ops));
+          }
         }
         if(sCfg && typeof sCfg === "object" && !Array.isArray(sCfg)) setStockCfg(sCfg);
         if(sm2 && typeof sm2 === "object" && !Array.isArray(sm2)) setMarkers(sm2);
@@ -2484,9 +2506,29 @@ export default function App(){
       // Если нет — читаем старые stock.json или stock:main + stock:ws:X
       // и преобразуем в начальные init-операции
       if(Array.isArray(ops) && ops.length > 0){
-        setStockOps(ops);
-        setStock(applyOpsToStock(ops));
-        console.log(`[STOCK] Загружено ${ops.length} операций`);
+        // БАГ#5: мёржим с локальным кешем из localStorage — могли быть несинхронизированные ops
+        let localCached = [];
+        try { localCached = JSON.parse(localStorage.getItem("stock_ops_local") || "[]"); } catch {}
+        if(localCached.length > ops.length){
+          const merged = mergeStockOps(ops, localCached);
+          stockOpsRef.current = merged;
+          setStockOps(merged);
+          setStock(applyOpsToStock(merged));
+          // Помечаем недостающие на сервере как unsynced
+          const serverIds = new Set(ops.map(o => o.opId));
+          for(const op of localCached){
+            if(!serverIds.has(op.opId)) unsyncedOpsRef.current.add(op.opId);
+          }
+          if(unsyncedOpsRef.current.size > 0){
+            console.log(`[STOCK] Восстановлено ${unsyncedOpsRef.current.size} несинхронизированных ops из localStorage`);
+            setTimeout(() => syncStockOpsRef.current && syncStockOpsRef.current(), 2000);
+          }
+        } else {
+          stockOpsRef.current = ops;
+          setStockOps(ops);
+          setStock(applyOpsToStock(ops));
+        }
+        console.log(`[STOCK] Загружено ${ops.length} операций (local: ${localCached.length})`);
       } else {
         // Миграция: читаем старые данные
         let oldStock = null;
@@ -3442,14 +3484,7 @@ export default function App(){
                         delta,
                       });
                     }}
-                    // Ввод точного значения через поле → set (при конфликте покажет модалку)
-                    silentSave={async nq => {
-                      appendStockOp("set", {
-                        location: isWS ? `ws:${workshop}` : "main",
-                        marker: m,
-                        value: nq,
-                      });
-                    }}
+                    // БАГ#1: silentSave убран — поле ввода теперь тоже использует delta через silentSaveDelta
                     inputStyle={{color:q===0?C.danger:C.success}}/>
                   <button onClick={()=>setNoteModal({markerName:m})} title="Комментарий"
                     style={{...s.btn(),padding:"5px 6px",fontSize:11,borderColor:mNote?C.warn+"66":C.border,color:mNote?C.warn:C.textSub}}>💬</button>
