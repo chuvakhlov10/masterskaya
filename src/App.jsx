@@ -1801,6 +1801,10 @@ export default function App(){
   const saveTimersRef = useRef({}); // {key: setTimeout_id}
   async function saveAndSync(key, value, setter) {
     if (setter) setter(value);
+    // СИНХРОННО персистим records в localStorage — переживает reload до debounce
+    if (key === "records" && Array.isArray(value)) {
+      try { localStorage.setItem("records_local", JSON.stringify(value)); } catch {}
+    }
     skipPollRef.current = 1;
     
     // Ably publish — мгновенно, без debounce (другое устройство должно видеть сразу)
@@ -2518,7 +2522,8 @@ export default function App(){
     const handleBeforeUnload = (e) => {
       const pending = getQueue().length;
       const unsynced = unsyncedOpsRef.current.size;
-      if (pending > 0 || unsynced > 0) {
+      const hasTimers = Object.keys(saveTimersRef.current).length > 0;
+      if (pending > 0 || unsynced > 0 || hasTimers) {
         e.preventDefault();
         e.returnValue = `У вас ${pending + unsynced} несохранённых изменений. Покинуть страницу?`;
         return e.returnValue;
