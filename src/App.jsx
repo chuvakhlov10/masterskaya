@@ -327,30 +327,38 @@ async function sGet(key){
   return cacheGet(key);
 }
 
-// Merge function для records: объединяем записи из remote и local по timestamp
-// Если одна запись есть и там и там — берём из local (наша версия новее)
+// Merge function для records: union по уникальному ключу
+// КЛЮЧ: если есть id — по id. Если нет id (старые записи) — по ВСЕМ полям.
+// НЕ используем timestamp+marker+workshop — теряет записи с одинаковым ts.
 function mergeRecords(remote, local){
   if(!Array.isArray(remote)) return local;
   if(!Array.isArray(local)) return remote;
   const seen = new Set();
   const result = [];
+  function recKey(r){
+    if(r.id) return 'id:' + r.id;
+    // Для старых записей без id — все значимые поля
+    return JSON.stringify({
+      ts: r.timestamp, w: r.workshop, m: r.marker, q: r.qty,
+      d: r.defect, a: r.amount, rt: r.recordType, c: r.comment
+    });
+  }
   // Сначала remote
   for(const r of remote){
-    const id = r.timestamp + '|' + r.marker + '|' + r.workshop;
-    if(!seen.has(id)){
-      seen.add(id);
+    const key = recKey(r);
+    if(!seen.has(key)){
+      seen.add(key);
       result.push(r);
     }
   }
-  // Потом local (перекрывает при дубликате по id)
+  // Потом local (новые записи которых нет в remote)
   for(const r of local){
-    const id = r.timestamp + '|' + r.marker + '|' + r.workshop;
-    if(!seen.has(id)){
-      seen.add(id);
+    const key = recKey(r);
+    if(!seen.has(key)){
+      seen.add(key);
       result.push(r);
     }
   }
-  // Сортируем по timestamp
   result.sort((a,b) => (a.timestamp||0) - (b.timestamp||0));
   return result;
 }
@@ -1837,6 +1845,10 @@ export default function App(){
         };
         const ref = refMap[key];
         const valueToSave = ref ? ref.current : value;
+        // ПЕРСИСТИМ records в localStorage — переживает reload (как stock-ops)
+        if (key === "records" && Array.isArray(valueToSave)) {
+          try { localStorage.setItem("records_local", JSON.stringify(valueToSave)); } catch {}
+        }
         const result = await sSet(key, valueToSave);
         setPendingCount(getQueue().length);
         // Если произошёл merge — перечитываем с сервера чтобы получить объединённые данные
@@ -2167,7 +2179,12 @@ export default function App(){
 
     // Заполняем маппинг ключей → setters для мгновенного применения Ably-обновлений
     stateSettersRef.current = {
-      "records": setRecords,
+      "records": (recs) => {
+        // Merge с локальными — не перезаписываем несинхронизированные
+        const merged = mergeRecords(recs, recordsRef.current);
+        recordsRef.current = merged;
+        setRecords(merged);
+      },
       "prices": setPrices,
       "stock-ops": (ops) => {
         // Merge с локальными unsynced ops, не перезаписываем!
@@ -2312,7 +2329,23 @@ export default function App(){
         }
         lastDataHashRef.current = hash;
         const sY = window.scrollY;
-        if(Array.isArray(r)) setRecords(r);
+        // Merge records с локальными — не перезаписываем, не теряем несинхронизированные
+        if(Array.isArray(r)){
+          const localRecs = recordsRef.current;
+          const localIds = new Set(localRecs.map(rec => rec.id || JSON.stringify({ts:rec.timestamp,w:rec.workshop,m:rec.marker,q:rec.qty,d:rec.defect,a:rec.amount,rt:rec.recordType,c:rec.comment})));
+          const hasLocalUnsynced = r.length < localRecs.length || localRecs.some(rec => {
+            const key = rec.id || JSON.stringify({ts:rec.timestamp,w:rec.workshop,m:rec.marker,q:rec.qty,d:rec.defect,a:rec.amount,rt:rec.recordType,c:rec.comment});
+            return !r.some(rr => (rr.id || JSON.stringify({ts:rr.timestamp,w:rr.workshop,m:rr.marker,q:rr.qty,d:rr.defect,a:rr.amount,rt:rr.recordType,c:rr.comment})) === key);
+          });
+          if(hasLocalUnsynced){
+            const merged = mergeRecords(r, localRecs);
+            recordsRef.current = merged;
+            setRecords(merged);
+          } else {
+            recordsRef.current = r;
+            setRecords(r);
+          }
+        }
         if(p && typeof p === "object" && !Array.isArray(p)) setPrices(p);
         // BUG-A FIX: ВСЕГДА мёржим stock-ops, не сравниваем длины
         if(Array.isArray(ops)){
@@ -2526,7 +2559,20 @@ export default function App(){
       ]);
       // Защита: гарантируем, что у нас правильные типы (массив/объект),
       // иначе рендер упадёт с белым экраном
-      if(Array.isArray(r)) setRecords(r);
+      // Merge records с локальным кешем localStorage — не теряем несинхронизированные
+      if(Array.isArray(r)){
+        let localRecords = [];
+        try { localRecords = JSON.parse(localStorage.getItem("records_local") || "[]"); } catch {}
+        if(localRecords.length > 0){
+          const merged = mergeRecords(r, localRecords);
+          recordsRef.current = merged;
+          setRecords(merged);
+          console.log(`[RECORDS] Загружено ${r.length} с сервера, ${localRecords.length} локально, merged: ${merged.length}`);
+        } else {
+          recordsRef.current = r;
+          setRecords(r);
+        }
+      }
       if(p && typeof p === "object" && !Array.isArray(p)) setPrices(p);
       
       // Миграция на event sourcing:
