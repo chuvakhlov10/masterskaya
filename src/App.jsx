@@ -3596,6 +3596,248 @@ export default function App(){
     );
   }
 
+  // ── рендер сравнения мастерских ──
+  function renderCompare(){
+    // Месяц из statsDate (по умолчанию текущий)
+    const parts = statsDate ? statsDate.split("-").map(Number) : [];
+    const y = parts[0] || new Date().getFullYear();
+    const m = (parts[1] || (new Date().getMonth() + 1)) - 1; // 0-indexed
+    
+    // Данные за текущий месяц
+    const smartRecs = records.filter(r => r.workshop === "SMART" && (() => {
+      const rd = new Date(r.timestamp);
+      return rd.getFullYear() === y && rd.getMonth() === m;
+    })());
+    const begemotRecs = records.filter(r => r.workshop === "Бегемот" && (() => {
+      const rd = new Date(r.timestamp);
+      return rd.getFullYear() === y && rd.getMonth() === m;
+    })());
+    
+    if(smartRecs.length === 0 && begemotRecs.length === 0){
+      return <div style={{...s.card, textAlign:"center", color:C.textDim, padding:24}}>Пока нет данных за этот месяц</div>;
+    }
+    
+    // Расчёт метрик
+    function calcMetrics(recs, wsName){
+      const keyRecs = recs.filter(isKeyRecord);
+      const totalAmt = recs.reduce((s,r) => s + r.amount * signOf(r), 0);
+      const totalQty = keyRecs.reduce((s,r) => s + r.qty * signOf(r), 0);
+      const totalDef = keyRecs.reduce((s,r) => s + r.defect, 0);
+      const refundRecs = recs.filter(r => r.recordType === "refund");
+      const refundAmt = refundRecs.reduce((s,r) => s + r.amount, 0);
+      const refundQty = refundRecs.reduce((s,r) => s + r.qty, 0);
+      const workDays = new Set(recs.map(r => dateOf(r.timestamp))).size;
+      const avgPerDay = workDays > 0 ? totalAmt / workDays : 0;
+      const avgCheck = recs.length > 0 ? totalAmt / recs.length : 0;
+      const earnings = wsName === "SMART" ? calcEarnings(recs) : null;
+      return {
+        totalAmt, totalQty, totalDef, refundAmt, refundQty,
+        workDays, avgPerDay, avgCheck, earnings,
+        count: recs.length, keyCount: keyRecs.length,
+      };
+    }
+    
+    const smartM = calcMetrics(smartRecs, "SMART");
+    const begemotM = calcMetrics(begemotRecs, "Бегемот");
+    
+    // Сравнение
+    function diff(smart, begemot, isPct){
+      const d = smart - begemot;
+      const pct = begemot > 0 ? Math.round(d / begemot * 100) : (smart > 0 ? 100 : 0);
+      const arrow = d > 0 ? "↑" : d < 0 ? "↓" : "→";
+      const color = d > 0 ? C.success : d < 0 ? C.danger : C.textSub;
+      return { arrow, pct, color, diff: d };
+    }
+    
+    // Выбор месяца
+    const monthOptions = [];
+    const today = new Date();
+    for(let year = today.getFullYear(); year >= 2025; year--){
+      for(let month = 11; month >= 0; month--){
+        if(year === today.getFullYear() && month > today.getMonth()) continue;
+        monthOptions.push(
+          <option key={`${year}-${month}`} value={`${year}-${month}`}>
+            {MONTH_NAMES[month]} {year}
+          </option>
+        );
+      }
+    }
+    
+    return (
+      <div>
+        {/* Выбор месяца */}
+        <div style={{marginBottom:14}}>
+          <select 
+            value={`${y}-${m}`} 
+            onChange={e => {
+              const [ny, nm] = e.target.value.split("-").map(Number);
+              setStatsDate(`${ny}-${String(nm+1).padStart(2,"0")}-15`);
+            }}
+            style={s.input}
+          >
+            {monthOptions}
+          </select>
+        </div>
+        
+        {/* Таблица сравнения */}
+        <div style={{...s.card, padding:0, overflow:"hidden", marginBottom:12}}>
+          <div style={{display:"grid", gridTemplateColumns:"1fr 80px 80px 80px", padding:"10px 14px", background:C.bgSection, borderBottom:`1px solid ${C.border}`, fontSize:10, fontWeight:800, color:C.textSub, textTransform:"uppercase", letterSpacing:"0.5px"}}>
+            <div></div>
+            <div style={{textAlign:"center", color:C.smart}}>SMART</div>
+            <div style={{textAlign:"center", color:C.begemot}}>Бегемот</div>
+            <div style={{textAlign:"center"}}>Δ</div>
+          </div>
+          
+          {[
+            { label: "Выручка", smart: smartM.totalAmt, begemot: begemotM.totalAmt, fmt: v => fmt(v) + " ₽", isMoney: true },
+            { label: "Ключей", smart: smartM.totalQty, begemot: begemotM.totalQty, fmt: v => String(v) },
+            { label: "Записей", smart: smartM.count, begemot: begemotM.count, fmt: v => String(v) },
+            { label: "Ср. чек", smart: smartM.avgCheck, begemot: begemotM.avgCheck, fmt: v => fmt(Math.round(v)) + " ₽" },
+            { label: "Ср. в день", smart: smartM.avgPerDay, begemot: begemotM.avgPerDay, fmt: v => fmt(Math.round(v)) + " ₽" },
+            { label: "Брак", smart: smartM.totalDef, begemot: begemotM.totalDef, fmt: v => String(v), danger: true },
+            { label: "Возвраты", smart: smartM.refundQty, begemot: begemotM.refundQty, fmt: v => String(v) },
+            { label: "Раб. дней", smart: smartM.workDays, begemot: begemotM.workDays, fmt: v => String(v) },
+          ].map(row => {
+            const d = diff(row.smart, row.begemot);
+            return (
+              <div key={row.label} style={{display:"grid", gridTemplateColumns:"1fr 80px 80px 80px", padding:"8px 14px", borderBottom:`1px solid ${C.border}22`, alignItems:"center"}}>
+                <div style={{fontSize:12, fontWeight:600, color:C.textSub}}>{row.label}</div>
+                <div style={{textAlign:"center", fontSize:13, fontWeight:700, color:row.danger && row.smart > 0 ? C.danger : C.text}}>
+                  {row.fmt(row.smart)}
+                </div>
+                <div style={{textAlign:"center", fontSize:13, fontWeight:700, color:row.danger && row.begemot > 0 ? C.danger : C.text}}>
+                  {row.fmt(row.begemot)}
+                </div>
+                <div style={{textAlign:"center", fontSize:12, fontWeight:700, color:d.color}}>
+                  {d.arrow} {d.pct > 0 ? d.pct + "%" : d.pct < 0 ? Math.abs(d.pct) + "%" : ""}
+                </div>
+              </div>
+            );
+          })}
+          
+          {/* Зарплата для SMART */}
+          {smartM.earnings && (
+            <div style={{display:"grid", gridTemplateColumns:"1fr 80px 80px 80px", padding:"8px 14px", borderTop:`2px solid ${C.border}`, alignItems:"center", background:C.successDim}}>
+              <div style={{fontSize:12, fontWeight:700, color:C.success}}>💰 Зарплата Ильи</div>
+              <div style={{textAlign:"center", fontSize:13, fontWeight:800, color:C.success}}>
+                {fmt(smartM.earnings.total)} ₽
+              </div>
+              <div style={{textAlign:"center", fontSize:11, color:C.textDim}}>—</div>
+              <div style={{textAlign:"center", fontSize:11, color:C.textDim}}>—</div>
+            </div>
+          )}
+          {smartM.earnings && (
+            <div style={{padding:"4px 14px 8px", fontSize:10, color:C.textDim, display:"grid", gridTemplateColumns:"1fr 80px 80px 80px"}}>
+              <div style={{gridColumn:"2", textAlign:"center"}}>ключи: {fmt(smartM.earnings.fromKeys)}₽ · заточка: {fmt(smartM.earnings.fromSharping)}₽</div>
+            </div>
+          )}
+        </div>
+        
+        {/* График по неделям — две мастерские */}
+        <div style={{...s.card, marginBottom:12}}>
+          <div style={{fontSize:13, fontWeight:700, color:C.textSub, marginBottom:12, textTransform:"uppercase", letterSpacing:"0.5px"}}>
+            📊 Выручка по неделям — SMART vs Бегемот
+          </div>
+          {(() => {
+            // Календрарные недели текущего месяца
+            const weeks = [];
+            const monthStart = new Date(y, m, 1);
+            const monthEnd = new Date(y, m + 1, 0);
+            // Находим понедельник первой недели
+            const firstMonday = new Date(monthStart);
+            const dayOfWeek = monthStart.getDay();
+            firstMonday.setDate(monthStart.getDate() - (dayOfWeek === 0 ? 6 : dayOfWeek - 1));
+            // Собираем недели
+            for(let w = new Date(firstMonday); w <= monthEnd; w.setDate(w.getDate() + 7)) {
+              const ws = new Date(w);
+              const we = new Date(w);
+              we.setDate(ws.getDate() + 6);
+              we.setHours(23, 59, 59, 999);
+              const sSum = smartRecs.filter(r => { const rd = new Date(r.timestamp); return rd >= ws && rd <= we; })
+                .reduce((sum, r) => sum + r.amount * signOf(r), 0);
+              const bSum = begemotRecs.filter(r => { const rd = new Date(r.timestamp); return rd >= ws && rd <= we; })
+                .reduce((sum, r) => sum + r.amount * signOf(r), 0);
+              weeks.push({
+                label: `${String(ws.getDate()).padStart(2,'0')}.${String(ws.getMonth()+1).padStart(2,'0')}`,
+                sSum, bSum,
+              });
+            }
+            const maxVal = Math.max(...weeks.map(w => Math.max(w.sSum, w.bSum)), 1);
+            
+            return (
+              <div style={{display:"flex", alignItems:"flex-end", gap:6, height:120, padding:"0 4px"}}>
+                {weeks.map((w, i) => (
+                  <div key={i} style={{flex:1, display:"flex", flexDirection:"column", alignItems:"center", gap:2, height:"100%", justifyContent:"flex-end"}}>
+                    <div style={{display:"flex", gap:2, width:"100%", height:"100%", alignItems:"flex-end", justifyContent:"center"}}>
+                      <div style={{
+                        width:"40%", height:`${Math.max((w.sSum / maxVal) * 100, 2)}%`,
+                        background: C.smart, minHeight: 3, borderRadius: "2px 2px 0 0",
+                      }} title={`SMART: ${fmt(w.sSum)} ₽`} />
+                      <div style={{
+                        width:"40%", height:`${Math.max((w.bSum / maxVal) * 100, 2)}%`,
+                        background: C.begemot, minHeight: 3, borderRadius: "2px 2px 0 0",
+                      }} title={`Бегемот: ${fmt(w.bSum)} ₽`} />
+                    </div>
+                    <div style={{fontSize:9, color:C.textDim, whiteSpace:"nowrap", marginTop:2}}>
+                      {w.label}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
+          <div style={{display:"flex", gap:16, justifyContent:"center", marginTop:10}}>
+            <span style={{fontSize:11, color:C.smart, fontWeight:700}}>■ SMART</span>
+            <span style={{fontSize:11, color:C.begemot, fontWeight:700}}>■ Бегемот</span>
+          </div>
+        </div>
+        
+        {/* Топ-категории по мастерским */}
+        <div style={{...s.card}}>
+          <div style={{fontSize:13, fontWeight:700, color:C.textSub, marginBottom:10, textTransform:"uppercase", letterSpacing:"0.5px"}}>
+            🏆 Топ-категории за месяц
+          </div>
+          <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:12}}>
+            {/* SMART топ */}
+            <div>
+              <div style={{fontSize:11, fontWeight:700, color:C.smart, marginBottom:6, textTransform:"uppercase", letterSpacing:"0.5px"}}>SMART</div>
+              {(() => {
+                const byCat = {};
+                smartRecs.forEach(r => {
+                  const sign = signOf(r);
+                  byCat[r.category] = (byCat[r.category] || 0) + r.amount * sign;
+                });
+                return Object.entries(byCat).sort((a,b) => b[1] - a[1]).slice(0, 5).map(([cat, amt], i) => (
+                  <div key={cat} style={{display:"flex", justifyContent:"space-between", padding:"4px 0", fontSize:12, borderBottom:`1px solid ${C.border}11`}}>
+                    <span style={{color:C.text}}>{i+1}. {cat}</span>
+                    <span style={{fontWeight:700, color:C.success}}>{fmt(amt)} ₽</span>
+                  </div>
+                ));
+              })()}
+            </div>
+            {/* Бегемот топ */}
+            <div>
+              <div style={{fontSize:11, fontWeight:700, color:C.begemot, marginBottom:6, textTransform:"uppercase", letterSpacing:"0.5px"}}>Бегемот</div>
+              {(() => {
+                const byCat = {};
+                begemotRecs.forEach(r => {
+                  const sign = signOf(r);
+                  byCat[r.category] = (byCat[r.category] || 0) + r.amount * sign;
+                });
+                return Object.entries(byCat).sort((a,b) => b[1] - a[1]).slice(0, 5).map(([cat, amt], i) => (
+                  <div key={cat} style={{display:"flex", justifyContent:"space-between", padding:"4px 0", fontSize:12, borderBottom:`1px solid ${C.border}11`}}>
+                    <span style={{color:C.text}}>{i+1}. {cat}</span>
+                    <span style={{fontWeight:700, color:C.success}}>{fmt(amt)} ₽</span>
+                  </div>
+                ));
+              })()}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // ── рендер тренда: график по неделям + динамика по категориям ──
   function renderTrend(){
     const wsRecs = records.filter(r => r.workshop === workshop);
@@ -4418,7 +4660,7 @@ export default function App(){
         {tab==="stats"&&(
           <div>
             <div style={{display:"flex",gap:1,marginBottom:16,background:C.border,padding:1}}>
-              {[["day","День"],["month","Месяц"],["year","Год"],["trend","Тренд"]].map(([id,label])=>(
+              {[["day","День"],["month","Месяц"],["year","Год"],["trend","Тренд"],["compare","Сравнение"]].map(([id,label])=>(
                 <button key={id} onClick={()=>setStatsPeriod(id)} style={{
                   flex:1,padding:"12px 4px",fontSize:12,fontWeight:800,border:"none",cursor:"pointer",
                   background:statsPeriod===id?C.bgCard:C.bgSection,
@@ -4428,7 +4670,7 @@ export default function App(){
                 }}>{label}</button>
               ))}
             </div>
-            {statsPeriod !== "trend" && (
+            {statsPeriod !== "trend" && statsPeriod !== "compare" && (
               <div style={{marginBottom:14}}>
                 {statsPeriod==="day" ? (
                   <input type="date" value={statsDate} onChange={e=>setStatsDate(e.target.value)}
@@ -4465,9 +4707,9 @@ export default function App(){
               )}
               </div>
             )}
-            {statsPeriod === "trend" ? renderTrend() : renderStats()}
+            {statsPeriod === "trend" ? renderTrend() : statsPeriod === "compare" ? renderCompare() : renderStats()}
             {/* Кнопка экспорта в CSV — только не в тренд-режиме */}
-            {statsPeriod !== "trend" && (
+            {statsPeriod !== "trend" && statsPeriod !== "compare" && (
               <button onClick={exportStatsCSV} style={{
                 ...s.btn(), marginTop:16, width:"100%", padding:"12px",
                 background:C.success, color:"#fff", border:"none",
