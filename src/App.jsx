@@ -816,7 +816,7 @@ function DayRecordsList({ dayRecs, records, onEditRecord }){
             const isOnlyDefect = !isRefund && r.qty === 0 && r.defect > 0;
             return (
               <div key={r.id || i} onClick={()=>onEditRecord({record:r, id: r.id})}
-                style={{...s.card,cursor:"pointer",borderLeft:`3px solid ${isRefund?C.danger:isOnlyDefect?C.warn:C.brand+"88"}`}}>
+                style={{...s.card,cursor:"pointer",borderLeft:`3px solid ${isRefund?C.danger:isOnlyDefect?C.warn:C.success+"88"}`}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                   <div style={{display:"flex",alignItems:"center",gap:8}}>
                     {isRefund
@@ -979,7 +979,7 @@ function DayRow({ dateLabel, dayData, workshop, onEditRecord, allRecords }){
                 </div>
                 <div style={{display:"flex",gap:6,fontSize:11,color:C.textSub}}>
                   <span>{isRefund?"−":""}{r.qty} шт{r.defect>0?`/${r.defect}`:""}</span>
-                  <span style={{color:isRefund?C.danger:C.brand}}>{fmt(r.amount)} р</span>
+                  <span style={{color:isRefund?C.danger:C.success}}>{fmt(r.amount)} р</span>
                   <span style={{color:C.brand}}>✎</span>
                 </div>
               </div>
@@ -4640,7 +4640,7 @@ export default function App(){
                 {records.map((r,gi)=>r.workshop===workshop?{r,gi}:null).filter(Boolean).slice(-5).reverse().map(({r,gi})=>{
                   const isRefund = r.recordType==="refund";
                   return (
-                    <div key={r.id || gi} style={{...s.card,cursor:"pointer",borderLeft:`3px solid ${isRefund?C.danger:C.brand+"88"}`}} onClick={()=>setEditRec({record:r, id: r.id})}>
+                    <div key={r.id || gi} style={{...s.card,cursor:"pointer",borderLeft:`3px solid ${isRefund?C.danger:C.success+"88"}`}} onClick={()=>setEditRec({record:r, id: r.id})}>
                       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                         <div style={{display:"flex",alignItems:"center",gap:8}}>
                           <span style={{color:isRefund?C.danger:C.success,fontWeight:700,fontSize:16}}>{isRefund?"↩":"↑"}</span>
