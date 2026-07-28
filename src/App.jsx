@@ -3471,8 +3471,8 @@ export default function App(){
       <button key={m} type="button" onClick={()=>{setMarker(m);setShowAllMarkers(false);setMarkerSearch("");}}
         style={{
           fontSize:11, padding:"4px 8px", borderRadius:6, cursor:"pointer",
-          background: isSelected ? C.brand : C.bgCard,
-          border: `1px solid ${isSelected ? C.brand : C.border}`,
+          background: isSelected ? (recordType==="refund"?C.danger:C.success) : C.bgCard,
+          border: `1px solid ${isSelected ? (recordType==="refund"?C.danger:C.success) : C.border}`,
           color: isSelected ? "#fff" : C.text,
           display:"flex", alignItems:"center", gap:4, maxWidth:"100%",
         }}>
@@ -4467,8 +4467,8 @@ export default function App(){
                       <button key={c} type="button" onClick={()=>{setCategory(c);setMarker("");setShowAllMarkers(false);setMarkerSearch("");}}
                         style={{
                           padding:"10px 12px", fontSize:12, fontWeight:700, cursor:"pointer",
-                          border:`2px solid ${category===c?C.success:C.border}`,
-                          background:category===c?C.success:C.bgCard,
+                          border:`2px solid ${category===c?(recordType==="refund"?C.danger:C.success):C.border}`,
+                          background:category===c?(recordType==="refund"?C.danger:C.success):C.bgCard,
                           color:category===c?"#fff":C.text,
                           borderRadius:6, transition:"all .15s",
                           minHeight:40, flex:"1 1 auto", minWidth:"calc(50% - 4px)",
