@@ -4630,7 +4630,9 @@ export default function App(){
               <textarea value={comment} onChange={e=>setComment(e.target.value)} rows={2} placeholder="Необязательно" style={{...s.input,resize:"vertical"}}/>
             </div>
             <button onClick={submitRecord}
-              style={{...s.btn(recordType==="refund"?"refund":"accent"),width:"100%",padding:"14px 0",fontSize:16,fontWeight:800}}>
+              style={{width:"100%",padding:"14px 0",fontSize:16,fontWeight:800,border:"none",cursor:"pointer",
+                background:recordType==="refund" ? C.danger : C.success,
+                color:"#fff",borderRadius:0,textTransform:"uppercase",letterSpacing:"0.5px"}}>
               {recordType==="refund" ? "Оформить возврат" : "Добавить запись"}
             </button>
             {submitMsg&&<div style={{textAlign:"center",marginTop:8,fontSize:13,color:submitMsg.ok?C.success:C.danger}}>{submitMsg.text}</div>}
