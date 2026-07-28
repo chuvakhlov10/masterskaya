@@ -4503,8 +4503,11 @@ export default function App(){
 
               {/* Выбранная маркировка — показываем когда список свёрнут */}
               {marker && !showAllMarkers && category !== "Прочие услуги" && (
-                <div style={{...s.card,padding:"8px 12px",marginBottom:8,background:C.brandDim,borderColor:C.brand+"44",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                  <span style={{fontSize:13,fontWeight:700,color:C.brand}}>{marker}</span>
+                <div style={{...s.card,padding:"8px 12px",marginBottom:8,
+                  background:recordType==="refund"?C.dangerDim:C.successDim,
+                  borderColor:(recordType==="refund"?C.danger:C.success)+"44",
+                  display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <span style={{fontSize:13,fontWeight:700,color:recordType==="refund"?C.danger:C.success}}>{marker}</span>
                   <button type="button" onClick={()=>{setMarker("");setShowAllMarkers(true);}} style={{fontSize:11,color:C.danger,background:"transparent",border:"none",cursor:"pointer",fontWeight:700}}>✕ Изменить</button>
                 </div>
               )}
