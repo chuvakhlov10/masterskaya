@@ -4458,11 +4458,33 @@ export default function App(){
 
             <div style={{marginBottom:12}}>
               <label style={s.label}>Категория</label>
-              <select value={category} onChange={e=>{setCategory(e.target.value);setMarker("");setShowAllMarkers(false);setMarkerSearch("");}} style={s.input}>
-                {sortedCategories(safeMarkers)
-                  .filter(c => recordType !== "refund" || c !== "Прочие услуги")
-                  .map(c=><option key={c}>{c}</option>)}
-              </select>
+              {workshop === "Бегемот" ? (
+                // Для Бегемота — крупные кнопки категорий (отцу удобнее)
+                <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                  {sortedCategories(safeMarkers)
+                    .filter(c => recordType !== "refund" || c !== "Прочие услуги")
+                    .map(c => (
+                      <button key={c} type="button" onClick={()=>{setCategory(c);setMarker("");setShowAllMarkers(false);setMarkerSearch("");}}
+                        style={{
+                          padding:"10px 12px", fontSize:12, fontWeight:700, cursor:"pointer",
+                          border:`2px solid ${category===c?C.brand:C.border}`,
+                          background:category===c?C.brand:C.bgCard,
+                          color:category===c?"#fff":C.text,
+                          borderRadius:6, transition:"all .15s",
+                          minHeight:40, flex:"1 1 auto", minWidth:"calc(50% - 4px)",
+                        }}>
+                        {c}
+                      </button>
+                    ))}
+                </div>
+              ) : (
+                // Для SMART — обычный dropdown
+                <select value={category} onChange={e=>{setCategory(e.target.value);setMarker("");setShowAllMarkers(false);setMarkerSearch("");}} style={s.input}>
+                  {sortedCategories(safeMarkers)
+                    .filter(c => recordType !== "refund" || c !== "Прочие услуги")
+                    .map(c=><option key={c}>{c}</option>)}
+                </select>
+              )}
             </div>
             <div style={{marginBottom:12}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
