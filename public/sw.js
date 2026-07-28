@@ -1,7 +1,7 @@
 // Service Worker — кеширует статику для офлайн-работы
 // Стратегия: cache-first для статики, network-first для данных (через fetch в самом приложении)
 
-const CACHE_NAME = 'masterskaya-v3';
+const CACHE_NAME = 'masterskaya-v4';
 const PRECACHE_URLS = [
   './',
   './index.html',
@@ -55,16 +55,19 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // GET-запросы на тот же origin — stale-while-revalidate
+  // GET-запросы на тот же origin — network-first (не отдаём устаревший кеш)
+  // ВАЖНО: cache-first вызывал показ старых JS-бандлов после деплоя
   if (req.method === 'GET' && url.origin === self.location.origin) {
     event.respondWith(
       caches.open(CACHE_NAME).then(async (cache) => {
-        const cached = await cache.match(req);
-        const networkPromise = fetch(req).then((res) => {
-          if (res && res.ok) cache.put(req, res.clone());
-          return res;
-        }).catch(() => cached);
-        return cached || networkPromise;
+        try {
+          const networkRes = await fetch(req);
+          if (networkRes && networkRes.ok) cache.put(req, networkRes.clone());
+          return networkRes;
+        } catch {
+          // Оффлайн — отдаём кеш
+          return await cache.match(req);
+        }
       })
     );
     return;
