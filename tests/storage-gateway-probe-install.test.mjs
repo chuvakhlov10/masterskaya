@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 
 const appSource = await readFile(new URL("../src/App.jsx", import.meta.url), "utf8");
 
+// The probe is temporary; direct GitHub storage must remain active during verification.
 test("App installs the storage gateway probe without replacing the active storage client", () => {
   assert.equal(appSource.includes('from "./storage-gateway.js"'), true);
   assert.equal(appSource.includes("installStorageGatewayProbe();"), true);
