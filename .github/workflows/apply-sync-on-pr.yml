@@ -31,6 +31,7 @@ jobs:
           git apply /tmp/sync-hardening.patch
           rm -rf .sync-bootstrap
           rm -f .github/workflows/bootstrap-sync-hardening.yml
+          rm -f .github/workflows/ci.yml
           git add --all
           git diff --cached --check
           git config user.name "github-actions[bot]"
