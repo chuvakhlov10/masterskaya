@@ -27,20 +27,16 @@ const shaCache = {};
 // ── Очередь записей, чтобы избежать параллельных PUT на один файл ──
 const writeQueue = {};
 
-// ── Выполнить операцию последовательно для одного ключа ──
-async function withWriteQueue(key, fn) {
-  // Если для этого ключа уже идёт запись — ждём её окончания
-  while (writeQueue[key]) {
-    await writeQueue[key];
-  }
-  let resolve;
-  writeQueue[key] = new Promise(r => { resolve = r; });
-  try {
-    return await fn();
-  } finally {
-    delete writeQueue[key];
-    resolve();
-  }
+// ── Выполнить операцию строго последовательно для одного ключа ──
+// Promise-chain не допускает гонку, когда несколько ожидающих вызовов
+// одновременно просыпаются и начинают PUT одного файла.
+function withWriteQueue(key, fn) {
+  const previous = writeQueue[key] || Promise.resolve();
+  const current = previous.catch(() => {}).then(fn);
+  writeQueue[key] = current.finally(() => {
+    if (writeQueue[key] === current) delete writeQueue[key];
+  });
+  return current;
 }
 
 // ── GitHub API helpers ──
@@ -107,13 +103,15 @@ export async function dbGet(key) {
     const text = decodeB64(data.content);
     try {
       return JSON.parse(text);
-    } catch {
-      return null;
+    } catch (parseError) {
+      const e = new Error(`INVALID_JSON: ${key}`);
+      e.cause = parseError;
+      throw e;
     }
   } catch (e) {
     if (e.status === 404) return null; // файл не найден — норм
     console.warn(`[dbGet] "${key}":`, e.message);
-    return null;
+    throw e; // сетевую ошибку нельзя маскировать как отсутствующий файл
   }
 }
 
@@ -124,19 +122,40 @@ export async function dbSet(key, value, mergeFn) {
   return withWriteQueue(key, async () => {
     try {
       const path = `${DATA_PREFIX}${keyToFileName(key)}.json`;
-      const content = JSON.stringify(value);
+      let finalValue = value;
+      let existing = null;
+
+      // Для конкурентно изменяемых данных read-merge-write выполняется ВСЕГДА,
+      // а не только после 409. shaCache хранит лишь SHA, но не гарантирует,
+      // что передаваемое value построено именно из версии с этим SHA.
+      // Иначе фоновый GET может обновить SHA, после чего устаревший snapshot
+      // успешно затрёт изменения другого устройства без конфликта.
+      if (mergeFn) {
+        try {
+          existing = await ghRequest("GET", path);
+          if (existing?.content) {
+            const remoteValue = JSON.parse(decodeB64(existing.content));
+            finalValue = mergeFn(remoteValue, value);
+          }
+          if (existing?.sha) shaCache[key] = existing.sha;
+        } catch (e) {
+          if (e.status !== 404) throw e;
+        }
+      }
+
       const body = {
         message: `update ${key}`,
-        content: encodeB64(content),
+        content: encodeB64(JSON.stringify(finalValue)),
       };
-      // Если есть SHA — добавляем (update), если нет — create
-      if (shaCache[key]) {
+      // При merge используем SHA именно той версии, которую только что прочитали.
+      if (existing?.sha) {
+        body.sha = existing.sha;
+      } else if (!mergeFn && shaCache[key]) {
         body.sha = shaCache[key];
-      } else {
-        // Попробуем получить текущий SHA
+      } else if (!mergeFn) {
         try {
-          const existing = await ghRequest("GET", path);
-          if (existing && existing.sha) {
+          existing = await ghRequest("GET", path);
+          if (existing?.sha) {
             shaCache[key] = existing.sha;
             body.sha = existing.sha;
           }

@@ -1,7 +1,7 @@
 // Service Worker — кеширует статику для офлайн-работы
 // Стратегия: cache-first для статики, network-first для данных (через fetch в самом приложении)
 
-const CACHE_NAME = 'masterskaya-v4';
+const CACHE_NAME = 'masterskaya-v5';
 const PRECACHE_URLS = [
   './',
   './index.html',
@@ -17,9 +17,13 @@ const PRECACHE_URLS = [
 // При установке — кешируем основные файлы
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(PRECACHE_URLS).catch(err => {
-      console.warn('[SW] precache error:', err);
-    }))
+    caches.open(CACHE_NAME).then(async (cache) => {
+      // Отсутствующая иконка не должна отменять кеширование всего приложения.
+      await Promise.all(PRECACHE_URLS.map(async (url) => {
+        try { await cache.add(url); }
+        catch (err) { console.warn('[SW] precache skipped:', url, err); }
+      }));
+    })
   );
   self.skipWaiting();
 });

@@ -287,24 +287,20 @@ function getQueue(){
   try { return JSON.parse(localStorage.getItem(PENDING_WRITES_KEY) || "[]"); } catch { return []; }
 }
 function setQueue(q){
-  // Защита от переполнения localStorage (H7 fix)
-  // Максимум 50 элементов — если больше, оставляем последние 50
-  if (q.length > 50) {
-    console.warn(`[queue] переполнение: ${q.length} элементов, оставляем последние 50`);
-    q = q.slice(-50);
+  // Для каждого файла достаточно хранить последнюю локальную версию.
+  // Компактация по key не удаляет уникальные изменения молча, в отличие
+  // от прежнего slice(-50), который мог потерять данные.
+  const latestByKey = new Map();
+  for (const item of Array.isArray(q) ? q : []) {
+    if (item && typeof item.key === "string") latestByKey.set(item.key, item);
   }
+  const compacted = [...latestByKey.values()].sort((a,b)=>(a.ts||0)-(b.ts||0));
   try {
-    localStorage.setItem(PENDING_WRITES_KEY, JSON.stringify(q));
+    localStorage.setItem(PENDING_WRITES_KEY, JSON.stringify(compacted));
   } catch (e) {
-    // QuotaExceededError — пытаемся очистить старые элементы
-    console.error('[queue] localStorage переполнен, очищаем старые элементы:', e.message);
-    while (q.length > 5) {
-      q = q.slice(-Math.floor(q.length / 2));
-      try {
-        localStorage.setItem(PENDING_WRITES_KEY, JSON.stringify(q));
-        break;
-      } catch {}
-    }
+    console.error('[queue] Не удалось сохранить очередь:', e.message);
+    // Не очищаем очередь и не делаем вид, что запись сохранена.
+    throw e;
   }
 }
 
@@ -317,7 +313,8 @@ async function sGet(key){
         cacheSet(key, val);
         return val;
       }
-      // Если null — возможно файла нет; но кеш тоже вернём как fallback при следующем запросе
+      // Файла действительно нет. Старый кеш здесь использовать нельзя:
+      // он мог бы воскресить удалённые серверные данные.
       return null;
     } catch (e) {
       console.warn(`[sGet] GitHub failed for "${key}", using cache:`, e.message);
@@ -327,40 +324,36 @@ async function sGet(key){
   return cacheGet(key);
 }
 
+// Удаления записей хранятся отдельно как tombstones, иначе union-merge
+// неизбежно воскрешает удалённую запись с другого устройства.
+let recordDeletionIds = new Set();
+function setRecordDeletionIds(items){
+  recordDeletionIds = new Set((Array.isArray(items) ? items : []).map(x => x?.id).filter(Boolean));
+}
+
 // Merge function для records: union по уникальному ключу
 // КЛЮЧ: если есть id — по id. Если нет id (старые записи) — по ВСЕМ полям.
 // НЕ используем timestamp+marker+workshop — теряет записи с одинаковым ts.
 function mergeRecords(remote, local){
-  if(!Array.isArray(remote)) return local;
-  if(!Array.isArray(local)) return remote;
-  const seen = new Set();
-  const result = [];
+  if(!Array.isArray(remote)) return Array.isArray(local) ? local.filter(r => !r?.id || !recordDeletionIds.has(r.id)) : [];
+  if(!Array.isArray(local)) return remote.filter(r => !r?.id || !recordDeletionIds.has(r.id));
+  const map = new Map();
   function recKey(r){
     if(r.id) return 'id:' + r.id;
-    // Для старых записей без id — все значимые поля
-    return JSON.stringify({
+    return 'legacy:' + JSON.stringify({
       ts: r.timestamp, w: r.workshop, m: r.marker, q: r.qty,
       d: r.defect, a: r.amount, rt: r.recordType, c: r.comment
     });
   }
-  // Сначала remote
-  for(const r of remote){
+  function version(r){ return Number(r.updatedAt || r.timestamp || 0); }
+  for(const r of [...remote, ...local]){
+    if (!r || (r.id && recordDeletionIds.has(r.id))) continue;
     const key = recKey(r);
-    if(!seen.has(key)){
-      seen.add(key);
-      result.push(r);
-    }
+    const prev = map.get(key);
+    // Для одного id сохраняем более свежую редакцию, а не всегда remote.
+    if (!prev || version(r) >= version(prev)) map.set(key, r);
   }
-  // Потом local (новые записи которых нет в remote)
-  for(const r of local){
-    const key = recKey(r);
-    if(!seen.has(key)){
-      seen.add(key);
-      result.push(r);
-    }
-  }
-  result.sort((a,b) => (a.timestamp||0) - (b.timestamp||0));
-  return result;
+  return [...map.values()].sort((a,b) => (a.timestamp||0) - (b.timestamp||0));
 }
 
 // Merge function для stock-ops: union всех операций по opId (event sourcing)
@@ -408,7 +401,7 @@ function mergeById(remote, local){
 function getMergeFn(key){
   if (key === "records") return mergeRecords;
   if (key === "stock-ops") return mergeStockOps;
-  if (key === "stock-moves") return mergeById;
+  if (key === "stock-moves" || key === "record-deletions") return mergeById;
   if (["prices","custom:markers","marker-aliases","marker-notes","stock:cfg","subcategories","passwords"].includes(key)) return mergeObject;
   return undefined;
 }
@@ -1598,6 +1591,7 @@ export default function App(){
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState("record");
   const [records, setRecords] = useState([]);
+  const recordDeletionsRef = useRef([]);
   // recordsRef — всегда актуальная копия records (для debounce saveAndSync)
   // без этого debounce 400мс может записать устаревший массив поверх свежего
   const recordsRef = useRef([]);
@@ -1907,75 +1901,87 @@ export default function App(){
   function applyOpsToStock(ops) {
     const result = { main: {}, ws: { SMART: {}, Бегемот: {} } };
     if (!Array.isArray(ops)) return result;
-    // Валидный диапазон ts: 2020-01-01 .. now+1day
     const minTs = new Date("2020-01-01").getTime();
     const maxTs = Date.now() + 24 * 60 * 60 * 1000;
-    const validOps = ops.filter(op => op && typeof op === "object" && op.type && op.ts >= minTs && op.ts <= maxTs);
-    // Сортировка по ts, при равенстве — по opId для детерминированности
+    const validOps = ops.filter(op => op && typeof op === "object" && op.type && Number.isFinite(op.ts) && op.ts >= minTs && op.ts <= maxTs);
     const sortedOps = [...validOps].sort((a, b) => {
-      const tsDiff = (a.ts || 0) - (b.ts || 0);
+      const tsDiff = a.ts - b.ts;
       if (tsDiff !== 0) return tsDiff;
-      return (a.opId || "").localeCompare(b.opId || "");
+      return String(a.opId || "").localeCompare(String(b.opId || ""));
     });
-    
+
+    // После rename старое имя остаётся алиасом нового. Поэтому операция,
+    // созданная офлайн на другом устройстве со старым именем, не создаёт
+    // второй независимый остаток.
+    const renamedTo = new Map();
+    const resolveMarker = (marker) => {
+      if (typeof marker !== "string" || !marker.trim()) return null;
+      let current = marker;
+      const visited = new Set();
+      while (renamedTo.has(current) && !visited.has(current)) {
+        visited.add(current);
+        current = renamedTo.get(current);
+      }
+      return current;
+    };
+    const parseLocation = (loc) => {
+      if (loc === "main") return ["main", null];
+      if (typeof loc === "string" && loc.startsWith("ws:")) {
+        const ws = loc.slice(3);
+        if (WORKSHOPS.includes(ws)) return ["ws", ws];
+      }
+      return null;
+    };
+    const getBucket = (loc) => {
+      const parsed = parseLocation(loc);
+      if (!parsed) return null;
+      const [scope, ws] = parsed;
+      return scope === "main" ? result.main : result.ws[ws];
+    };
+
     for (const op of sortedOps) {
       try {
-        if (op.type === "set" || op.type === "init") {
-          const [scope, ws] = parseLocation(op.location);
-          if (scope === "main") {
-            result.main[op.marker] = op.value;
-          } else {
-            result.ws[ws] = result.ws[ws] || {};
-            result.ws[ws][op.marker] = op.value;
-          }
-        } else if (op.type === "delta") {
-          const [scope, ws] = parseLocation(op.location);
-          if (scope === "main") {
-            result.main[op.marker] = Math.max((result.main[op.marker] || 0) + op.delta, 0);
-          } else {
-            result.ws[ws] = result.ws[ws] || {};
-            result.ws[ws][op.marker] = Math.max((result.ws[ws][op.marker] || 0) + op.delta, 0);
-          }
-        } else if (op.type === "move") {
-          const [fScope, fWs] = parseLocation(op.from);
-          const [tScope, tWs] = parseLocation(op.to);
-          if (fScope === "main") {
-            result.main[op.marker] = Math.max((result.main[op.marker] || 0) - op.qty, 0);
-          } else {
-            result.ws[fWs] = result.ws[fWs] || {};
-            result.ws[fWs][op.marker] = Math.max((result.ws[fWs][op.marker] || 0) - op.qty, 0);
-          }
-          if (tScope === "main") {
-            result.main[op.marker] = (result.main[op.marker] || 0) + op.qty;
-          } else {
-            result.ws[tWs] = result.ws[tWs] || {};
-            result.ws[tWs][op.marker] = (result.ws[tWs][op.marker] || 0) + op.qty;
-          }
-        } else if (op.type === "rename") {
-          // M2: если newMarker уже существует — складываем значения (не перезаписываем)
-          if (result.main[op.oldMarker] !== undefined) {
-            result.main[op.newMarker] = (result.main[op.newMarker] || 0) + result.main[op.oldMarker];
-            delete result.main[op.oldMarker];
-          }
-          for (const ws of WORKSHOPS) {
-            if (result.ws[ws] && result.ws[ws][op.oldMarker] !== undefined) {
-              result.ws[ws][op.newMarker] = (result.ws[ws][op.newMarker] || 0) + result.ws[ws][op.oldMarker];
-              delete result.ws[ws][op.oldMarker];
+        if (op.type === "rename") {
+          const oldMarker = resolveMarker(op.oldMarker);
+          const newMarker = resolveMarker(op.newMarker);
+          if (!oldMarker || !newMarker || oldMarker === newMarker) continue;
+          renamedTo.set(oldMarker, newMarker);
+          for (const bucket of [result.main, ...WORKSHOPS.map(ws => result.ws[ws])]) {
+            if (Object.prototype.hasOwnProperty.call(bucket, oldMarker)) {
+              bucket[newMarker] = (Number(bucket[newMarker]) || 0) + (Number(bucket[oldMarker]) || 0);
+              delete bucket[oldMarker];
             }
           }
+          continue;
+        }
+
+        const marker = resolveMarker(op.marker);
+        if (!marker) continue;
+        if (op.type === "set" || op.type === "init") {
+          const bucket = getBucket(op.location);
+          const value = Number(op.value);
+          if (!bucket || !Number.isFinite(value)) continue;
+          bucket[marker] = value;
+        } else if (op.type === "delta") {
+          const bucket = getBucket(op.location);
+          const delta = Number(op.delta);
+          if (!bucket || !Number.isFinite(delta)) continue;
+          // Не clamp'им каждую операцию к нулю: clamp делает итог зависимым
+          // от порядка конкурентных +delta/-delta и теряет часть движения.
+          bucket[marker] = (Number(bucket[marker]) || 0) + delta;
+        } else if (op.type === "move") {
+          const from = getBucket(op.from);
+          const to = getBucket(op.to);
+          const qty = Number(op.qty);
+          if (!from || !to || !Number.isFinite(qty) || qty <= 0 || from === to) continue;
+          from[marker] = (Number(from[marker]) || 0) - qty;
+          to[marker] = (Number(to[marker]) || 0) + qty;
         }
       } catch (e) {
         console.warn('[applyOpsToStock] skipping malformed op:', op, e.message);
       }
     }
     return result;
-  }
-
-  function parseLocation(loc) {
-    if (typeof loc !== "string") return ["main", null];
-    if (loc === "main") return ["main", null];
-    if (loc.startsWith("ws:")) return ["ws", loc.slice(3)];
-    return ["main", null];
   }
 
   function makeOpId() {
@@ -2007,8 +2013,10 @@ export default function App(){
       client: clientIdRef.current,
       opId: makeOpId(),
     };
-    // Помечаем как несинхронизированную
+    // Помечаем как несинхронизированную. Новая операция также возобновляет
+    // синхронизацию после ранее исчерпанных retry.
     unsyncedOpsRef.current.add(op.opId);
+    syncRetriesRef.current = 0;
     // СИНХРОННО обновляем ref (не ждём useEffect, иначе два вызова подряд теряют op)
     const newOps = [...stockOpsRef.current, op];
     stockOpsRef.current = newOps;
@@ -2016,15 +2024,16 @@ export default function App(){
     // BUG-D: с trimming при quota exceeded
     try {
       localStorage.setItem("stock_ops_local", JSON.stringify(newOps));
-    } catch {
+    } catch (e) {
+      // Нельзя сохранять только хвост event log: без начальных init/set итоговый
+      // остаток после перезагрузки станет математически неверным.
+      Object.keys(localStorage)
+        .filter(k => k.startsWith(OFFLINE_CACHE_PREFIX) && k !== OFFLINE_CACHE_PREFIX + "stock-ops")
+        .forEach(k => { try { localStorage.removeItem(k); } catch {} });
       try {
-        // Оставляем последние 2000 ops
-        const trimmed = newOps.slice(-2000);
-        localStorage.setItem("stock_ops_local", JSON.stringify(trimmed));
-      } catch {
-        // Очищаем старые кеши и пробуем снова
-        Object.keys(localStorage).filter(k => k.startsWith(OFFLINE_CACHE_PREFIX)).forEach(k => { try{localStorage.removeItem(k);}catch{} });
-        try { localStorage.setItem("stock_ops_local", JSON.stringify(newOps.slice(-1000))); } catch {}
+        localStorage.setItem("stock_ops_local", JSON.stringify(newOps));
+      } catch (e2) {
+        console.error('[stock-ops] Не удалось сохранить полный журнал локально:', e2.message);
       }
     }
     setStockOps(newOps);
@@ -2081,7 +2090,24 @@ export default function App(){
     isSyncingOpsRef.current = true;
     
     try {
-      const opsToSave = stockOpsRef.current;
+      // КРИТИЧНО: перед КАЖДОЙ записью читаем сервер и объединяем операции.
+      // Нельзя полагаться только на 409: dbGet/poll обновляет общий shaCache,
+      // поэтому устаревший локальный массив мог записаться с актуальным SHA
+      // и молча удалить операции другого устройства.
+      let remoteBeforeWrite = [];
+      try {
+        const remote = await dbGet("stock-ops");
+        if (Array.isArray(remote)) remoteBeforeWrite = remote;
+      } catch {}
+
+      const opsToSave = mergeStockOps(remoteBeforeWrite, stockOpsRef.current);
+      stockOpsRef.current = opsToSave;
+      const stockBeforeWrite = applyOpsToStock(opsToSave);
+      stockRef.current = stockBeforeWrite;
+      setStockOps(opsToSave);
+      setStock(stockBeforeWrite);
+      try { localStorage.setItem("stock_ops_local", JSON.stringify(opsToSave)); } catch {}
+
       const result = await sSet("stock-ops", opsToSave);
       setPendingCount(getQueue().length);
       
@@ -2139,6 +2165,9 @@ export default function App(){
     const newOps = [...stockOpsRef.current, op];
     // БАГ#3: СИНХРОННО обновляем refs — иначе быстрые Ably-сообщения теряют ops
     stockOpsRef.current = newOps;
+    // Remote op тоже сохраняем локально: при перезагрузке до следующего poll
+    // устройство не должно временно возвращаться к старому остатку.
+    try { localStorage.setItem("stock_ops_local", JSON.stringify(newOps)); } catch {}
     setStockOps(newOps);
     const newStock = applyOpsToStock(newOps);
     stockRef.current = newStock;
@@ -2184,6 +2213,14 @@ export default function App(){
 
     // Заполняем маппинг ключей → setters для мгновенного применения Ably-обновлений
     stateSettersRef.current = {
+      "record-deletions": (items) => {
+        const merged = mergeById(items, recordDeletionsRef.current);
+        recordDeletionsRef.current = merged;
+        setRecordDeletionIds(merged);
+        const cleaned = recordsRef.current.filter(r => !recordDeletionIds.has(r.id));
+        recordsRef.current = cleaned;
+        setRecords(cleaned);
+      },
       "records": (recs) => {
         // Merge с локальными — не перезаписываем несинхронизированные
         const merged = mergeRecords(recs, recordsRef.current);
@@ -2247,8 +2284,11 @@ export default function App(){
         const sY = window.scrollY;
         setRecords(prev => {
           // Защита от дублей (по timestamp)
-          if (prev.some(r => r.timestamp === rec.timestamp)) return prev;
-          return [...prev, rec];
+          if (prev.some(r => r.id === rec.id)) return prev;
+          const next = [...prev, rec];
+          recordsRef.current = next;
+          try { localStorage.setItem("records_local", JSON.stringify(next)); } catch {}
+          return next;
         });
         setTimeout(() => window.scrollTo(0, sY), 0);
       } else if (msg.name === 'record-updated' && msg.data && msg.data.id) {
@@ -2256,14 +2296,27 @@ export default function App(){
         console.log('[ABLY] Обновлена запись:', id, rec.marker);
         skipPollRef.current = 1;
         const sY = window.scrollY;
-        setRecords(prev => prev.map(r => r.id === id ? rec : r));
+        setRecords(prev => {
+          const next = prev.map(r => r.id === id ? rec : r);
+          recordsRef.current = next;
+          try { localStorage.setItem("records_local", JSON.stringify(next)); } catch {}
+          return next;
+        });
         setTimeout(() => window.scrollTo(0, sY), 0);
       } else if (msg.name === 'record-deleted' && msg.data && msg.data.id) {
         const { id } = msg.data;
         console.log('[ABLY] Удалена запись:', id);
+        const tombstone = { id, deletedAt: Date.now(), client: msg.data.from || "remote" };
+        recordDeletionsRef.current = mergeById(recordDeletionsRef.current, [tombstone]);
+        setRecordDeletionIds(recordDeletionsRef.current);
         skipPollRef.current = 1;
         const sY = window.scrollY;
-        setRecords(prev => prev.filter(r => r.id !== id));
+        setRecords(prev => {
+          const next = prev.filter(r => r.id !== id);
+          recordsRef.current = next;
+          try { localStorage.setItem("records_local", JSON.stringify(next)); } catch {}
+          return next;
+        });
         setTimeout(() => window.scrollTo(0, sY), 0);
       } else if (msg.name === 'stock-op' && msg.data && msg.data.op) {
         // Инкрементальная синхронизация склада через event sourcing
@@ -2321,19 +2374,23 @@ export default function App(){
       }
       setSyncStatus("syncing");
       try {
-        const [r,p,ops,sCfg,sm2,al,nt,mvs] = await Promise.all([
-          sGet("records"), sGet("prices"),
+        const [r,deletions,p,ops,sCfg,sm2,al,nt,mvs] = await Promise.all([
+          sGet("records"), sGet("record-deletions"), sGet("prices"),
           sGet("stock-ops"),
           sGet("stock:cfg"), sGet("custom:markers"), sGet("marker-aliases"), sGet("marker-notes"),
           sGet("stock-moves"),
         ]);
-        const hash = JSON.stringify({r, p, ops, sCfg, sm2, al, nt, mvs});
+        const hash = JSON.stringify({r, deletions, p, ops, sCfg, sm2, al, nt, mvs});
         if (hash === lastDataHashRef.current) {
           setSyncStatus(wsConnectedRef.current ? "ws" : "synced");
           return;
         }
         lastDataHashRef.current = hash;
         const sY = window.scrollY;
+        if (Array.isArray(deletions)) {
+          recordDeletionsRef.current = mergeById(deletions, recordDeletionsRef.current);
+          setRecordDeletionIds(recordDeletionsRef.current);
+        }
         // Merge records с локальными — не перезаписываем, не теряем несинхронизированные
         if(Array.isArray(r)){
           const localRecs = recordsRef.current;
@@ -2359,7 +2416,11 @@ export default function App(){
           const serverIds = new Set(ops.map(o => o.opId));
           const hasLocalUnsynced = localOps.some(o => !serverIds.has(o.opId));
           if(hasLocalUnsynced || localOps.length > ops.length){
-            // Мёржим — не теряем локальные unsynced ops
+            // Мёржим — не теряем локальные unsynced ops. Все отсутствующие
+            // на сервере opId обязательно ставим на повторную доставку.
+            for (const op of localOps) {
+              if (op?.opId && !serverIds.has(op.opId)) unsyncedOpsRef.current.add(op.opId);
+            }
             const merged = mergeStockOps(ops, localOps);
             stockOpsRef.current = merged;
             const mergedStock = applyOpsToStock(merged);
@@ -2556,8 +2617,8 @@ export default function App(){
       setPwdLoaded(true);
 
       // Загружаем остальные данные
-      const [r,p,ops,stk,sCfg,sm2,al,nt,sub,mvs] = await Promise.all([
-        sGet("records"), sGet("prices"),
+      const [r,deletions,p,ops,stk,sCfg,sm2,al,nt,sub,mvs] = await Promise.all([
+        sGet("records"), sGet("record-deletions"), sGet("prices"),
         sGet("stock-ops"),
         sGet("stock"),
         sGet("stock:cfg"), sGet("custom:markers"), sGet("marker-aliases"), sGet("marker-notes"), sGet("subcategories"),
@@ -2565,6 +2626,10 @@ export default function App(){
       ]);
       // Защита: гарантируем, что у нас правильные типы (массив/объект),
       // иначе рендер упадёт с белым экраном
+      if (Array.isArray(deletions)) {
+        recordDeletionsRef.current = deletions;
+        setRecordDeletionIds(deletions);
+      }
       // Merge records с локальным кешем localStorage — не теряем несинхронизированные
       if(Array.isArray(r)){
         let localRecords = [];
@@ -2575,8 +2640,9 @@ export default function App(){
           setRecords(merged);
           console.log(`[RECORDS] Загружено ${r.length} с сервера, ${localRecords.length} локально, merged: ${merged.length}`);
         } else {
-          recordsRef.current = r;
-          setRecords(r);
+          const cleaned = mergeRecords(r, []);
+          recordsRef.current = cleaned;
+          setRecords(cleaned);
         }
       }
       if(p && typeof p === "object" && !Array.isArray(p)) setPrices(p);
@@ -2900,9 +2966,10 @@ export default function App(){
     const rec = {
       id: `rec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       workshop, category, marker: m, qty, defect, amount, comment,
-      recordType, timestamp: Date.now()
+      recordType, timestamp: Date.now(), updatedAt: Date.now()
     };
-    const next = [...records, rec];
+    const next = [...recordsRef.current, rec];
+    recordsRef.current = next;
     // Не await'им — форма сбрасывается мгновенно, GitHub пишется в фоне
     saveAndSync("records", next, setRecords);
     // Отправляем только новую запись через Ably (не весь массив — он >60KB)
@@ -2935,13 +3002,13 @@ export default function App(){
   async function handleEditSave(updated){
     if (!updated.id) updated.id = editRec.record.id || `rec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const recId = updated.id;
-    const oldIdx = records.findIndex(r => r.id === recId);
+    const oldIdx = recordsRef.current.findIndex(r => r.id === recId);
     if (oldIdx === -1) {
       console.warn('[handleEditSave] запись не найдена по id:', recId);
       setEditRec(null);
       return;
     }
-    const old = records[oldIdx];
+    const old = recordsRef.current[oldIdx];
 
     // 1) Возвращаем старое списание (через stockDelta)
     const oldDelta = stockDelta(old);
@@ -2962,7 +3029,9 @@ export default function App(){
       });
     }
 
-    const next = records.map(r => r.id === recId ? updated : r);
+    updated.updatedAt = Date.now();
+    const next = recordsRef.current.map(r => r.id === recId ? updated : r);
+    recordsRef.current = next;
     // Не await'им — модалка закрывается мгновенно
     saveAndSync("records", next, setRecords);
     // Отправляем обновлённую запись по ID через Ably
@@ -2977,13 +3046,13 @@ export default function App(){
 
   async function handleEditDelete(recId){
     if(!confirm("Удалить эту запись?")) return;
-    const oldIdx = records.findIndex(r => r.id === recId);
+    const oldIdx = recordsRef.current.findIndex(r => r.id === recId);
     if (oldIdx === -1) {
       console.warn('[handleEditDelete] запись не найдена по id:', recId);
       setEditRec(null);
       return;
     }
-    const old = records[oldIdx];
+    const old = recordsRef.current[oldIdx];
     // Возвращаем списание через stockDelta
     const oldDelta = stockDelta(old);
     if(oldDelta > 0){
@@ -2993,7 +3062,15 @@ export default function App(){
         delta: oldDelta,
       });
     }
-    const next = records.filter(r => r.id !== recId);
+    const tombstone = { id: recId, deletedAt: Date.now(), client: clientIdRef.current };
+    const nextDeletions = mergeById(recordDeletionsRef.current, [tombstone]);
+    recordDeletionsRef.current = nextDeletions;
+    setRecordDeletionIds(nextDeletions);
+    // Tombstone отправляем раньше массива records. Даже если устройство было офлайн,
+    // последующий merge не воскресит удалённую запись.
+    sSet("record-deletions", nextDeletions).catch(()=>{});
+    const next = recordsRef.current.filter(r => r.id !== recId);
+    recordsRef.current = next;
     // Не await'им — модалка закрывается мгновенно
     saveAndSync("records", next, setRecords);
     // Отправляем ID удалённой записи через Ably
