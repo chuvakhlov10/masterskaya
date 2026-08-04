@@ -18,6 +18,15 @@ jobs:
           ref: hotfix/realtime-stock-refresh
           fetch-depth: 0
 
+      - name: Merge current main into hotfix branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git merge --no-edit origin/main
+
       - name: Apply hotfix
         run: python3 scripts/apply-stock-realtime-hotfix.py
 
@@ -33,17 +42,13 @@ jobs:
       - name: Run regression tests and production build
         run: npm run check
 
-      - name: Commit hotfix to isolated branch
+      - name: Commit and push hotfix branch
         shell: bash
         run: |
           set -euo pipefail
           git add -A src/App.jsx tests/sync-core.test.mjs .hotfix-trigger
-          if git diff --cached --quiet; then
-            echo "Hotfix already applied"
-            exit 0
+          if ! git diff --cached --quiet; then
+            git diff --cached --check
+            git commit -m "Fix realtime stock refresh on open devices"
           fi
-          git diff --cached --check
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "Fix realtime stock refresh on open devices"
           git push origin HEAD:hotfix/realtime-stock-refresh
