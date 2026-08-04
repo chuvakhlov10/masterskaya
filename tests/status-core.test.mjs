@@ -19,6 +19,12 @@ test('sync error has priority over an online connection', () => {
   assert.equal(view.kind, 'error');
 });
 
+test('idle state is checking, not saved', () => {
+  const view = deriveSyncView({ online: true, syncStatus: 'idle', pendingCount: 0, lastError: '', busy: false });
+  assert.equal(view.kind, 'sending');
+  assert.equal(view.label, 'Проверка...');
+});
+
 test('live status is shown only with no error and no pending work', () => {
   const view = deriveSyncView({ online: true, syncStatus: 'ws', pendingCount: 0, lastError: '', busy: false });
   assert.deepEqual(view, { kind: 'live', icon: '⚡', label: 'Сохранено · Live' });
