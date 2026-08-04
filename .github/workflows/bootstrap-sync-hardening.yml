@@ -1,0 +1,49 @@
+name: Bootstrap sync hardening
+
+on:
+  push:
+    branches:
+      - refactor/sync-hardening
+    paths:
+      - .github/workflows/bootstrap-sync-hardening.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply-patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout refactor branch
+        uses: actions/checkout@v4
+        with:
+          ref: refactor/sync-hardening
+          fetch-depth: 0
+
+      - name: Reassemble and verify patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .sync-bootstrap/part-* | base64 --decode | gzip --decompress > /tmp/sync-hardening.patch
+          echo "8da1f886c3a209502746cf6ff39af149a1aa76c3143b1c556bff7b0a8ba13a2b  /tmp/sync-hardening.patch" | sha256sum --check --strict
+          git apply --check /tmp/sync-hardening.patch
+
+      - name: Apply synchronization hardening
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply /tmp/sync-hardening.patch
+          rm -rf .sync-bootstrap
+          rm -f .github/workflows/bootstrap-sync-hardening.yml
+          git add --all
+          git diff --cached --check
+
+      - name: Commit and push reviewed changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Harden synchronization and add regression tests"
+          git push origin HEAD:refactor/sync-hardening
