@@ -5,7 +5,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --experimental-default-type=module --test tests/*.test.mjs",
+    "check": "npm run test && npm run build"
   },
   "dependencies": {
     "ably": "^2.23.0",

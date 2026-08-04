@@ -1,19 +1,21 @@
-// GitHub Storage — заменяет Supabase для работы без VPN в России
-// Использует GitHub API + приватный репо для хранения данных
+// GitHub Storage — хранение JSON в приватном репозитории GitHub.
+// Важное ограничение: GitHub Contents API не является БД, поэтому каждая
+// конкурентная запись обязана выполнять read → merge → write с актуальным SHA.
 
 const OWNER = "chuvakhlov10";
 const REPO = "masterskaya-data";
 const TOKEN_KEY = "github_token_v1";
 const DATA_PREFIX = "data/";
 const PHOTO_PREFIX = "photos/";
+const REQUEST_TIMEOUT_MS = 30_000;
 
 function getToken() {
-  try {
-    return localStorage.getItem(TOKEN_KEY) || "";
-  } catch { return ""; }
+  try { return localStorage.getItem(TOKEN_KEY) || ""; }
+  catch { return ""; }
 }
-export function setToken(t) {
-  try { localStorage.setItem(TOKEN_KEY, t); } catch {}
+
+export function setToken(token) {
+  try { localStorage.setItem(TOKEN_KEY, String(token || "").trim()); } catch {}
 }
 export function clearToken() {
   try { localStorage.removeItem(TOKEN_KEY); } catch {}
@@ -22,321 +24,322 @@ export function hasToken() {
   return !!getToken();
 }
 
-// ── Кэш SHA для каждого файла (чтобы не делать лишних запросов) ──
-const shaCache = {};
-// ── Очередь записей, чтобы избежать параллельных PUT на один файл ──
-const writeQueue = {};
+const shaCache = Object.create(null);
+const writeQueue = Object.create(null);
 
-// ── Выполнить операцию строго последовательно для одного ключа ──
-// Promise-chain не допускает гонку, когда несколько ожидающих вызовов
-// одновременно просыпаются и начинают PUT одного файла.
+// Строгая последовательность записей одного файла. Разные файлы могут писаться
+// параллельно, но два PUT одного key никогда не стартуют одновременно.
 function withWriteQueue(key, fn) {
   const previous = writeQueue[key] || Promise.resolve();
   const current = previous.catch(() => {}).then(fn);
-  writeQueue[key] = current.finally(() => {
+  writeQueue[key] = current;
+  return current.finally(() => {
     if (writeQueue[key] === current) delete writeQueue[key];
   });
-  return current;
 }
 
-// ── GitHub API helpers ──
-// Кодируем путь по сегментам: / не трогаем, остальные спецсимволы кодируем
-function encodePath(path){
-  return path.split("/").map(seg => encodeURIComponent(seg)).join("/");
+function assertSafeKey(key) {
+  if (typeof key !== "string" || !key.trim()) throw new Error("INVALID_KEY");
+  if (key.includes("/") || key.includes("\\") || key.includes("..")) throw new Error("INVALID_KEY");
 }
 
-// Имя файла для ключа: заменяем двоеточия на дефисы (':' не работает в путях GitHub)
-function keyToFileName(key){
+function encodePath(path) {
+  return path.split("/").map(segment => encodeURIComponent(segment)).join("/");
+}
+
+function keyToFileName(key) {
+  assertSafeKey(key);
   return key.replace(/:/g, "-");
+}
+
+function makeError(message, status, cause) {
+  const error = new Error(message);
+  if (status !== undefined) error.status = status;
+  if (cause) error.cause = cause;
+  return error;
 }
 
 async function ghRequest(method, path, body) {
   const token = getToken();
-  if (!token) throw new Error("NO_TOKEN");
-  // path уже содержит data/ — не кодируем его целиком, а по сегментам
+  if (!token) throw makeError("NO_TOKEN");
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   const url = `https://api.github.com/repos/${OWNER}/${REPO}/contents/${encodePath(path)}`;
-  const res = await fetch(url, {
-    method,
-    headers: {
-      "Authorization": `Bearer ${token}`,
-      "Accept": "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!res.ok) {
-    let errMsg = `HTTP ${res.status}`;
-    try {
-      const err = await res.json();
-      errMsg = err.message || errMsg;
-    } catch {}
-    const e = new Error(errMsg);
-    e.status = res.status;
-    throw e;
+
+  try {
+    const response = await fetch(url, {
+      method,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: controller.signal,
+      cache: "no-store",
+    });
+
+    if (!response.ok) {
+      let message = `HTTP ${response.status}`;
+      try {
+        const payload = await response.json();
+        message = payload?.message || message;
+      } catch {}
+      throw makeError(message, response.status);
+    }
+    if (response.status === 204) return null;
+    return response.json();
+  } catch (error) {
+    if (error?.name === "AbortError") throw makeError("REQUEST_TIMEOUT", 408, error);
+    throw error;
+  } finally {
+    clearTimeout(timeout);
   }
-  if (res.status === 204) return null;
-  return res.json();
 }
 
-// Кодирование/декодирование base64 для GitHub API
 function encodeB64(text) {
-  // Для текста (JSON) — кодируем в UTF-8, потом в base64
-  return btoa(unescape(encodeURIComponent(text)));
-}
-function decodeB64(b64) {
-  try {
-    return decodeURIComponent(escape(atob(b64)));
-  } catch {
-    return atob(b64);
+  const bytes = new TextEncoder().encode(String(text));
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
   }
+  return btoa(binary);
 }
 
-// ── dbGet: прочитать JSON из файла в репо ──
+function decodeB64(base64) {
+  const binary = atob(String(base64 || "").replace(/\s/g, ""));
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+
+function parseJsonFile(key, encodedContent) {
+  try { return JSON.parse(decodeB64(encodedContent)); }
+  catch (cause) { throw makeError(`INVALID_JSON: ${key}`, undefined, cause); }
+}
+
 export async function dbGet(key) {
+  const path = `${DATA_PREFIX}${keyToFileName(key)}.json`;
   try {
-    const path = `${DATA_PREFIX}${keyToFileName(key)}.json`;
     const data = await ghRequest("GET", path);
     if (!data) return null;
-    // Сохраняем SHA для последующих обновлений
     shaCache[key] = data.sha;
-    // Декодируем содержимое
-    const text = decodeB64(data.content);
-    try {
-      return JSON.parse(text);
-    } catch (parseError) {
-      const e = new Error(`INVALID_JSON: ${key}`);
-      e.cause = parseError;
-      throw e;
-    }
-  } catch (e) {
-    if (e.status === 404) return null; // файл не найден — норм
-    console.warn(`[dbGet] "${key}":`, e.message);
-    throw e; // сетевую ошибку нельзя маскировать как отсутствующий файл
+    return parseJsonFile(key, data.content);
+  } catch (error) {
+    if (error.status === 404) return null;
+    console.warn(`[dbGet] "${key}":`, error.message);
+    throw error;
   }
 }
 
-// ── dbSet: записать JSON в файл (с SHA для обновления) ──
-// mergeFn (опционально) — функция (remoteValue, localValue) => mergedValue
-//   используется при 409 conflict чтобы не потерять данные другого устройства
+function wait(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function retryDelay(attempt) {
+  const base = [0, 500, 1_500, 3_000, 5_000, 8_000][attempt] || 8_000;
+  return base + Math.random() * 1_000;
+}
+
+// Возвращает фактически записанное value. При merge это важно: локальный UI
+// должен получить объединённую версию, а не продолжать жить со старым snapshot.
 export async function dbSet(key, value, mergeFn) {
   return withWriteQueue(key, async () => {
-    try {
-      const path = `${DATA_PREFIX}${keyToFileName(key)}.json`;
-      let finalValue = value;
-      let existing = null;
+    const path = `${DATA_PREFIX}${keyToFileName(key)}.json`;
+    const maxAttempts = 6;
 
-      // Для конкурентно изменяемых данных read-merge-write выполняется ВСЕГДА,
-      // а не только после 409. shaCache хранит лишь SHA, но не гарантирует,
-      // что передаваемое value построено именно из версии с этим SHA.
-      // Иначе фоновый GET может обновить SHA, после чего устаревший snapshot
-      // успешно затрёт изменения другого устройства без конфликта.
-      if (mergeFn) {
-        try {
-          existing = await ghRequest("GET", path);
-          if (existing?.content) {
-            const remoteValue = JSON.parse(decodeB64(existing.content));
-            finalValue = mergeFn(remoteValue, value);
-          }
-          if (existing?.sha) shaCache[key] = existing.sha;
-        } catch (e) {
-          if (e.status !== 404) throw e;
-        }
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      if (attempt > 1) {
+        const delay = retryDelay(attempt - 1);
+        console.warn(`[dbSet] conflict on "${key}", retry ${attempt - 1}/${maxAttempts - 1} after ${Math.round(delay)}ms`);
+        await wait(delay);
       }
 
-      const body = {
-        message: `update ${key}`,
-        content: encodeB64(JSON.stringify(finalValue)),
-      };
-      // При merge используем SHA именно той версии, которую только что прочитали.
-      if (existing?.sha) {
-        body.sha = existing.sha;
-      } else if (!mergeFn && shaCache[key]) {
-        body.sha = shaCache[key];
-      } else if (!mergeFn) {
-        try {
-          existing = await ghRequest("GET", path);
-          if (existing?.sha) {
-            shaCache[key] = existing.sha;
-            body.sha = existing.sha;
-          }
-        } catch (e) {
-          if (e.status !== 404) console.warn(`[dbSet] get SHA for "${key}":`, e.message);
-        }
-      }
-      const result = await ghRequest("PUT", path, body);
-      if (result && result.content && result.content.sha) {
-        shaCache[key] = result.content.sha;
-      }
-      return { ok: true };
-    } catch (e) {
-      if (e.status === 409 || e.status === 422) {
-        // Conflict — SHA устарел. Несколько retry с возрастающей задержкой + jitter.
-        // Jitter (случайность) КРИТИЧЕН: без него два устройства retry-ят одновременно
-        // и снова конфликтуют. С jitter они разойдутся.
-        delete shaCache[key];
-        const maxRetries = 5;
-        const baseDelays = [500, 1500, 3000, 5000, 8000];
-        for (let attempt = 1; attempt <= maxRetries; attempt++) {
-          const jitter = Math.random() * 1000; // 0-1000ms случайности
-          const delay = baseDelays[attempt-1] + jitter;
-          console.warn(`[dbSet] conflict on "${key}", retry ${attempt}/${maxRetries} after ${Math.round(delay)}ms`);
-          await new Promise(r => setTimeout(r, delay));
+      try {
+        let existing = null;
+        let finalValue = value;
+
+        // Для merge всегда читаем актуальный файл. Для last-write-wins данных
+        // чтение нужно только когда SHA ещё неизвестен или после конфликта.
+        if (mergeFn || !shaCache[key] || attempt > 1) {
           try {
-            const path = `${DATA_PREFIX}${keyToFileName(key)}.json`;
-            const existing = await ghRequest("GET", path);
-            let finalValue = value;
-            if (mergeFn && existing && existing.content) {
-              try {
-                const remoteValue = JSON.parse(decodeB64(existing.content));
-                finalValue = mergeFn(remoteValue, value);
-                console.log(`[dbSet] merged "${key}" (attempt ${attempt}): remote=${Array.isArray(remoteValue) ? remoteValue.length : Object.keys(remoteValue).length} local=${Array.isArray(value) ? value.length : Object.keys(value).length} merged=${Array.isArray(finalValue) ? finalValue.length : Object.keys(finalValue).length}`);
-              } catch (mergeErr) {
-                console.warn(`[dbSet] merge failed for "${key}":`, mergeErr.message);
-              }
-            }
-            const body = {
-              message: `update ${key} (retry ${attempt})`,
-              content: encodeB64(JSON.stringify(finalValue)),
-            };
-            if (existing && existing.sha) body.sha = existing.sha;
-            const result = await ghRequest("PUT", path, body);
-            if (result && result.content && result.content.sha) {
-              shaCache[key] = result.content.sha;
-            }
-            return { ok: true, merged: mergeFn ? true : false };
-          } catch (e2) {
-            if (e2.status === 409 || e2.status === 422) {
-              // Конфликт снова — пробуем ещё раз с большей задержкой
-              delete shaCache[key];
-              if (attempt < maxRetries) continue;
-              console.error(`[dbSet] all ${maxRetries} retries failed for "${key}"`);
-              return { ok: false, error: e2.message };
-            }
-            console.error(`[dbSet] retry ${attempt} failed for "${key}":`, e2.message);
-            return { ok: false, error: e2.message };
+            existing = await ghRequest("GET", path);
+          } catch (error) {
+            if (error.status !== 404) throw error;
           }
         }
-        return { ok: false, error: "max retries exceeded" };
+
+        if (mergeFn && existing?.content) {
+          const remoteValue = parseJsonFile(key, existing.content);
+          // Ошибка merge должна остановить запись. Никогда не откатываемся к
+          // локальному snapshot с новым SHA: это снова уничтожило бы remote.
+          finalValue = mergeFn(remoteValue, value);
+        }
+
+        const body = {
+          message: attempt === 1 ? `update ${key}` : `update ${key} (retry ${attempt - 1})`,
+          content: encodeB64(JSON.stringify(finalValue)),
+        };
+        const sha = existing?.sha || (!mergeFn ? shaCache[key] : null);
+        if (sha) body.sha = sha;
+
+        const result = await ghRequest("PUT", path, body);
+        if (result?.content?.sha) shaCache[key] = result.content.sha;
+        return {
+          ok: true,
+          merged: !!mergeFn,
+          value: finalValue,
+          sha: result?.content?.sha || null,
+        };
+      } catch (error) {
+        if (error.status === 409 || error.status === 422) {
+          delete shaCache[key];
+          if (attempt < maxAttempts) continue;
+        }
+        console.error(`[dbSet] "${key}":`, error.message);
+        return { ok: false, error: error.message, status: error.status };
       }
-      console.error(`[dbSet] "${key}":`, e.message);
-      return { ok: false, error: e.message };
     }
+
+    return { ok: false, error: "MAX_RETRIES_EXCEEDED" };
   });
 }
 
-// ── dbDelete: удалить файл (для фото и т.п.) ──
 export async function dbDelete(key) {
-  try {
+  return withWriteQueue(key, async () => {
     const path = `${DATA_PREFIX}${keyToFileName(key)}.json`;
-    // Сначала получить SHA
-    let sha = shaCache[key];
-    if (!sha) {
-      const existing = await ghRequest("GET", path);
-      sha = existing?.sha;
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      try {
+        let existing;
+        try { existing = await ghRequest("GET", path); }
+        catch (error) {
+          if (error.status === 404) return { ok: true };
+          throw error;
+        }
+        if (!existing?.sha) return { ok: true };
+        await ghRequest("DELETE", path, { message: `delete ${key}`, sha: existing.sha });
+        delete shaCache[key];
+        return { ok: true };
+      } catch (error) {
+        if ((error.status === 409 || error.status === 422) && attempt < 4) {
+          await wait(300 * attempt + Math.random() * 500);
+          continue;
+        }
+        if (error.status === 404) return { ok: true };
+        console.warn(`[dbDelete] "${key}":`, error.message);
+        return { ok: false, error: error.message };
+      }
     }
-    if (!sha) return { ok: true }; // уже удалён
-    await ghRequest("DELETE", path, { message: `delete ${key}`, sha });
-    delete shaCache[key];
-    return { ok: true };
-  } catch (e) {
-    if (e.status === 404) return { ok: true };
-    console.warn(`[dbDelete] "${key}":`, e.message);
-    return { ok: false, error: e.message };
-  }
+    return { ok: false, error: "MAX_RETRIES_EXCEEDED" };
+  });
 }
 
-// ── Фото: хранятся как base64 в отдельных файлах ──
-// ВАЖНО: не кодируем marker здесь — encodePath в ghRequest сделает это сам.
-// Иначе получится двойное кодирование (% → %25).
+// Фото. Имя кодируется как один сегмент, чтобы маркировка с '/' не создавала
+// случайные подпапки. Для чтения предусмотрен fallback к старому пути.
+function photoPath(marker) {
+  return `${PHOTO_PREFIX}${encodeURIComponent(String(marker))}.txt`;
+}
+function legacyPhotoPath(marker) {
+  return `${PHOTO_PREFIX}${String(marker)}.txt`;
+}
+
 export async function photoGet(marker) {
-  try {
-    const path = `${PHOTO_PREFIX}${marker}.txt`;
-    const data = await ghRequest("GET", path);
-    if (!data) return null;
-    return decodeB64(data.content);
-  } catch (e) {
-    if (e.status === 404) return null;
-    console.warn(`[photoGet] "${marker}":`, e.message);
-    return null;
+  const paths = [photoPath(marker), legacyPhotoPath(marker)];
+  let lastError = null;
+  for (const path of [...new Set(paths)]) {
+    try {
+      const data = await ghRequest("GET", path);
+      return data ? decodeB64(data.content) : null;
+    } catch (error) {
+      if (error.status === 404) continue;
+      lastError = error;
+      break;
+    }
   }
+  if (lastError) {
+    console.warn(`[photoGet] "${marker}":`, lastError.message);
+    throw lastError;
+  }
+  return null;
 }
 
 export async function photoSet(marker, base64data) {
-  const path = `${PHOTO_PREFIX}${marker}.txt`;
-  // M1: retry до 3 раз с jitter — иначе теряем фото при concurrent upload
-  const maxRetries = 3;
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+  const path = photoPath(marker);
+  for (let attempt = 1; attempt <= 4; attempt++) {
     try {
-      const body = {
-        message: `photo: ${marker}`,
-        content: encodeB64(base64data),
-      };
-      // Если уже есть — получить SHA
-      try {
-        const existing = await ghRequest("GET", path);
-        if (existing && existing.sha) body.sha = existing.sha;
-      } catch (e) {
-        if (e.status !== 404) console.warn(`[photoSet] get SHA:`, e.message);
-      }
-      const result = await ghRequest("PUT", path, body);
+      let existing = null;
+      try { existing = await ghRequest("GET", path); }
+      catch (error) { if (error.status !== 404) throw error; }
+      const body = { message: `photo: ${marker}`, content: encodeB64(base64data) };
+      if (existing?.sha) body.sha = existing.sha;
+      await ghRequest("PUT", path, body);
       return { ok: true };
-    } catch (e) {
-      if (e.status === 409 || e.status === 422) {
-        if (attempt < maxRetries) {
-          const jitter = 500 + Math.random() * 1000;
-          console.warn(`[photoSet] conflict "${marker}", retry ${attempt}/${maxRetries} after ${Math.round(jitter)}ms`);
-          await new Promise(r => setTimeout(r, jitter));
-          continue;
-        }
+    } catch (error) {
+      if ((error.status === 409 || error.status === 422) && attempt < 4) {
+        await wait(300 * attempt + Math.random() * 700);
+        continue;
       }
-      console.error(`[photoSet] "${marker}":`, e.message);
-      return { ok: false, error: e.message };
+      console.error(`[photoSet] "${marker}":`, error.message);
+      return { ok: false, error: error.message };
     }
   }
-  return { ok: false, error: "max retries exceeded" };
+  return { ok: false, error: "MAX_RETRIES_EXCEEDED" };
 }
 
 export async function photoDelete(marker) {
-  const path = `${PHOTO_PREFIX}${marker}.txt`;
-  const maxRetries = 3;
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      const existing = await ghRequest("GET", path);
-      if (!existing) return { ok: true };
-      await ghRequest("DELETE", path, { message: `delete photo: ${marker}`, sha: existing.sha });
-      return { ok: true };
-    } catch (e) {
-      if (e.status === 409 || e.status === 422) {
-        if (attempt < maxRetries) {
-          const jitter = 500 + Math.random() * 1000;
-          console.warn(`[photoDelete] conflict "${marker}", retry ${attempt}/${maxRetries} after ${Math.round(jitter)}ms`);
-          await new Promise(r => setTimeout(r, jitter));
+  const paths = [...new Set([photoPath(marker), legacyPhotoPath(marker)])];
+  let deleted = false;
+  for (const path of paths) {
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      try {
+        const existing = await ghRequest("GET", path);
+        if (!existing?.sha) break;
+        await ghRequest("DELETE", path, { message: `delete photo: ${marker}`, sha: existing.sha });
+        deleted = true;
+        break;
+      } catch (error) {
+        if (error.status === 404) break;
+        if ((error.status === 409 || error.status === 422) && attempt < 4) {
+          await wait(300 * attempt + Math.random() * 700);
           continue;
         }
+        console.warn(`[photoDelete] "${marker}":`, error.message);
+        return { ok: false, error: error.message };
       }
-      if (e.status === 404) return { ok: true };
-      console.warn(`[photoDelete] "${marker}":`, e.message);
-      return { ok: false, error: e.message };
     }
   }
-  return { ok: false, error: "max retries exceeded" };
+  return { ok: true, deleted };
 }
 
-// ── Проверка токена: пробуем получить содержимое репо ──
 export async function verifyToken(token) {
   try {
-    const res = await fetch(`https://api.github.com/repos/${OWNER}/${REPO}`, {
-      headers: {
-        "Authorization": `Bearer ${token}`,
-        "Accept": "application/vnd.github+json",
-      },
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      return { ok: false, error: err.message || `HTTP ${res.status}` };
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    try {
+      const response = await fetch(`https://api.github.com/repos/${OWNER}/${REPO}`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/vnd.github+json",
+          "X-GitHub-Api-Version": "2022-11-28",
+        },
+        signal: controller.signal,
+        cache: "no-store",
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        return { ok: false, error: payload?.message || `HTTP ${response.status}` };
+      }
+      const repository = await response.json();
+      if (!repository?.permissions?.push) {
+        return { ok: false, error: "Токен не имеет права записи в репозиторий данных" };
+      }
+      return { ok: true };
+    } finally {
+      clearTimeout(timeout);
     }
-    return { ok: true };
-  } catch (e) {
-    return { ok: false, error: e.message };
+  } catch (error) {
+    return { ok: false, error: error?.name === "AbortError" ? "REQUEST_TIMEOUT" : error.message };
   }
 }
