@@ -349,6 +349,37 @@ test('mergeRecords drops a stale no-id copy claimed by migrated record fingerpri
   assert.equal(merged[0].marker, 'Proxy edited');
 });
 
+test('mergeRecords drops an exact no-id copy even when legacyFingerprint was lost', () => {
+  const legacy = {
+    workshop: 'SMART', category: 'Домофонные', marker: 'Proxy', qty: 1,
+    defect: 0, amount: 250, comment: '', recordType: 'sale', timestamp: 1782110055316,
+  };
+  const modern = {
+    ...legacy, id: 'legacy-4e22f164920235cf8c00c334', revision: 1,
+    updatedAt: 1782110055316, lastMutationId: '',
+  };
+  const merged = mergeRecords([modern], [legacy]);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].id, modern.id);
+  assert.equal(merged[0].legacyFingerprint, legacyRecordFingerprint(legacy));
+});
+
+test('restored fingerprint blocks the old copy after a later edit', () => {
+  const legacy = {
+    workshop: 'SMART', category: 'Домофонные', marker: 'Proxy', qty: 1,
+    defect: 0, amount: 250, comment: '', recordType: 'sale', timestamp: 1782110055316,
+  };
+  const firstMerge = mergeRecords([{ ...legacy, id: 'legacy-record' }], [legacy]);
+  const edited = {
+    ...firstMerge[0], marker: 'Proxy edited', amount: 300,
+    revision: 2, updatedAt: 1783000000000, lastMutationId: 'edit-2',
+  };
+  const secondMerge = mergeRecords([edited], [legacy]);
+  assert.equal(secondMerge.length, 1);
+  assert.equal(secondMerge[0].marker, 'Proxy edited');
+  assert.equal(secondMerge[0].amount, 300);
+});
+
 test('mergeRecords preserves an unmatched legitimate legacy record', () => {
   const modern = {
     id: 'rec-modern', timestamp: 1, workshop: 'SMART', marker: 'A', qty: 1,
