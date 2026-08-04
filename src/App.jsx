@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, Component } from "react";
 import { dbGet, dbSet, backupStatusGet, hasToken, setToken, clearToken, verifyToken, photoGet, photoSet, photoDelete } from "./github-storage.js";
 import Ably from "ably";
-import { installSecureAblyProbe } from "./ably-auth.js";
+import { createSecureAblyRealtimeOptions } from "./ably-secure-client.js";
 import {
   applyObjectPatch,
   applyOpsToStock,
@@ -17,19 +17,11 @@ import {
 } from "./sync-core.js";
 import { APP_VERSION, deriveSyncView, normalizeBackupStatus } from "./status-core.js";
 
-const ABLY_KEY = "Z2GSmg.BgNkkg:ns6NnvUHHdkQYt0MyDTaDZqWs4-kEqHPYihb39mmUfk";
 const CLIENT_ID = String(Date.now()) + '-' + Math.random().toString(36).slice(2, 8);
-const ably = new Ably.Realtime({
-  key: ABLY_KEY,
+const ably = new Ably.Realtime(createSecureAblyRealtimeOptions({
   clientId: CLIENT_ID,
-  // Настройки для стабильного соединения
-  disconnectedRetryTimeout: 2000,   // переподключение через 2 сек после disconnect
-  suspendedRetryTimeout: 5000,      // переподключение через 5 сек после suspend
-  realtimeRequestTimeout: 15000,    // таймаут запроса 15 сек
-  idlePeriod: 5000,                 // ждём 5 сек перед idle check (увеличиваем активность)
-  heartbeatInterval: 5000,          // пинг каждые 5 сек чтобы соединение не падало
-});
-installSecureAblyProbe(Ably);
+  autoConnect: hasToken(),
+}));
 
 const DEFAULT_MARKERS = {
   "Автомобильные": ["Замена корпуса","HD39RP","Нарезка лезвия","LD-1P","MIT8AP","MIT8RP (п.ч.)","XT27A"],
