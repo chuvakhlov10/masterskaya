@@ -28,7 +28,15 @@ jobs:
           git merge --no-edit origin/main
 
       - name: Apply patch
-        run: python3 scripts/apply-atomic-record-stock.py
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! grep -q 'export function selectRecordEffectOps' src/sync-core.js; then
+            python3 scripts/apply-atomic-record-stock.py
+          fi
+          if [ -f scripts/fix-record-effect-branch-selection.py ]; then
+            python3 scripts/fix-record-effect-branch-selection.py
+          fi
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
