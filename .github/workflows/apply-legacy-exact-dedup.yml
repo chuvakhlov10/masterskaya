@@ -1,21 +1,30 @@
 name: Apply legacy exact dedup hotfix
 
 on:
-  push:
+  pull_request:
     branches:
-      - hotfix/legacy-exact-dedup
+      - main
 
 permissions:
   contents: write
 
 jobs:
   patch-test-push:
+    if: github.head_ref == 'hotfix/legacy-exact-dedup'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: hotfix/legacy-exact-dedup
           fetch-depth: 0
+      - name: Merge current main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git merge --no-edit origin/main
       - name: Apply patch once
         shell: bash
         run: |
@@ -33,11 +42,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add src/sync-core.js tests/sync-core.test.mjs
           if ! git diff --cached --quiet; then
             git diff --cached --check
             git commit -m "Prevent exact legacy records from returning"
-            git push origin HEAD:hotfix/legacy-exact-dedup
           fi
+          git push origin HEAD:hotfix/legacy-exact-dedup
