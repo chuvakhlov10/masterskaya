@@ -9,6 +9,9 @@ const TOKEN_TTL_SECONDS = 60 * 60;
 const GITHUB_TIMEOUT_MS = 8_000;
 const MAX_BODY_BYTES = 2_048;
 const TOKEN_HEADER = 'x-masterskaya-github-token';
+const SESSION_HEADER = 'x-masterskaya-session';
+const SESSION_ISSUER = 'masterskaya-storage-gateway';
+const SESSION_AUDIENCE = 'masterskaya-web';
 
 function normalizeHeaders(headers = {}) {
   const result = Object.create(null);
@@ -43,6 +46,13 @@ function reply(statusCode, payload, origin, extraHeaders = {}) {
   };
 }
 
+function makeError(code, statusCode = 401) {
+  const error = new Error(code);
+  error.code = code;
+  error.statusCode = statusCode;
+  return error;
+}
+
 function normalizeClientId(value) {
   const clientId = String(value || '').trim();
   if (!/^[A-Za-z0-9._:-]{8,128}$/.test(clientId)) return null;
@@ -72,6 +82,64 @@ function parseAblyKey(value) {
 
 function base64UrlJson(value) {
   return Buffer.from(JSON.stringify(value), 'utf8').toString('base64url');
+}
+
+function parseBase64Json(value) {
+  try {
+    return JSON.parse(Buffer.from(String(value), 'base64url').toString('utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function parseSessionSecret(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  let bytes;
+  try {
+    bytes = Buffer.from(raw, 'base64');
+  } catch {
+    return null;
+  }
+  return bytes.length >= 32 ? bytes : null;
+}
+
+function sessionVersion(env) {
+  const value = Number.parseInt(String(env.MASTERSKAYA_SESSION_VERSION || '1'), 10);
+  return Number.isInteger(value) && value > 0 ? value : 1;
+}
+
+function verifyStorageSession({ token, secret, nowMs = Date.now(), version = 1 }) {
+  const key = Buffer.isBuffer(secret) ? secret : parseSessionSecret(secret);
+  if (!key) throw makeError('SESSION_AUTH_NOT_CONFIGURED', 503);
+
+  const parts = String(token || '').split('.');
+  if (parts.length !== 3) throw makeError('SESSION_REQUIRED', 401);
+  const [encodedHeader, encodedClaims, signature] = parts;
+  const expected = crypto
+    .createHmac('sha256', key)
+    .update(`${encodedHeader}.${encodedClaims}`, 'utf8')
+    .digest('base64url');
+  const suppliedBuffer = Buffer.from(signature);
+  const expectedBuffer = Buffer.from(expected);
+  if (suppliedBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(suppliedBuffer, expectedBuffer)) {
+    throw makeError('SESSION_INVALID', 401);
+  }
+
+  const header = parseBase64Json(encodedHeader);
+  const claims = parseBase64Json(encodedClaims);
+  const now = Math.floor(Number(nowMs) / 1000);
+  if (!header || header.alg !== 'HS256' || header.typ !== 'JWT') throw makeError('SESSION_INVALID', 401);
+  if (!claims || claims.iss !== SESSION_ISSUER || claims.aud !== SESSION_AUDIENCE) {
+    throw makeError('SESSION_INVALID', 401);
+  }
+  if (claims.scope !== 'storage' || claims.sv !== version || !normalizeClientId(claims.clientId)) {
+    throw makeError('SESSION_INVALID', 401);
+  }
+  if (!Number.isFinite(claims.iat) || !Number.isFinite(claims.exp)) throw makeError('SESSION_INVALID', 401);
+  if (claims.iat > now + 120) throw makeError('SESSION_INVALID', 401);
+  if (claims.exp <= now) throw makeError('SESSION_EXPIRED', 401);
+  return claims;
 }
 
 function createAblyJwt({ apiKey, clientId, nowMs = Date.now() }) {
@@ -146,7 +214,7 @@ function createHandler({ fetchImpl = globalThis.fetch, env = process.env, now = 
       if (origin !== ALLOWED_ORIGIN) return reply(403, { ok: false, error: 'ORIGIN_DENIED' }, origin);
       return reply(204, null, origin, {
         'Access-Control-Allow-Methods': 'POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, X-Masterskaya-GitHub-Token',
+        'Access-Control-Allow-Headers': 'Content-Type, X-Masterskaya-GitHub-Token, X-Masterskaya-Session',
         'Access-Control-Max-Age': '600',
       });
     }
@@ -156,11 +224,6 @@ function createHandler({ fetchImpl = globalThis.fetch, env = process.env, now = 
       return reply(405, { ok: false, error: 'METHOD_NOT_ALLOWED' }, origin, {
         Allow: 'POST, OPTIONS',
       });
-    }
-
-    const githubToken = String(headers[TOKEN_HEADER] || '').trim();
-    if (!/^[^\s]{20,512}$/.test(githubToken)) {
-      return reply(401, { ok: false, error: 'GITHUB_TOKEN_REQUIRED' }, origin);
     }
 
     let body;
@@ -173,13 +236,32 @@ function createHandler({ fetchImpl = globalThis.fetch, env = process.env, now = 
     const clientId = normalizeClientId(body?.clientId);
     if (!clientId) return reply(400, { ok: false, error: 'CLIENT_ID_INVALID' }, origin);
 
-    let access;
-    try {
-      access = await verifyGitHubPushAccess(githubToken, fetchImpl);
-    } catch {
-      return reply(503, { ok: false, error: 'GITHUB_ACCESS_CHECK_FAILED' }, origin);
+    const suppliedSession = String(headers[SESSION_HEADER] || '').trim();
+    if (suppliedSession) {
+      try {
+        verifyStorageSession({
+          token: suppliedSession,
+          secret: env.MASTERSKAYA_SESSION_SECRET,
+          nowMs: now(),
+          version: sessionVersion(env),
+        });
+      } catch (error) {
+        return reply(error.statusCode || 401, { ok: false, error: error.code || 'SESSION_INVALID' }, origin);
+      }
+    } else {
+      const githubToken = String(headers[TOKEN_HEADER] || '').trim();
+      if (!/^[^\s]{20,512}$/.test(githubToken)) {
+        return reply(401, { ok: false, error: 'GITHUB_TOKEN_REQUIRED' }, origin);
+      }
+
+      let access;
+      try {
+        access = await verifyGitHubPushAccess(githubToken, fetchImpl);
+      } catch {
+        return reply(503, { ok: false, error: 'GITHUB_ACCESS_CHECK_FAILED' }, origin);
+      }
+      if (!access.ok) return reply(403, { ok: false, error: 'GITHUB_ACCESS_DENIED' }, origin);
     }
-    if (!access.ok) return reply(403, { ok: false, error: 'GITHUB_ACCESS_DENIED' }, origin);
 
     const apiKey = String(env.ABLY_API_KEY || '').trim();
     let tokenDetails;
@@ -203,6 +285,8 @@ const handler = createHandler();
 module.exports = {
   ALLOWED_ORIGIN,
   ABLY_CHANNEL,
+  SESSION_AUDIENCE,
+  SESSION_ISSUER,
   TOKEN_TTL_SECONDS,
   createAblyJwt,
   createHandler,
@@ -210,5 +294,7 @@ module.exports = {
   normalizeClientId,
   parseAblyKey,
   parseBody,
+  parseSessionSecret,
   verifyGitHubPushAccess,
+  verifyStorageSession,
 };
