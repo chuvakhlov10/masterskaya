@@ -27,8 +27,13 @@ jobs:
           git fetch origin main
           git merge --no-edit origin/main
 
-      - name: Apply status screen patch
-        run: python3 scripts/apply-data-status-screen.py
+      - name: Apply status screen patch once
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! grep -q 'backupStatusGet' src/github-storage.js; then
+            python3 scripts/apply-data-status-screen.py
+          fi
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -46,7 +51,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git add -A src/App.jsx src/github-storage.js src/status-core.js tests/status-core.test.mjs
+          git add -A src/App.jsx src/github-storage.js src/status-core.js tests/status-core.test.mjs tests/github-storage.test.mjs
           if ! git diff --cached --quiet; then
             git diff --cached --check
             git commit -m "Add data status screen and manual sync controls"
