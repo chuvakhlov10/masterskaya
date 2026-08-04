@@ -1855,6 +1855,8 @@ export default function App(){
   const [pendingCount, setPendingCount] = useState(() => getQueue().length + getStockOutbox().length);
   const isPollingRef = useRef(false);
   const pollAgainRef = useRef(false);
+  const isStockRefreshingRef = useRef(false);
+  const stockRefreshAgainRef = useRef(false);
   const wsConnectedRef = useRef(false);
   const ablyChannelRef = useRef(null);
   const doPollRef = useRef(null); // ссылка на функцию poll для вызова из WS
@@ -2054,8 +2056,8 @@ export default function App(){
   function scheduleStockRetry(){
     if (stockRetryTimerRef.current) return;
     const attempt = Math.min(syncRetriesRef.current, 6);
-    const base = Math.min(10_000 * (2 ** Math.max(0, attempt - 1)), 300_000);
-    const delay = base + Math.random() * Math.min(base * 0.3, 15_000);
+    const base = Math.min(2_500 * (2 ** Math.max(0, attempt - 1)), 60_000);
+    const delay = base + Math.random() * Math.min(base * 0.25, 5_000);
     stockRetryTimerRef.current = setTimeout(() => {
       stockRetryTimerRef.current = null;
       scheduleStockSync(0);
@@ -2090,7 +2092,7 @@ export default function App(){
     stockRef.current = newStock;
     setStock(newStock);
 
-    scheduleStockSync(2_000);
+    scheduleStockSync(700);
     return new Promise(resolve => stockSyncWaitersRef.current.push(resolve));
   }
 
@@ -2104,7 +2106,7 @@ export default function App(){
     }
 
     const now = Date.now();
-    const throttleLeft = 3_000 - (now - lastSyncAttemptRef.current);
+    const throttleLeft = 1_200 - (now - lastSyncAttemptRef.current);
     if (throttleLeft > 0) {
       scheduleStockSync(throttleLeft + 50);
       return { ok: false, throttled: true };
@@ -2184,6 +2186,56 @@ export default function App(){
     }
   }
   syncStockOpsRef.current = syncStockOps;
+
+
+// REALTIME_STOCK_REFRESH_HOTFIX_V1
+// Быстрое обновление склада читает только stock-ops.json. Ошибка любого
+// другого файла приложения больше не блокирует получение нового остатка.
+function applyServerStockOps(serverOps) {
+  const outbox = getStockOutbox();
+  const normalizedServerOps = Array.isArray(serverOps) ? serverOps : [];
+  const mergedOps = mergeStockOps(normalizedServerOps, outbox);
+  stockOpsRef.current = mergedOps;
+  persistStockSnapshot(mergedOps);
+  const mergedStock = applyOpsToStock(mergedOps);
+  stockRef.current = mergedStock;
+  setStockOps(mergedOps);
+  setStock(mergedStock);
+
+  const serverIds = new Set(normalizedServerOps.map(op => op?.opId).filter(Boolean));
+  const confirmed = new Set(outbox.filter(op => serverIds.has(op.opId)).map(op => op.opId));
+  const remainingOutbox = removeStockOutboxIds(confirmed);
+  unsyncedOpsRef.current = new Set(remainingOutbox.map(op => op.opId).filter(Boolean));
+  setPendingCount(getQueue().length + remainingOutbox.length);
+  if (remainingOutbox.length > 0) scheduleStockSync(250, false);
+  return mergedOps;
+}
+
+async function refreshStockFromServer() {
+  if (!navigator.onLine) return { ok: false, offline: true };
+  if (isStockRefreshingRef.current) {
+    stockRefreshAgainRef.current = true;
+    return { ok: false, busy: true };
+  }
+
+  isStockRefreshingRef.current = true;
+  try {
+    const serverOps = await sGet("stock-ops", { allowCache: false });
+    if (!Array.isArray(serverOps)) throw new Error("INVALID_STOCK_OPS_RESPONSE");
+    const mergedOps = applyServerStockOps(serverOps);
+    setSyncStatus(wsConnectedRef.current ? "ws" : "synced");
+    return { ok: true, value: mergedOps };
+  } catch (error) {
+    console.warn('[STOCK REFRESH] Ошибка:', error.message);
+    return { ok: false, error: error.message };
+  } finally {
+    isStockRefreshingRef.current = false;
+    if (stockRefreshAgainRef.current) {
+      stockRefreshAgainRef.current = false;
+      setTimeout(() => refreshStockFromServer(), 150);
+    }
+  }
+}
 
 
   // Обнаружение конфликтов set-операций
@@ -2284,23 +2336,36 @@ export default function App(){
     // поэтому входящий payload не применяем напрямую и тем более не отправляем
     // затем в GitHub. Сообщение лишь сообщает: «на сервере что-то изменилось».
     let ablyPollTimer = null;
+    let ablyStockTimer = null;
     const requestServerRefresh = () => {
       if (ablyPollTimer) clearTimeout(ablyPollTimer);
       ablyPollTimer = setTimeout(() => {
         ablyPollTimer = null;
         doPollRef.current?.();
-      }, 600);
+      }, 400);
+    };
+    const requestStockRefresh = () => {
+      if (ablyStockTimer) clearTimeout(ablyStockTimer);
+      ablyStockTimer = setTimeout(() => {
+        ablyStockTimer = null;
+        refreshStockFromServer();
+      }, 150);
     };
     channel.subscribe((msg) => {
       if (msg.data?.from === clientIdRef.current) return;
-      console.log('[ABLY] Server refresh signal:', msg.name, msg.data?.key || '');
-      requestServerRefresh();
+      const changedKey = msg.data?.key || '';
+      console.log('[ABLY] Server refresh signal:', msg.name, changedKey);
+      if (changedKey === "stock-ops") requestStockRefresh();
+      else requestServerRefresh();
     });
 
     ably.connection.on('connected', () => {
       console.log('[ABLY] Подключено');
       wsConnectedRef.current = true;
-      if (navigator.onLine) setSyncStatus("ws");
+      if (navigator.onLine) {
+        setSyncStatus("ws");
+        setTimeout(() => refreshStockFromServer(), 100);
+      }
     });
 
     ably.connection.on('disconnected', () => {
@@ -2326,6 +2391,7 @@ export default function App(){
     if (ably.connection.state === 'connected') {
       wsConnectedRef.current = true;
       setSyncStatus("ws");
+      setTimeout(() => refreshStockFromServer(), 100);
     }
 
     // Сохраняем channel для saveAndSync
@@ -2383,21 +2449,7 @@ export default function App(){
           try { localStorage.setItem("records_local", JSON.stringify(mergedRecords)); } catch {}
         }
 
-        if (Array.isArray(ops)) {
-          const outbox = getStockOutbox();
-          const mergedOps = mergeStockOps(ops, outbox);
-          stockOpsRef.current = mergedOps;
-          persistStockSnapshot(mergedOps);
-          const mergedStock = applyOpsToStock(mergedOps);
-          stockRef.current = mergedStock;
-          setStockOps(mergedOps);
-          setStock(mergedStock);
-          const serverIds = new Set(ops.map(op => op?.opId).filter(Boolean));
-          const confirmed = new Set(outbox.filter(op => serverIds.has(op.opId)).map(op => op.opId));
-          const remainingOutbox = removeStockOutboxIds(confirmed);
-          unsyncedOpsRef.current = new Set(remainingOutbox.map(op => op.opId).filter(Boolean));
-          if (remainingOutbox.length > 0) scheduleStockSync(250, false);
-        }
+        if (Array.isArray(ops)) applyServerStockOps(ops);
 
         const nextPrices = mergePending("prices", ensureObj(p));
         pricesRef.current = ensureObj(nextPrices); setPrices(pricesRef.current);
@@ -2513,8 +2565,16 @@ export default function App(){
       setIsOnline(false);
       setSyncStatus("offline");
     };
+    const handleFocus = () => {
+      if (navigator.onLine) refreshStockFromServer();
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && navigator.onLine) refreshStockFromServer();
+    };
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
+    window.addEventListener('focus', handleFocus);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
     
     // На мобильных браузерах событие 'online' срабатывает не всегда.
     // Делаем periodic check navigator.onLine каждые 5 секунд.
@@ -2549,14 +2609,19 @@ export default function App(){
       scheduleStockSync(1_200);
     }
 
+    const initialStockTimer = setTimeout(() => refreshStockFromServer(), 500);
     const initialTimer = setTimeout(poll, 3000);
-    const interval = setInterval(poll, 60000); // polling каждые 60 сек (Ably для мгновенной)
+    const stockInterval = setInterval(() => refreshStockFromServer(), 15000);
+    const interval = setInterval(poll, 60000); // полный polling раз в 60 сек
 
     return () => {
+      clearTimeout(initialStockTimer);
       clearTimeout(initialTimer);
+      clearInterval(stockInterval);
       clearInterval(interval);
       clearInterval(onlineCheckInterval);
       if (ablyPollTimer) clearTimeout(ablyPollTimer);
+      if (ablyStockTimer) clearTimeout(ablyStockTimer);
       if (stockSyncTimerRef.current) clearTimeout(stockSyncTimerRef.current);
       if (stockRetryTimerRef.current) clearTimeout(stockRetryTimerRef.current);
       stockSyncTimerRef.current = null;
@@ -2577,6 +2642,8 @@ export default function App(){
       resolveStockWaiters({ok:true, queued:true});
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
+      window.removeEventListener('focus', handleFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [authed]);
 

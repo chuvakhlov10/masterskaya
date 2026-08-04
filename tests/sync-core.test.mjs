@@ -115,3 +115,12 @@ test('sequential object patches compact without reviving removed keys', () => {
   const merged = mergeObjectPatches(first, second);
   assert.deepEqual(merged, { set: { A: 2, C: 4 }, remove: ['B'] });
 });
+
+
+test('two consecutive set operations keep the final zero value', () => {
+  const stock = applyOpsToStock([
+    op({ type: 'set', opId: 'set-three', marker: 'TEST', location: 'main', value: 3, delta: undefined, ts: 1_800_000_000_010 }),
+    op({ type: 'set', opId: 'set-zero', marker: 'TEST', location: 'main', value: 0, delta: undefined, ts: 1_800_000_000_020 }),
+  ]);
+  assert.equal(stock.main.TEST, 0);
+});
