@@ -59,13 +59,16 @@ function makeError(message, status, cause) {
   return error;
 }
 
-async function ghRequest(method, path, body) {
+async function ghRequest(method, path, body, options = {}) {
   const token = getToken();
   if (!token) throw makeError("NO_TOKEN");
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  const url = `https://api.github.com/repos/${OWNER}/${REPO}/contents/${encodePath(path)}`;
+  const query = new URLSearchParams();
+  if (options.ref) query.set("ref", String(options.ref));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  const url = `https://api.github.com/repos/${OWNER}/${REPO}/contents/${encodePath(path)}${suffix}`;
 
   try {
     const response = await fetch(url, {
@@ -118,6 +121,18 @@ function decodeB64(base64) {
 function parseJsonFile(key, encodedContent) {
   try { return JSON.parse(decodeB64(encodedContent)); }
   catch (cause) { throw makeError(`INVALID_JSON: ${key}`, undefined, cause); }
+}
+
+export async function backupStatusGet() {
+  try {
+    const data = await ghRequest("GET", "status.json", undefined, { ref: "data-backups" });
+    if (!data) return null;
+    return parseJsonFile("backup-status", data.content);
+  } catch (error) {
+    if (error.status === 404) return null;
+    console.warn("[backupStatusGet]", error.message);
+    throw error;
+  }
 }
 
 export async function dbGet(key) {

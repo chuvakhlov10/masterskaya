@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, Component } from "react";
-import { dbGet, dbSet, hasToken, setToken, clearToken, verifyToken, photoGet, photoSet, photoDelete } from "./github-storage.js";
+import { dbGet, dbSet, backupStatusGet, hasToken, setToken, clearToken, verifyToken, photoGet, photoSet, photoDelete } from "./github-storage.js";
 import Ably from "ably";
 import {
   applyObjectPatch,
@@ -14,6 +14,7 @@ import {
   mergeRecords as mergeRecordsCore,
   mergeStockOps,
 } from "./sync-core.js";
+import { APP_VERSION, deriveSyncView, normalizeBackupStatus } from "./status-core.js";
 
 const ABLY_KEY = "Z2GSmg.BgNkkg:ns6NnvUHHdkQYt0MyDTaDZqWs4-kEqHPYihb39mmUfk";
 const CLIENT_ID = String(Date.now()) + '-' + Math.random().toString(36).slice(2, 8);
@@ -1856,6 +1857,16 @@ export default function App(){
   const [syncStatus, setSyncStatus] = useState("idle"); // idle | syncing | synced | ws | offline
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [pendingCount, setPendingCount] = useState(() => getQueue().length + getStockOutbox().length);
+  const [dataStatusOpen, setDataStatusOpen] = useState(false);
+  const [backupStatus, setBackupStatus] = useState(null);
+  const [backupStatusLoading, setBackupStatusLoading] = useState(false);
+  const [backupStatusError, setBackupStatusError] = useState("");
+  const [manualSyncBusy, setManualSyncBusy] = useState(false);
+  const [lastSyncError, setLastSyncError] = useState("");
+  const [lastSyncAt, setLastSyncAt] = useState(() => {
+    try { return Number(localStorage.getItem("last_successful_sync_v1")) || null; }
+    catch { return null; }
+  });
   const isPollingRef = useRef(false);
   const pollAgainRef = useRef(false);
   const isStockRefreshingRef = useRef(false);
@@ -1866,6 +1877,15 @@ export default function App(){
   const stateSettersRef = useRef({}); // маппинг key → setter для мгновенного применения Ably-обновлений
   const clientIdRef = useRef(CLIENT_ID); // ID этого клиента для фильтрации собственных сообщений
   const flushQueueRef = useRef(null); // ссылка на функцию flushQueue для вызова из useEffect
+
+  useEffect(() => {
+    if (!isOnline || pendingCount > 0) return;
+    if (syncStatus !== "ws" && syncStatus !== "synced") return;
+    const timestamp = Date.now();
+    setLastSyncAt(timestamp);
+    setLastSyncError("");
+    try { localStorage.setItem("last_successful_sync_v1", String(timestamp)); } catch {}
+  }, [isOnline, pendingCount, syncStatus]);
 
   // Универсальное сохранение: обновляет state + пишет в GitHub + мгновенно рассылает данные через Ably
   // Debounce для GitHub: 7 быстрых нажатий +/- = 1 PUT запрос (через 400мс после последнего)
@@ -2187,6 +2207,7 @@ export default function App(){
       return finalResult;
     } catch (error) {
       syncRetriesRef.current++;
+      setLastSyncError(error.message || "Ошибка отправки склада");
       console.warn('[syncStockOps] Ошибка:', error.message);
       scheduleStockRetry();
       finalResult = { ok: true, queued: true, error: error.message };
@@ -2238,6 +2259,7 @@ async function refreshStockFromServer() {
     setSyncStatus(wsConnectedRef.current ? "ws" : "synced");
     return { ok: true, value: mergedOps };
   } catch (error) {
+    setLastSyncError(error.message || "Ошибка обновления склада");
     console.warn('[STOCK REFRESH] Ошибка:', error.message);
     return { ok: false, error: error.message };
   } finally {
@@ -2485,6 +2507,7 @@ async function refreshStockFromServer() {
         setTimeout(()=>window.scrollTo(0, sY), 0);
         setSyncStatus(wsConnectedRef.current ? "ws" : "synced");
       } catch(error) {
+        setLastSyncError(error.message || "Ошибка обновления данных");
         console.warn('[POLL] Ошибка:', error.message);
         setSyncStatus(navigator.onLine ? "idle" : "offline");
       } finally {
@@ -2540,6 +2563,7 @@ async function refreshStockFromServer() {
             }
             publishCommittedChange(item.key);
           } catch (error) {
+            setLastSyncError(error.message || `Ошибка отправки ${item.key}`);
             console.warn(`[OFFLINE] Ошибка отправки "${item.key}":`, error.message);
           }
         }
@@ -2959,6 +2983,52 @@ async function refreshStockFromServer() {
       localStorage.removeItem(LOCAL_AUTH_KEY);
     }catch{}
   }
+
+  async function loadBackupStatus(){
+    setBackupStatusLoading(true);
+    setBackupStatusError("");
+    try {
+      const raw = await backupStatusGet();
+      const normalized = normalizeBackupStatus(raw);
+      setBackupStatus(normalized);
+      return normalized;
+    } catch(error) {
+      const message = error.message || "Не удалось прочитать состояние резервных копий";
+      setBackupStatusError(message);
+      return null;
+    } finally {
+      setBackupStatusLoading(false);
+    }
+  }
+
+  async function runManualSync(retryOnly = false){
+    if (manualSyncBusy) return;
+    setManualSyncBusy(true);
+    setLastSyncError("");
+    try {
+      if (!navigator.onLine) throw new Error("Нет подключения к интернету");
+      await flushQueueRef.current?.();
+      if (getStockOutbox().length > 0) await syncStockOpsRef.current?.();
+      if (!retryOnly || getQueue().length + getStockOutbox().length === 0) {
+        await doPollRef.current?.();
+      }
+      await loadBackupStatus();
+      const remaining = getQueue().length + getStockOutbox().length;
+      setPendingCount(remaining);
+      if (remaining > 0) throw new Error(`Осталось операций в очереди: ${remaining}`);
+      setSyncStatus(wsConnectedRef.current ? "ws" : "synced");
+    } catch(error) {
+      setLastSyncError(error.message || "Ошибка синхронизации");
+      setSyncStatus(navigator.onLine ? "idle" : "offline");
+    } finally {
+      setManualSyncBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!authed) return;
+    loadBackupStatus();
+  }, [authed]);
 
   // ── Резервная копия всех данных (скачать JSON) ──
   async function downloadBackup(){
@@ -4429,6 +4499,20 @@ async function refreshStockFromServer() {
     return [markerName, ...getAliases(markerName)];
   }
   const wsStock = ensureObj(safeStockWS[workshop]);
+  const syncView = deriveSyncView({
+    online: isOnline,
+    syncStatus,
+    pendingCount,
+    lastError: lastSyncError,
+    busy: manualSyncBusy,
+  });
+  const syncTone = {
+    saved: { bg:C.successDim, color:C.success },
+    live: { bg:C.brandDim, color:C.brand },
+    sending: { bg:C.smartDim, color:C.smart },
+    offline: { bg:C.warnDim, color:C.warn },
+    error: { bg:C.dangerDim, color:C.danger },
+  }[syncView.kind] || { bg:C.bgSection, color:C.textSub };
   const tabs = [
     {id:"record",icon:"📝",label:"Запись"},
     {id:"stats",icon:"📊",label:"Статистика"},
@@ -4480,6 +4564,62 @@ async function refreshStockFromServer() {
             })}
             <div style={{fontSize:11,color:C.textDim,textAlign:"center"}}>
               Выберите, какое значение применить. Конфликт возник из-за одновременного ввода на двух устройствах.
+            </div>
+          </div>
+        </div>
+      )}
+      {dataStatusOpen&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.58)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center",padding:14}}
+          onMouseDown={e=>{if(e.target===e.currentTarget)setDataStatusOpen(false);}}>
+          <div style={{background:C.bgCard,border:`1px solid ${C.border}`,width:"100%",maxWidth:480,maxHeight:"90vh",overflowY:"auto",padding:18,boxShadow:"0 12px 40px rgba(0,0,0,.35)"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,marginBottom:16}}>
+              <div>
+                <div style={{fontSize:17,fontWeight:800,color:C.text}}>Состояние данных</div>
+                <div style={{fontSize:10,color:C.textDim,marginTop:3}}>Версия приложения {APP_VERSION}</div>
+              </div>
+              <button onClick={()=>setDataStatusOpen(false)} style={{...s.btn(),padding:"6px 10px"}}>✕</button>
+            </div>
+
+            <div style={{...s.card,padding:14,marginBottom:10,borderColor:syncTone.color+"55"}}>
+              <div style={{display:"flex",justifyContent:"space-between",gap:12,alignItems:"center"}}>
+                <span style={{fontSize:12,color:C.textSub}}>Синхронизация</span>
+                <span style={{fontSize:12,fontWeight:800,color:syncTone.color}}>{syncView.label}</span>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginTop:12,fontSize:11}}>
+                <div style={{background:C.bgSection,padding:9}}><div style={{color:C.textDim}}>В очереди</div><div style={{fontSize:16,fontWeight:800,color:pendingCount?C.warn:C.text}}>{pendingCount}</div></div>
+                <div style={{background:C.bgSection,padding:9}}><div style={{color:C.textDim}}>Последняя отправка</div><div style={{fontSize:12,fontWeight:700,color:C.text,marginTop:3}}>{lastSyncAt ? new Date(lastSyncAt).toLocaleString("ru-RU",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit"}) : "Нет данных"}</div></div>
+              </div>
+              {lastSyncError&&<div style={{fontSize:11,color:C.danger,marginTop:10,lineHeight:1.45}}>Ошибка: {lastSyncError}</div>}
+            </div>
+
+            <div style={{...s.card,padding:14,marginBottom:10}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,marginBottom:10}}>
+                <span style={{fontSize:12,color:C.textSub}}>Проверка и резервная копия</span>
+                <span style={{fontSize:11,fontWeight:800,color:backupStatus?.valid?C.success:backupStatusLoading?C.smart:C.danger}}>
+                  {backupStatusLoading ? "Проверка..." : backupStatus?.valid ? "Исправно" : "Нет подтверждения"}
+                </span>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,fontSize:11}}>
+                <div style={{background:C.bgSection,padding:9}}><div style={{color:C.textDim}}>Записей</div><div style={{fontSize:16,fontWeight:800}}>{backupStatus?.counts?.records ?? records.length}</div></div>
+                <div style={{background:C.bgSection,padding:9}}><div style={{color:C.textDim}}>Операций склада</div><div style={{fontSize:16,fontWeight:800}}>{backupStatus?.counts?.stockOps ?? stockOps.length}</div></div>
+              </div>
+              <div style={{fontSize:11,color:C.textSub,marginTop:10,lineHeight:1.55}}>
+                Последняя копия: {backupStatus?.backupAt ? new Date(backupStatus.backupAt).toLocaleString("ru-RU",{day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"}) : "не найдена"}<br/>
+                Ежедневная: {backupStatus?.dailyPath || "—"}<br/>
+                Ежемесячная: {backupStatus?.monthlyPath || "—"}
+              </div>
+              {backupStatusError&&<div style={{fontSize:11,color:C.danger,marginTop:8}}>Не удалось прочитать отчёт: {backupStatusError}</div>}
+              {(backupStatus?.errors||[]).map((message,index)=><div key={`err-${index}`} style={{fontSize:11,color:C.danger,marginTop:6}}>• {message}</div>)}
+              {(backupStatus?.warnings||[]).map((message,index)=><div key={`warn-${index}`} style={{fontSize:11,color:C.warn,marginTop:6}}>• {message}</div>)}
+            </div>
+
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              <button disabled={manualSyncBusy} onClick={()=>runManualSync(false)} style={{...s.btn("accent"),flex:"1 1 190px",padding:"11px",opacity:manualSyncBusy?.6:1}}>
+                {manualSyncBusy ? "Обновление..." : "Обновить данные"}
+              </button>
+              <button disabled={manualSyncBusy||pendingCount===0} onClick={()=>runManualSync(true)} style={{...s.btn(),flex:"1 1 190px",padding:"11px",opacity:(manualSyncBusy||pendingCount===0)?.5:1}}>
+                Повторить отправку{pendingCount>0?` (${pendingCount})`:""}
+              </button>
             </div>
           </div>
         </div>
@@ -4547,44 +4687,14 @@ async function refreshStockFromServer() {
                 </span>
               );
             })()}
-            {/* Индикатор статуса сохранения */}
-            {Object.entries(saveStatus).map(([key, status]) => (
-              <span key={key} style={{
-                fontSize:10,
-                padding:"2px 6px",
-                background: status === "saving" ? C.warnDim : status === "error" ? C.dangerDim : C.successDim,
-                color: status === "saving" ? C.warn : status === "error" ? C.danger : C.success,
-                border: `1px solid ${status === "saving" ? C.warn : status === "error" ? C.danger : C.success}44`,
-                fontWeight: 700,
-              }}>
-                {status === "saving" ? "⏳ Сохранение..." : status === "error" ? "⚠ Ошибка" : "✓ Сохранено"}
-              </span>
-            ))}
-            {/* Индикатор синхронизации */}
-            {!isOnline ? (
-              <span style={{
-                fontSize:10,
-                padding:"2px 6px",
-                background: C.warnDim,
-                color: C.warn,
-                border: `1px solid ${C.warn}44`,
-                fontWeight: 700,
-              }}>
-                📴 Офлайн{pendingCount > 0 ? ` (${pendingCount} в очереди)` : ""}
-              </span>
-            ) : syncStatus !== "idle" && (
-              <span style={{
-                fontSize:10,
-                padding:"2px 6px",
-                background: syncStatus === "syncing" ? C.smartDim : syncStatus === "ws" ? C.brandDim : syncStatus === "offline" ? C.warnDim : C.successDim,
-                color: syncStatus === "syncing" ? C.smart : syncStatus === "ws" ? C.brand : syncStatus === "offline" ? C.warn : C.success,
-                border: `1px solid ${syncStatus === "syncing" ? C.smart : syncStatus === "ws" ? C.brand : syncStatus === "offline" ? C.warn : C.success}44`,
-                fontWeight: 700,
-              }}>
-                {syncStatus === "syncing" ? "🔄 Синхр..." : syncStatus === "ws" ? "⚡ Live" : syncStatus === "offline" ? "📴 Офлайн" : "✓"}
-                {pendingCount > 0 ? ` (${pendingCount})` : ""}
-              </span>
-            )}
+            {/* Единый кликабельный индикатор синхронизации */}
+            <button type="button" onClick={()=>{setDataStatusOpen(true);loadBackupStatus();}} title="Открыть состояние данных" style={{
+              fontSize:10,padding:"3px 8px",background:syncTone.bg,color:syncTone.color,
+              border:`1px solid ${syncTone.color}55`,fontWeight:800,cursor:"pointer",
+              display:"inline-flex",alignItems:"center",gap:5,
+            }}>
+              <span>{syncView.icon}</span><span>{syncView.label}</span>
+            </button>
           </div>
         </div>
         <Tabs tabs={tabs} active={tab} onChange={setTab}/>
