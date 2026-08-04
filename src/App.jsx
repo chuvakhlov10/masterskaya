@@ -5,6 +5,7 @@ import {
   applyObjectPatch,
   applyOpsToStock,
   createObjectPatch,
+  findRecordIndex,
   mergeById,
   mergeObject,
   mergeObjectPatches,
@@ -694,7 +695,7 @@ function EditModal({ record, id, markers, onSave, onDelete, onClose }){
         <div style={{display:"flex",gap:8}}>
           <button onClick={()=>onSave({...record,category:cat,marker:mrk.trim(),qty,defect,amount,comment,recordType})}
             style={{...s.btn("accent"),flex:1,padding:"10px 0"}}>Сохранить</button>
-          <button onClick={()=>onDelete(id)} style={{...s.btn("danger"),padding:"10px 14px"}}>Удалить</button>
+          <button onClick={()=>onDelete(record)} style={{...s.btn("danger"),padding:"10px 14px"}}>Удалить</button>
         </div>
         {recordType==="refund"&&(
           <div style={{marginTop:10,fontSize:11,color:C.textDim,lineHeight:1.5}}>
@@ -3080,17 +3081,20 @@ async function refreshStockFromServer() {
   }
 
   // ── сохранение редактируемой записи ──
-  // Поиск по ID записи (не по индексу — индекс может измениться при синхронизации)
+  // Современные записи ищем по постоянному id. Для старой записи без id
+  // допускаем только однозначное совпадение; при дубле ничего не меняем.
   async function handleEditSave(updated){
-    if (!updated.id) updated.id = editRec.record.id || `rec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const recId = updated.id;
-    const oldIdx = recordsRef.current.findIndex(r => r.id === recId);
+    const targetRecord = editRec?.record || updated;
+    const oldIdx = findRecordIndex(recordsRef.current, targetRecord);
     if (oldIdx === -1) {
-      console.warn('[handleEditSave] запись не найдена по id:', recId);
+      console.warn('[handleEditSave] запись не найдена или legacy-совпадение неоднозначно');
+      alert('Не удалось однозначно найти запись. Обновите приложение и повторите действие.');
       setEditRec(null);
       return;
     }
     const old = recordsRef.current[oldIdx];
+    const recId = old.id || updated.id || `rec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const nextRecord = { ...updated, id: recId, updatedAt: Date.now() };
 
     // 1) Возвращаем старое списание (через stockDelta)
     const oldDelta = stockDelta(old);
@@ -3102,32 +3106,34 @@ async function refreshStockFromServer() {
       });
     }
     // 2) Применяем новое списание (через stockDelta)
-    const newDelta = stockDelta(updated);
+    const newDelta = stockDelta(nextRecord);
     if(newDelta > 0){
       appendStockOp("delta", {
-        location: `ws:${updated.workshop}`,
-        marker: updated.marker,
+        location: `ws:${nextRecord.workshop}`,
+        marker: nextRecord.marker,
         delta: -newDelta,
       });
     }
 
-    updated.updatedAt = Date.now();
-    const next = recordsRef.current.map(r => r.id === recId ? updated : r);
+    const next = recordsRef.current.map((record, index) => index === oldIdx ? nextRecord : record);
     recordsRef.current = next;
-    // Не await'им — модалка закрывается мгновенно
     saveAndSync("records", next, setRecords);
     setEditRec(null);
   }
 
-  async function handleEditDelete(recId){
+  async function handleEditDelete(recordOrId){
     if(!confirm("Удалить эту запись?")) return;
-    const oldIdx = recordsRef.current.findIndex(r => r.id === recId);
+    const targetRecord = typeof recordOrId === "string" ? { id: recordOrId } : recordOrId;
+    const oldIdx = findRecordIndex(recordsRef.current, targetRecord);
     if (oldIdx === -1) {
-      console.warn('[handleEditDelete] запись не найдена по id:', recId);
+      console.warn('[handleEditDelete] запись не найдена или legacy-совпадение неоднозначно');
+      alert('Не удалось однозначно найти запись. Обновите приложение и повторите действие.');
       setEditRec(null);
       return;
     }
     const old = recordsRef.current[oldIdx];
+    const recId = old.id || targetRecord?.id || `rec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
     // Возвращаем списание через stockDelta
     const oldDelta = stockDelta(old);
     if(oldDelta > 0){
@@ -3141,12 +3147,12 @@ async function refreshStockFromServer() {
     const nextDeletions = mergeById(recordDeletionsRef.current, [tombstone]);
     recordDeletionsRef.current = nextDeletions;
     setRecordDeletionIds(nextDeletions);
-    // Tombstone отправляем раньше массива records. Даже если устройство было офлайн,
-    // последующий merge не воскресит удалённую запись.
     commitImmediate("record-deletions", nextDeletions).catch(()=>{});
-    const next = recordsRef.current.filter(r => r.id !== recId);
+
+    // Удаляем именно найденный элемент по индексу. Это безопасно и для legacy
+    // записи, которой id присваивается только в момент удаления.
+    const next = recordsRef.current.filter((_, index) => index !== oldIdx);
     recordsRef.current = next;
-    // Не await'им — модалка закрывается мгновенно
     saveAndSync("records", next, setRecords);
     setEditRec(null);
   }

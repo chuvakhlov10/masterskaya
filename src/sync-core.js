@@ -39,6 +39,32 @@ export function recordVersion(record) {
   return Number.isFinite(value) ? value : 0;
 }
 
+
+// Finds the exact record selected by the user. Modern records are resolved by
+// immutable id. Legacy records without id may be resolved only when their
+// canonical identity is unique; ambiguous duplicates are deliberately rejected.
+export function findRecordIndex(records, target) {
+  const items = Array.isArray(records) ? records : [];
+  if (!target || typeof target !== "object") return -1;
+
+  if (target.id) {
+    return items.findIndex(item => item && item.id === target.id);
+  }
+
+  const sameReference = items.findIndex(item => item === target);
+  if (sameReference >= 0) return sameReference;
+
+  const key = recordKey(target);
+  if (!key) return -1;
+  const matches = [];
+  for (let index = 0; index < items.length; index++) {
+    const item = items[index];
+    if (!item || item.id) continue;
+    if (recordKey(item) === key) matches.push(index);
+  }
+  return matches.length === 1 ? matches[0] : -1;
+}
+
 export function mergeRecords(remote, local, deletedIds = new Set()) {
   const remoteItems = Array.isArray(remote) ? remote : [];
   const localItems = Array.isArray(local) ? local : [];
