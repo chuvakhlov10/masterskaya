@@ -258,3 +258,67 @@ test('sameRecordVersion detects a stale opened record', () => {
   assert.equal(sameRecordVersion({ ...opened }, opened), true);
   assert.equal(sameRecordVersion({ ...opened, revision: 3, lastMutationId: 'm3' }, opened), false);
 });
+
+
+test('higher descendant revision selects its complete competing branch', () => {
+  const editA = op({
+    type: 'record-effect', opId: 'record-effect:branch-a', recordId: 'rec-branch',
+    mutationId: 'branch-a', baseMutationId: null, baseRevision: 1, revision: 2,
+    mutationKind: 'edit',
+    before: { location: 'main', marker: 'TEST', qty: 1 },
+    after: { location: 'main', marker: 'TEST', qty: 2 },
+    delta: undefined, updatedAt: 20, ts: 1_800_000_000_020,
+  });
+  const editB = {
+    ...editA, opId: 'record-effect:branch-b', mutationId: 'branch-b',
+    after: { location: 'main', marker: 'TEST', qty: 3 },
+    updatedAt: 30, ts: 1_800_000_000_030,
+  };
+  const editA2 = {
+    ...editA, opId: 'record-effect:branch-a2', mutationId: 'branch-a2',
+    baseMutationId: 'branch-a', baseRevision: 2, revision: 3,
+    before: { location: 'main', marker: 'TEST', qty: 2 },
+    after: { location: 'main', marker: 'TEST', qty: 4 },
+    updatedAt: 40, ts: 1_800_000_000_040,
+  };
+  assert.deepEqual(
+    selectRecordEffectOps([editA, editB, editA2]).map(item => item.mutationId),
+    ['branch-a', 'branch-a2']
+  );
+  const stock = applyOpsToStock([
+    op({ type: 'init', opId: 'init-branch', value: 9, delta: undefined, ts: 1_800_000_000_001 }),
+    editA, editB, editA2,
+  ]);
+  assert.equal(stock.main.TEST, 6);
+});
+
+test('delete prevents a higher stale edit branch from resurrecting stock effect', () => {
+  const staleEdit = op({
+    type: 'record-effect', opId: 'record-effect:stale-edit', recordId: 'rec-permanent-delete',
+    mutationId: 'stale-edit', baseMutationId: null, baseRevision: 1, revision: 2,
+    mutationKind: 'edit',
+    before: { location: 'main', marker: 'TEST', qty: 1 },
+    after: { location: 'main', marker: 'TEST', qty: 2 },
+    delta: undefined, updatedAt: 20, ts: 1_800_000_000_020,
+  });
+  const staleEdit2 = {
+    ...staleEdit, opId: 'record-effect:stale-edit-2', mutationId: 'stale-edit-2',
+    baseMutationId: 'stale-edit', baseRevision: 2, revision: 3,
+    before: { location: 'main', marker: 'TEST', qty: 2 },
+    after: { location: 'main', marker: 'TEST', qty: 4 },
+    updatedAt: 40, ts: 1_800_000_000_040,
+  };
+  const deletion = {
+    ...staleEdit, opId: 'record-effect:permanent-delete', mutationId: 'permanent-delete',
+    mutationKind: 'delete', after: null, updatedAt: 30, ts: 1_800_000_000_030,
+  };
+  assert.deepEqual(
+    selectRecordEffectOps([staleEdit, staleEdit2, deletion]).map(item => item.mutationId),
+    ['permanent-delete']
+  );
+  const stock = applyOpsToStock([
+    op({ type: 'init', opId: 'init-permanent-delete', value: 9, delta: undefined, ts: 1_800_000_000_001 }),
+    staleEdit, staleEdit2, deletion,
+  ]);
+  assert.equal(stock.main.TEST, 10);
+});

@@ -171,24 +171,34 @@ function parseLocation(location, workshops) {
 }
 
 function recordMutationPriority(op) {
-  if (op?.mutationKind === "delete") return 3;
-  if (op?.mutationKind === "edit") return 2;
-  if (op?.mutationKind === "create") return 1;
-  return 0;
+  return op?.mutationKind === "delete" ? 1 : 0;
 }
 
-function chooseRecordEffectCandidate(candidates) {
-  let winner = null;
-  for (const candidate of candidates) {
-    if (!winner) { winner = candidate; continue; }
-    const revisionDiff = Number(candidate.revision) - Number(winner.revision);
-    const priorityDiff = recordMutationPriority(candidate) - recordMutationPriority(winner);
-    const timeDiff = Number(candidate.updatedAt ?? candidate.ts ?? 0) - Number(winner.updatedAt ?? winner.ts ?? 0);
-    const mutationDiff = String(candidate.mutationId).localeCompare(String(winner.mutationId));
-    if (revisionDiff > 0 || (!revisionDiff && (priorityDiff > 0 ||
-        (!priorityDiff && (timeDiff > 0 || (!timeDiff && mutationDiff > 0)))))) winner = candidate;
+function compareRecordEffectTerminal(candidate, previous) {
+  const deleteDiff = recordMutationPriority(candidate) - recordMutationPriority(previous);
+  if (deleteDiff) return deleteDiff;
+  const revisionDiff = Number(candidate.revision) - Number(previous.revision);
+  if (revisionDiff) return revisionDiff;
+  const timeDiff = Number(candidate.updatedAt ?? candidate.ts ?? 0) - Number(previous.updatedAt ?? previous.ts ?? 0);
+  if (timeDiff) return timeDiff;
+  return String(candidate.mutationId).localeCompare(String(previous.mutationId));
+}
+
+function traceRecordEffectChain(candidate, byMutationId) {
+  const reversed = [];
+  const visited = new Set();
+  let current = candidate;
+  while (current) {
+    if (visited.has(current.mutationId)) return null;
+    visited.add(current.mutationId);
+    reversed.push(current);
+    const parentId = typeof current.baseMutationId === "string" ? current.baseMutationId : "";
+    if (!parentId) return reversed.reverse();
+    const parent = byMutationId.get(parentId);
+    if (!parent || Number(parent.revision) !== Number(current.baseRevision)) return null;
+    current = parent;
   }
-  return winner;
+  return null;
 }
 
 export function selectRecordEffectOps(ops) {
@@ -205,24 +215,22 @@ export function selectRecordEffectOps(ops) {
 
   const selected = [];
   for (const recordOps of groups.values()) {
-    const byParent = new Map();
-    for (const op of recordOps) {
-      const parent = typeof op.baseMutationId === "string" ? op.baseMutationId : "";
-      if (!byParent.has(parent)) byParent.set(parent, []);
-      byParent.get(parent).push(op);
-    }
-    const roots = byParent.get("") || [];
-    if (!roots.length) continue;
-    const minBase = Math.min(...roots.map(op => Number(op.baseRevision)));
-    let winner = chooseRecordEffectCandidate(roots.filter(op => Number(op.baseRevision) === minBase));
-    while (winner) {
-      selected.push(winner);
-      const children = (byParent.get(winner.mutationId) || [])
-        .filter(op => Number(op.baseRevision) === Number(winner.revision));
-      winner = chooseRecordEffectCandidate(children);
+    const byMutationId = new Map(recordOps.map(op => [op.mutationId, op]));
+    const candidates = [...recordOps].sort((a, b) => compareRecordEffectTerminal(b, a));
+    for (const candidate of candidates) {
+      const chain = traceRecordEffectChain(candidate, byMutationId);
+      if (!chain) continue;
+      selected.push(...chain);
+      break;
     }
   }
-  return selected.sort((a, b) =>
+
+  const unique = new Map();
+  for (const op of selected) {
+    const identity = stockOpIdentity(op);
+    if (identity && !unique.has(identity)) unique.set(identity, op);
+  }
+  return [...unique.values()].sort((a, b) =>
     Number(a?.ts || 0) - Number(b?.ts || 0) ||
     String(stockOpIdentity(a)).localeCompare(String(stockOpIdentity(b)))
   );
