@@ -42,3 +42,5 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "Harden synchronization and add regression tests"
           git push origin HEAD:refactor/sync-hardening
+
+# retrigger after enabling read/write workflow permissions
