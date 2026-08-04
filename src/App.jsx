@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, Component } from "react";
 import { dbGet, dbSet, backupStatusGet, hasToken, setToken, clearToken, verifyToken, photoGet, photoSet, photoDelete } from "./github-storage.js";
 import Ably from "ably";
 import { createSecureAblyRealtimeOptions } from "./ably-secure-client.js";
+import { installStorageGatewayProbe } from "./storage-gateway.js";
 import {
   applyObjectPatch,
   applyOpsToStock,
@@ -22,6 +23,7 @@ const ably = new Ably.Realtime(createSecureAblyRealtimeOptions({
   clientId: CLIENT_ID,
   autoConnect: hasToken(),
 }));
+installStorageGatewayProbe();
 
 const DEFAULT_MARKERS = {
   "Автомобильные": ["Замена корпуса","HD39RP","Нарезка лезвия","LD-1P","MIT8AP","MIT8RP (п.ч.)","XT27A"],
