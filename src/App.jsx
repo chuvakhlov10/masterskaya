@@ -1,6 +1,16 @@
 import { useState, useEffect, useRef, Component } from "react";
 import { dbGet, dbSet, hasToken, setToken, clearToken, verifyToken, photoGet, photoSet, photoDelete } from "./github-storage.js";
 import Ably from "ably";
+import {
+  applyObjectPatch,
+  applyOpsToStock,
+  createObjectPatch,
+  mergeById,
+  mergeObject,
+  mergeObjectPatches,
+  mergeRecords as mergeRecordsCore,
+  mergeStockOps,
+} from "./sync-core.js";
 
 const ABLY_KEY = "Z2GSmg.BgNkkg:ns6NnvUHHdkQYt0MyDTaDZqWs4-kEqHPYihb39mmUfk";
 const CLIENT_ID = String(Date.now()) + '-' + Math.random().toString(36).slice(2, 8);
@@ -253,16 +263,45 @@ function StepperInput({ value, onChange, step = 1, min = 0, style, inputStyle, s
 // ── Офлайн-кеш и очередь мутаций ──
 const OFFLINE_CACHE_PREFIX = "offline_cache_";
 const PENDING_WRITES_KEY = "pending_writes";
+const STOCK_OUTBOX_KEY = "stock_ops_outbox_v1";
+const STOCK_OUTBOX_MIGRATED_KEY = "stock_ops_outbox_migrated_v1";
+const OBJECT_PATCH_KEYS = new Set([
+  "prices", "custom:markers", "marker-aliases", "marker-notes",
+  "stock:cfg", "subcategories", "passwords",
+]);
+
+function getStockOutbox(){
+  try {
+    const parsed = JSON.parse(localStorage.getItem(STOCK_OUTBOX_KEY) || "[]");
+    return mergeStockOps([], Array.isArray(parsed) ? parsed : []);
+  } catch { return []; }
+}
+function setStockOutbox(ops){
+  const normalized = mergeStockOps([], Array.isArray(ops) ? ops : []);
+  localStorage.setItem(STOCK_OUTBOX_KEY, JSON.stringify(normalized));
+  return normalized;
+}
+function addStockOutboxOp(op){
+  return setStockOutbox([...getStockOutbox(), op]);
+}
+function removeStockOutboxIds(ids){
+  const confirmed = ids instanceof Set ? ids : new Set(ids || []);
+  return setStockOutbox(getStockOutbox().filter(op => !confirmed.has(op.opId)));
+}
 
 function cacheGet(key){
   try {
-    const raw = localStorage.getItem(OFFLINE_CACHE_PREFIX + key);
+    // Журнал склада большой, поэтому для него используется одна специальная копия,
+    // а не дубликат offline_cache_stock-ops + stock_ops_local.
+    const storageKey = key === "stock-ops" ? "stock_ops_local" : OFFLINE_CACHE_PREFIX + key;
+    const raw = localStorage.getItem(storageKey);
     return raw ? JSON.parse(raw) : null;
   } catch { return null; }
 }
 function cacheSet(key, val){
+  const storageKey = key === "stock-ops" ? "stock_ops_local" : OFFLINE_CACHE_PREFIX + key;
   try {
-    localStorage.setItem(OFFLINE_CACHE_PREFIX + key, JSON.stringify(val));
+    localStorage.setItem(storageKey, JSON.stringify(val));
   } catch (e) {
     // M7: QuotaExceededError — удаляем самые старые кеши и пробуем снова
     console.warn('[cacheSet] quota exceeded, очищаем старые кеши:', key);
@@ -277,34 +316,99 @@ function cacheSet(key, val){
       const toRemove = cacheKeys.slice(0, Math.ceil(cacheKeys.length / 2));
       for(const k of toRemove) localStorage.removeItem(k);
       // Пробуем снова
-      localStorage.setItem(OFFLINE_CACHE_PREFIX + key, JSON.stringify(val));
+      localStorage.setItem(storageKey, JSON.stringify(val));
     } catch (e2) {
       console.warn('[cacheSet] не удалось сохранить даже после очистки:', e2.message);
     }
   }
 }
+function makeQueueId(){
+  return `write-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
+}
+function normalizeQueueItem(item){
+  if(!item || typeof item.key !== "string" || !item.key || item.val === undefined) return null;
+  const normalized = {
+    key: item.key,
+    val: item.val,
+    ts: Number(item.ts) || Date.now(),
+    id: item.id || makeQueueId(),
+    mode: item.mode === "patch" ? "patch" : "snapshot",
+  };
+  if(normalized.mode === "patch") {
+    normalized.patch = {
+      set: ensureObj(item.patch?.set),
+      remove: Array.isArray(item.patch?.remove) ? [...new Set(item.patch.remove.filter(k => typeof k === "string"))] : [],
+    };
+  }
+  return normalized;
+}
 function getQueue(){
-  try { return JSON.parse(localStorage.getItem(PENDING_WRITES_KEY) || "[]"); } catch { return []; }
+  try {
+    const parsed = JSON.parse(localStorage.getItem(PENDING_WRITES_KEY) || "[]");
+    if(!Array.isArray(parsed)) return [];
+    return parsed.map(normalizeQueueItem).filter(Boolean);
+  } catch { return []; }
 }
 function setQueue(q){
-  // Для каждого файла достаточно хранить последнюю локальную версию.
-  // Компактация по key не удаляет уникальные изменения молча, в отличие
-  // от прежнего slice(-50), который мог потерять данные.
+  // По одному актуальному намерению на файл. Patch-операции при компактации
+  // объединяются, поэтому удаление поля не исчезает при следующем изменении.
   const latestByKey = new Map();
-  for (const item of Array.isArray(q) ? q : []) {
-    if (item && typeof item.key === "string") latestByKey.set(item.key, item);
+  const ordered = (Array.isArray(q) ? q : []).map(normalizeQueueItem).filter(Boolean).sort((a,b)=>a.ts-b.ts);
+  for (const item of ordered) {
+    const previous = latestByKey.get(item.key);
+    if(previous?.mode === "patch" && item.mode === "patch") {
+      latestByKey.set(item.key, {
+        ...item,
+        patch: mergeObjectPatches(previous.patch, item.patch),
+      });
+    } else {
+      latestByKey.set(item.key, item);
+    }
   }
-  const compacted = [...latestByKey.values()].sort((a,b)=>(a.ts||0)-(b.ts||0));
-  try {
-    localStorage.setItem(PENDING_WRITES_KEY, JSON.stringify(compacted));
-  } catch (e) {
-    console.error('[queue] Не удалось сохранить очередь:', e.message);
-    // Не очищаем очередь и не делаем вид, что запись сохранена.
-    throw e;
+  const compacted = [...latestByKey.values()].sort((a,b)=>a.ts-b.ts);
+  localStorage.setItem(PENDING_WRITES_KEY, JSON.stringify(compacted));
+}
+function getQueuedWrite(key, id = null){
+  return getQueue().find(item => item.key === key && (!id || item.id === id)) || null;
+}
+function enqueueWrite(key, val, id = makeQueueId(), options = {}){
+  const queue = getQueue();
+  const previous = queue.find(item => item.key === key) || null;
+  let item = { key, val, ts: Date.now(), id, mode: "snapshot" };
+
+  if(OBJECT_PATCH_KEYS.has(key)) {
+    const before = options.beforeValue !== undefined
+      ? ensureObj(options.beforeValue)
+      : ensureObj(previous?.val ?? cacheGet(key));
+    const nextPatch = createObjectPatch(before, ensureObj(val));
+    item = {
+      ...item,
+      mode: "patch",
+      patch: previous?.mode === "patch"
+        ? mergeObjectPatches(previous.patch, nextPatch)
+        : nextPatch,
+    };
   }
+
+  setQueue([...queue.filter(existing => existing.key !== key), item]);
+  return item.id;
+}
+function refreshQueuedWrite(key, id, val){
+  const queue = getQueue();
+  const previous = queue.find(item => item.key === key && item.id === id);
+  if(!previous) return enqueueWrite(key, val, id);
+  const updated = { ...previous, val, ts: Date.now() };
+  setQueue([...queue.filter(item => item.key !== key), updated]);
+  return id;
+}
+function removeQueuedWrite(key, id){
+  const current = getQueue();
+  const next = current.filter(item => item.key !== key || (id && item.id !== id));
+  if(next.length !== current.length) setQueue(next);
 }
 
-async function sGet(key){
+async function sGet(key, options = {}){
+  const allowCache = options.allowCache !== false;
   // Пробуем GitHub (только если онлайн)
   if (navigator.onLine) {
     try {
@@ -317,8 +421,11 @@ async function sGet(key){
       // он мог бы воскресить удалённые серверные данные.
       return null;
     } catch (e) {
+      if (!allowCache) throw e;
       console.warn(`[sGet] GitHub failed for "${key}", using cache:`, e.message);
     }
+  } else if (!allowCache) {
+    throw new Error("OFFLINE");
   }
   // Fallback: локальный кеш
   return cacheGet(key);
@@ -331,70 +438,9 @@ function setRecordDeletionIds(items){
   recordDeletionIds = new Set((Array.isArray(items) ? items : []).map(x => x?.id).filter(Boolean));
 }
 
-// Merge function для records: union по уникальному ключу
-// КЛЮЧ: если есть id — по id. Если нет id (старые записи) — по ВСЕМ полям.
-// НЕ используем timestamp+marker+workshop — теряет записи с одинаковым ts.
+// Merge записей использует tombstones, загруженные отдельно.
 function mergeRecords(remote, local){
-  if(!Array.isArray(remote)) return Array.isArray(local) ? local.filter(r => !r?.id || !recordDeletionIds.has(r.id)) : [];
-  if(!Array.isArray(local)) return remote.filter(r => !r?.id || !recordDeletionIds.has(r.id));
-  const map = new Map();
-  function recKey(r){
-    if(r.id) return 'id:' + r.id;
-    return 'legacy:' + JSON.stringify({
-      ts: r.timestamp, w: r.workshop, m: r.marker, q: r.qty,
-      d: r.defect, a: r.amount, rt: r.recordType, c: r.comment
-    });
-  }
-  function version(r){ return Number(r.updatedAt || r.timestamp || 0); }
-  for(const r of [...remote, ...local]){
-    if (!r || (r.id && recordDeletionIds.has(r.id))) continue;
-    const key = recKey(r);
-    const prev = map.get(key);
-    // Для одного id сохраняем более свежую редакцию, а не всегда remote.
-    if (!prev || version(r) >= version(prev)) map.set(key, r);
-  }
-  return [...map.values()].sort((a,b) => (a.timestamp||0) - (b.timestamp||0));
-}
-
-// Merge function для stock-ops: union всех операций по opId (event sourcing)
-// КРИТИЧНО: при 409 conflict нельзя перезаписывать — иначе теряем ops другого устройства
-// Правильно: берём все уникальные операции из remote + local, сортируем по ts
-function mergeStockOps(remote, local){
-  if(!Array.isArray(remote)) return local;
-  if(!Array.isArray(local)) return remote;
-  const seen = new Set();
-  const result = [];
-  // Добавляем все операции (дедупликация по opId)
-  for(const op of [...remote, ...local]){
-    const id = op.opId || (op.ts + '|' + op.type + '|' + (op.marker || op.oldMarker || '') + '|' + (op.location || op.from || '') + '|' + (op.client || ''));
-    if(!seen.has(id)){
-      seen.add(id);
-      result.push(op);
-    }
-  }
-  // Сортируем по ts для детерминированности
-  result.sort((a,b) => (a.ts||0) - (b.ts||0));
-  console.log(`[mergeStockOps] remote=${remote.length} local=${local.length} merged=${result.length}`);
-  return result;
-}
-
-// Merge function для объектов (prices, markers, aliases, notes, stock:cfg, subcategories, passwords)
-// Простое объединение: remote поля + local поля (local перекрывает при конфликте)
-// Не идеально для удаления ключей, но спасает от полной потери данных
-function mergeObject(remote, local){
-  if(!remote || typeof remote !== "object" || Array.isArray(remote)) return local;
-  if(!local || typeof local !== "object" || Array.isArray(local)) return remote;
-  return {...remote, ...local};
-}
-
-// Merge function для массивов с id (stock-moves)
-function mergeById(remote, local){
-  if(!Array.isArray(remote)) return local;
-  if(!Array.isArray(local)) return remote;
-  const map = new Map();
-  for(const x of remote) map.set(x.id, x);
-  for(const x of local) map.set(x.id, x); // local побеждает
-  return [...map.values()];
+  return mergeRecordsCore(remote, local, recordDeletionIds);
 }
 
 // Универсальный выбор mergeFn по ключу
@@ -406,41 +452,40 @@ function getMergeFn(key){
   return undefined;
 }
 
-async function sSet(key, val){
-  // Всегда обновляем локальный кеш (для мгновенного отображения и офлайн-доступа)
+async function sSet(key, val, options = {}){
   cacheSet(key, val);
-  
-  // Если офлайн — кладём в очередь, не вызываем GitHub
-  if (!navigator.onLine) {
-    const q = getQueue();
-    // Если уже есть запись для этого key — заменяем (последняя версия выигрывает)
-    const filtered = q.filter(item => item.key !== key);
-    filtered.push({ key, val, ts: Date.now() });
-    setQueue(filtered);
-    return { ok: true, queued: true };
-  }
-  
-  // Онлайн — пишем в GitHub
-  // Для всех ключей с potential concurrent writes — передаём mergeFn
-  // Это предотвращает потерю данных при 409 conflict (два устройства одновременно пишут)
-  const mergeFn = getMergeFn(key);
-  try {
-    const result = await dbSet(key, val, mergeFn);
-    if (!result.ok) {
-      // Не получилось — в очередь на повтор
-      const q = getQueue();
-      const filtered = q.filter(item => item.key !== key);
-      filtered.push({ key, val, ts: Date.now() });
-      setQueue(filtered);
+  const durableQueue = options.durableQueue !== false;
+  let queueId = null;
+  let queueItem = null;
+
+  // Для stock-ops отдельным durable-хранилищем служит outbox операций.
+  if(durableQueue){
+    queueId = options.queueId || enqueueWrite(key, val, undefined, { beforeValue: options.beforeValue });
+    queueItem = getQueuedWrite(key, queueId);
+    if(!queueItem){
+      queueId = enqueueWrite(key, val, queueId || undefined, { beforeValue: options.beforeValue });
+      queueItem = getQueuedWrite(key, queueId);
     }
-    return result;
+  }
+
+  if (!navigator.onLine) {
+    return { ok: true, queued: true, queueId, value: val };
+  }
+
+  const isPatch = queueItem?.mode === "patch";
+  const valueToWrite = isPatch ? queueItem.patch : val;
+  const mergeFn = isPatch ? applyObjectPatch : getMergeFn(key);
+  try {
+    const result = await dbSet(key, valueToWrite, mergeFn);
+    if (result.ok) {
+      if (durableQueue) removeQueuedWrite(key, queueId);
+      cacheSet(key, result.value ?? val);
+      return { ...result, queued: false, queueId };
+    }
+    return { ...result, queued: true, queueId, value: val };
   } catch (e) {
-    // Сетевая ошибка — в очередь
-    const q = getQueue();
-    const filtered = q.filter(item => item.key !== key);
-    filtered.push({ key, val, ts: Date.now() });
-    setQueue(filtered);
-    return { ok: true, queued: true };
+    console.warn(`[sSet] "${key}" queued after error:`, e.message);
+    return { ok: true, queued: true, queueId, value: val, error: e.message };
   }
 }
 
@@ -1022,6 +1067,10 @@ function MarkerPhotoThumb({ markerName, photo, onPhotoLoaded, onPhotoClick }){
       photoGet(markerName).then(url => {
         if(url === null) markNoPhoto(markerName);
         onPhotoLoaded(url);
+      }).catch(error => {
+        console.warn(`[photo] Не удалось загрузить «${markerName}»:`, error.message);
+        setMsg({ok:false, text:"Фото временно недоступно"});
+        setTimeout(()=>setMsg(null), 2000);
       });
     }
   }, [markerName]);
@@ -1640,6 +1689,29 @@ export default function App(){
   const subcategoriesRef = useRef({});
   useEffect(() => { subcategoriesRef.current = subcategories; }, [subcategories]);
 
+  // React state обновляется асинхронно. Для синхронизации refs должны меняться
+  // в тот же момент, иначе второй быстрый ввод может построиться на старых данных.
+  function applyLocalValue(key, value, fallbackSetter = null){
+    if(key === "records" && Array.isArray(value)){ recordsRef.current = value; setRecords(value); return; }
+    if(key === "prices"){ pricesRef.current = ensureObj(value); setPrices(pricesRef.current); return; }
+    if(key === "custom:markers"){ markersRef.current = ensureObj(value); setMarkers(markersRef.current); return; }
+    if(key === "marker-aliases"){ aliasesRef.current = ensureObj(value); setAliases(aliasesRef.current); return; }
+    if(key === "marker-notes"){ notesRef.current = ensureObj(value); setNotes(notesRef.current); return; }
+    if(key === "stock:cfg"){ stockCfgRef.current = ensureObj(value); setStockCfg(stockCfgRef.current); return; }
+    if(key === "subcategories"){ subcategoriesRef.current = ensureObj(value); setSubcategories(subcategoriesRef.current); return; }
+    if(key === "stock-moves" && Array.isArray(value)){ stockMovesRef.current = value; setStockMoves(value); return; }
+    if(key === "passwords"){ passwordsRef.current = ensureObj(value); setPasswords(passwordsRef.current); return; }
+    if(fallbackSetter) fallbackSetter(value);
+  }
+  function currentValueForKey(key){
+    const refs = {
+      "records": recordsRef, "prices": pricesRef, "custom:markers": markersRef,
+      "marker-aliases": aliasesRef, "marker-notes": notesRef, "stock:cfg": stockCfgRef,
+      "subcategories": subcategoriesRef, "stock-moves": stockMovesRef, "passwords": passwordsRef,
+    };
+    return refs[key]?.current;
+  }
+
   // форма записи
   const [category, setCategory] = useState("Автомобильные");
   const [marker, setMarker] = useState("");
@@ -1780,56 +1852,74 @@ export default function App(){
   // ── WebSocket + Polling синхронизация ──
   const [syncStatus, setSyncStatus] = useState("idle"); // idle | syncing | synced | ws | offline
   const [isOnline, setIsOnline] = useState(navigator.onLine);
-  const [pendingCount, setPendingCount] = useState(() => getQueue().length);
-  const lastDataHashRef = useRef("");
-  const skipPollRef = useRef(0);
+  const [pendingCount, setPendingCount] = useState(() => getQueue().length + getStockOutbox().length);
+  const isPollingRef = useRef(false);
+  const pollAgainRef = useRef(false);
   const wsConnectedRef = useRef(false);
   const ablyChannelRef = useRef(null);
   const doPollRef = useRef(null); // ссылка на функцию poll для вызова из WS
   const stateSettersRef = useRef({}); // маппинг key → setter для мгновенного применения Ably-обновлений
-  const lastBroadcastTsRef = useRef({}); // {key: ts} — защита от эха собственных сообщений
   const clientIdRef = useRef(CLIENT_ID); // ID этого клиента для фильтрации собственных сообщений
   const flushQueueRef = useRef(null); // ссылка на функцию flushQueue для вызова из useEffect
 
   // Универсальное сохранение: обновляет state + пишет в GitHub + мгновенно рассылает данные через Ably
   // Debounce для GitHub: 7 быстрых нажатий +/- = 1 PUT запрос (через 400мс после последнего)
   const saveTimersRef = useRef({}); // {key: setTimeout_id}
+  const saveWaitersRef = useRef({}); // {key: [{resolve}]}
+  const saveQueueIdsRef = useRef({}); // последнее локальное намерение для key
+
+  function publishCommittedChange(key){
+    if (!navigator.onLine || !ablyChannelRef.current) return;
+    try {
+      const promise = ablyChannelRef.current.publish('changed', {
+        key,
+        from: clientIdRef.current,
+        eventId: `${clientIdRef.current}-${Date.now()}-${Math.random().toString(36).slice(2,6)}`,
+      });
+      if (promise?.catch) promise.catch(() => {});
+    } catch {}
+  }
+
+  // Немедленная запись без debounce для составных действий (удаление/переименование).
+  // Другим устройствам отправляется только сигнал после подтверждённого GitHub commit.
+  async function commitImmediate(key, value) {
+    const beforeValue = currentValueForKey(key);
+    applyLocalValue(key, value);
+    const result = await sSet(key, value, { beforeValue });
+    setPendingCount(getQueue().length + getStockOutbox().length);
+    if (result?.ok && !result.queued) {
+      const committedValue = result.value ?? value;
+      const stateSetter = stateSettersRef.current[key];
+      if (stateSetter) stateSetter(committedValue);
+      publishCommittedChange(key);
+    }
+    return result;
+  }
+
+  // Универсальное сохранение. Изменение сначала попадает в durable local queue,
+  // затем с debounce отправляется в GitHub. Ably используется только как сигнал
+  // ПОСЛЕ подтверждённого commit — неподтверждённые snapshots другим устройствам
+  // больше не рассылаются.
   async function saveAndSync(key, value, setter) {
-    if (setter) setter(value);
-    // СИНХРОННО персистим records в localStorage — переживает reload до debounce
+    const beforeValue = currentValueForKey(key);
+    applyLocalValue(key, value, setter);
+    cacheSet(key, value);
     if (key === "records" && Array.isArray(value)) {
       try { localStorage.setItem("records_local", JSON.stringify(value)); } catch {}
     }
-    skipPollRef.current = 1;
-    
-    // Ably publish — мгновенно, без debounce (другое устройство должно видеть сразу)
-    if (navigator.onLine && ablyChannelRef.current) {
-      try {
-        const ts = Date.now();
-        lastBroadcastTsRef.current[key] = ts;
-        const payload = { key, value, ts, from: clientIdRef.current };
-        const size = new TextEncoder().encode(JSON.stringify(payload)).length;
-        if (size < 60000) {
-          ablyChannelRef.current.publish('update', payload);
-        } else {
-          ablyChannelRef.current.publish('changed', { key, ts, from: clientIdRef.current });
-        }
-      } catch(e) {
-        console.warn('[ABLY] publish error', e);
-      }
-    }
-    
-    // GitHub запись — с debounce 400мс (для одного key)
-    // Если уже есть отложенная запись для этого key — отменяем её
-    if (saveTimersRef.current[key]) {
-      clearTimeout(saveTimersRef.current[key]);
-    }
+
+    const queueId = enqueueWrite(key, value, undefined, { beforeValue });
+    saveQueueIdsRef.current[key] = queueId;
+    setPendingCount(getQueue().length + getStockOutbox().length);
+
+    if (saveTimersRef.current[key]) clearTimeout(saveTimersRef.current[key]);
+
     return new Promise((resolve) => {
+      if (!saveWaitersRef.current[key]) saveWaitersRef.current[key] = [];
+      saveWaitersRef.current[key].push(resolve);
+
       saveTimersRef.current[key] = setTimeout(async () => {
         delete saveTimersRef.current[key];
-        // Читаем актуальное значение из ref, не захваченное в замыкание
-        // Это защищает от race condition: за 400мс дебаунса могло прийти обновление через Ably
-        // и state уже обновился, но захваченное value было бы устаревшим
         const refMap = {
           "records": recordsRef,
           "prices": pricesRef,
@@ -1840,31 +1930,36 @@ export default function App(){
           "subcategories": subcategoriesRef,
           "stock-moves": stockMovesRef,
           "passwords": passwordsRef,
-          // stock-ops записывается через appendStockOp, не через saveAndSync
         };
         const ref = refMap[key];
         const valueToSave = ref ? ref.current : value;
-        // ПЕРСИСТИМ records в localStorage — переживает reload (как stock-ops)
-        if (key === "records" && Array.isArray(valueToSave)) {
-          try { localStorage.setItem("records_local", JSON.stringify(valueToSave)); } catch {}
-        }
-        const result = await sSet(key, valueToSave);
-        setPendingCount(getQueue().length);
-        // Если произошёл merge — перечитываем с сервера чтобы получить объединённые данные
-        if (result && result.ok && result.merged && ref) {
-          try {
-            const remoteVal = await dbGet(key);
-            if (remoteVal !== null && remoteVal !== undefined) {
-              console.log(`[saveAndSync] Merge detected for "${key}", обновляем локальный state`);
-              // Обновляем state через соответствующий setter
-              const setterMap = stateSettersRef.current;
-              if (setterMap[key]) setterMap[key](remoteVal);
+        const latestQueueId = saveQueueIdsRef.current[key] || queueId;
+        // Обновляем очередь актуальным ref, не snapshot из первого вызова.
+        refreshQueuedWrite(key, latestQueueId, valueToSave);
+
+        let result;
+        try {
+          result = await sSet(key, valueToSave, { queueId: latestQueueId });
+          setPendingCount(getQueue().length + getStockOutbox().length);
+          if (result?.ok && !result.queued) {
+            const committedValue = result.value ?? valueToSave;
+            const stateSetter = stateSettersRef.current[key];
+            if (stateSetter) stateSetter(committedValue);
+            if (key === "records" && Array.isArray(committedValue)) {
+              recordsRef.current = committedValue;
+              try { localStorage.setItem("records_local", JSON.stringify(committedValue)); } catch {}
             }
-          } catch (e) {
-            console.warn(`[saveAndSync] Не удалось перечитать "${key}":`, e.message);
+            publishCommittedChange(key);
           }
+        } catch (error) {
+          result = { ok: true, queued: true, error: error.message, value: valueToSave };
+          console.warn(`[saveAndSync] "${key}" queued:`, error.message);
         }
-        resolve();
+
+        const waiters = saveWaitersRef.current[key] || [];
+        delete saveWaitersRef.current[key];
+        if (saveQueueIdsRef.current[key] === latestQueueId) delete saveQueueIdsRef.current[key];
+        for (const done of waiters) done(result);
       }, 400);
     });
   }
@@ -1895,94 +1990,8 @@ export default function App(){
   // Конфликты: только set-операции могут конфликтовать (два устройства установили
   // разные значения одновременно). move/delta/init — складываются без конфликтов.
 
-  // Пересчёт stock из журнала операций
-  // Защита от повреждённых ops — каждый op обрабатывается в try/catch
-  // Защита от сбитых часов — ops с ts вне разумного диапазона игнорируются
-  function applyOpsToStock(ops) {
-    const result = { main: {}, ws: { SMART: {}, Бегемот: {} } };
-    if (!Array.isArray(ops)) return result;
-    const minTs = new Date("2020-01-01").getTime();
-    const maxTs = Date.now() + 24 * 60 * 60 * 1000;
-    const validOps = ops.filter(op => op && typeof op === "object" && op.type && Number.isFinite(op.ts) && op.ts >= minTs && op.ts <= maxTs);
-    const sortedOps = [...validOps].sort((a, b) => {
-      const tsDiff = a.ts - b.ts;
-      if (tsDiff !== 0) return tsDiff;
-      return String(a.opId || "").localeCompare(String(b.opId || ""));
-    });
-
-    // После rename старое имя остаётся алиасом нового. Поэтому операция,
-    // созданная офлайн на другом устройстве со старым именем, не создаёт
-    // второй независимый остаток.
-    const renamedTo = new Map();
-    const resolveMarker = (marker) => {
-      if (typeof marker !== "string" || !marker.trim()) return null;
-      let current = marker;
-      const visited = new Set();
-      while (renamedTo.has(current) && !visited.has(current)) {
-        visited.add(current);
-        current = renamedTo.get(current);
-      }
-      return current;
-    };
-    const parseLocation = (loc) => {
-      if (loc === "main") return ["main", null];
-      if (typeof loc === "string" && loc.startsWith("ws:")) {
-        const ws = loc.slice(3);
-        if (WORKSHOPS.includes(ws)) return ["ws", ws];
-      }
-      return null;
-    };
-    const getBucket = (loc) => {
-      const parsed = parseLocation(loc);
-      if (!parsed) return null;
-      const [scope, ws] = parsed;
-      return scope === "main" ? result.main : result.ws[ws];
-    };
-
-    for (const op of sortedOps) {
-      try {
-        if (op.type === "rename") {
-          const oldMarker = resolveMarker(op.oldMarker);
-          const newMarker = resolveMarker(op.newMarker);
-          if (!oldMarker || !newMarker || oldMarker === newMarker) continue;
-          renamedTo.set(oldMarker, newMarker);
-          for (const bucket of [result.main, ...WORKSHOPS.map(ws => result.ws[ws])]) {
-            if (Object.prototype.hasOwnProperty.call(bucket, oldMarker)) {
-              bucket[newMarker] = (Number(bucket[newMarker]) || 0) + (Number(bucket[oldMarker]) || 0);
-              delete bucket[oldMarker];
-            }
-          }
-          continue;
-        }
-
-        const marker = resolveMarker(op.marker);
-        if (!marker) continue;
-        if (op.type === "set" || op.type === "init") {
-          const bucket = getBucket(op.location);
-          const value = Number(op.value);
-          if (!bucket || !Number.isFinite(value)) continue;
-          bucket[marker] = value;
-        } else if (op.type === "delta") {
-          const bucket = getBucket(op.location);
-          const delta = Number(op.delta);
-          if (!bucket || !Number.isFinite(delta)) continue;
-          // Не clamp'им каждую операцию к нулю: clamp делает итог зависимым
-          // от порядка конкурентных +delta/-delta и теряет часть движения.
-          bucket[marker] = (Number(bucket[marker]) || 0) + delta;
-        } else if (op.type === "move") {
-          const from = getBucket(op.from);
-          const to = getBucket(op.to);
-          const qty = Number(op.qty);
-          if (!from || !to || !Number.isFinite(qty) || qty <= 0 || from === to) continue;
-          from[marker] = (Number(from[marker]) || 0) - qty;
-          to[marker] = (Number(to[marker]) || 0) + qty;
-        }
-      } catch (e) {
-        console.warn('[applyOpsToStock] skipping malformed op:', op, e.message);
-      }
-    }
-    return result;
-  }
+  // Пересчёт и валидация журнала вынесены в sync-core.js,
+  // чтобы критичная математика склада проверялась автоматическими тестами.
 
   function makeOpId() {
     return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -1996,16 +2005,64 @@ export default function App(){
   // Поэтому каждая операция также попадает в unsyncedOpsRef — список операций,
   // которые мы должны гарантированно доставить на сервер.
   // После успешной записи (или merge) список чистится.
-  const unsyncedOpsRef = useRef(new Set()); // Set opId которые ещё не подтверждены на сервере
-  const isSyncingOpsRef = useRef(false); // флаг: идёт ли сейчас синхронизация stock-ops
-  const lastSyncAttemptRef = useRef(0); // timestamp последней попытки (для throttle)
-  const syncRetriesRef = useRef(0); // количество retry подряд (H3 fix)
-  const MAX_SYNC_RETRIES = 20; // максимум retry, потом сдаёмся
-  const isFlushingRef = useRef(false); // флаг: идёт ли сейчас flushQueue
-  const syncStockOpsRef = useRef(null); // ссылка на syncStockOps для вызова из init
+  const unsyncedOpsRef = useRef(new Set(getStockOutbox().map(op => op.opId).filter(Boolean)));
+  const isSyncingOpsRef = useRef(false);
+  const lastSyncAttemptRef = useRef(0);
+  const syncRetriesRef = useRef(0);
+  const isFlushingRef = useRef(false);
+  const syncStockOpsRef = useRef(null);
+  const stockSyncTimerRef = useRef(null);
+  const stockRetryTimerRef = useRef(null);
+  const stockSyncWaitersRef = useRef([]);
+
+  function persistStockSnapshot(ops){
+    try {
+      localStorage.setItem("stock_ops_local", JSON.stringify(ops));
+      return true;
+    } catch (error) {
+      // Event log нельзя обрезать. Освобождаем только воспроизводимые кеши.
+      for(let i = localStorage.length - 1; i >= 0; i--){
+        const key = localStorage.key(i);
+        if(key?.startsWith(OFFLINE_CACHE_PREFIX) && key !== OFFLINE_CACHE_PREFIX + "stock-ops"){
+          try { localStorage.removeItem(key); } catch {}
+        }
+      }
+      try {
+        localStorage.setItem("stock_ops_local", JSON.stringify(ops));
+        return true;
+      } catch (secondError) {
+        console.error('[stock-ops] Не удалось сохранить полный журнал локально:', secondError.message);
+        return false;
+      }
+    }
+  }
+
+  function resolveStockWaiters(result){
+    const waiters = stockSyncWaitersRef.current.splice(0);
+    for(const resolve of waiters) resolve(result);
+  }
+
+  function scheduleStockSync(delay = 0, replace = true){
+    if (replace && stockSyncTimerRef.current) clearTimeout(stockSyncTimerRef.current);
+    if (!replace && stockSyncTimerRef.current) return;
+    stockSyncTimerRef.current = setTimeout(() => {
+      stockSyncTimerRef.current = null;
+      syncStockOpsRef.current?.();
+    }, Math.max(0, delay));
+  }
+
+  function scheduleStockRetry(){
+    if (stockRetryTimerRef.current) return;
+    const attempt = Math.min(syncRetriesRef.current, 6);
+    const base = Math.min(10_000 * (2 ** Math.max(0, attempt - 1)), 300_000);
+    const delay = base + Math.random() * Math.min(base * 0.3, 15_000);
+    stockRetryTimerRef.current = setTimeout(() => {
+      stockRetryTimerRef.current = null;
+      scheduleStockSync(0);
+    }, delay);
+  }
+
   async function appendStockOp(type, payload) {
-    // БАГ#4a: предотвращаем polling от перезаписи наших несинхронизированных ops
-    skipPollRef.current = 1;
     const op = {
       ...payload,
       type,
@@ -2013,167 +2070,121 @@ export default function App(){
       client: clientIdRef.current,
       opId: makeOpId(),
     };
-    // Помечаем как несинхронизированную. Новая операция также возобновляет
-    // синхронизацию после ранее исчерпанных retry.
+
+    try {
+      addStockOutboxOp(op);
+    } catch (error) {
+      console.error('[stock-outbox] Не удалось сохранить операцию:', error.message);
+      setSyncStatus("offline");
+      alert("Изменение склада не сохранено: на устройстве закончилось место. Освободите место и повторите действие.");
+      return { ok:false, queued:false, error:error.message };
+    }
     unsyncedOpsRef.current.add(op.opId);
     syncRetriesRef.current = 0;
-    // СИНХРОННО обновляем ref (не ждём useEffect, иначе два вызова подряд теряют op)
-    const newOps = [...stockOpsRef.current, op];
+
+    const newOps = mergeStockOps(stockOpsRef.current, [op]);
     stockOpsRef.current = newOps;
-    // БАГ#5: персистим в localStorage синхронно — переживает reload
-    // BUG-D: с trimming при quota exceeded
-    try {
-      localStorage.setItem("stock_ops_local", JSON.stringify(newOps));
-    } catch (e) {
-      // Нельзя сохранять только хвост event log: без начальных init/set итоговый
-      // остаток после перезагрузки станет математически неверным.
-      Object.keys(localStorage)
-        .filter(k => k.startsWith(OFFLINE_CACHE_PREFIX) && k !== OFFLINE_CACHE_PREFIX + "stock-ops")
-        .forEach(k => { try { localStorage.removeItem(k); } catch {} });
-      try {
-        localStorage.setItem("stock_ops_local", JSON.stringify(newOps));
-      } catch (e2) {
-        console.error('[stock-ops] Не удалось сохранить полный журнал локально:', e2.message);
-      }
-    }
+    persistStockSnapshot(newOps);
     setStockOps(newOps);
-    // СИНХРОННО обновляем stock ref
     const newStock = applyOpsToStock(newOps);
     stockRef.current = newStock;
     setStock(newStock);
-    // Отправляем через Ably (инкрементально — только новую операцию)
-    if (navigator.onLine && ablyChannelRef.current) {
-      try {
-        const p = ablyChannelRef.current.publish('stock-op', { op, from: clientIdRef.current });
-        if (p && p.catch) p.catch(() => {});
-      } catch {}
-    }
-    // Сохраняем весь журнал (debounce 2 секунды для batchинга)
-    // Меньше запросов к GitHub = меньше 409 конфликтов
-    if (saveTimersRef.current["stock-ops"]) clearTimeout(saveTimersRef.current["stock-ops"]);
-    return new Promise((resolve) => {
-      saveTimersRef.current["stock-ops"] = setTimeout(async () => {
-        delete saveTimersRef.current["stock-ops"];
-        await syncStockOps();
-        resolve();
-      }, 2000);
-    });
+
+    scheduleStockSync(2_000);
+    return new Promise(resolve => stockSyncWaitersRef.current.push(resolve));
   }
 
-  // Синхронизация stock-ops с сервером: write → post-write verify
-  // Защита от параллельных вызовов и throttle (не чаще раза в 5 сек)
-  // При 409 conflict — mergeFn в dbSet мёржит remote+local, ретраит до 5 раз с jitter
-  // Если всё равно не получилось — операция остаётся в unsyncedOpsRef, попробуем в следующий цикл
+  // Доставка append-only outbox. Подтверждением считается успешный GitHub PUT,
+  // который вернул фактически объединённый журнал. Ably уведомляется только после
+  // этого, поэтому другое устройство никогда не принимает неподтверждённую op.
   async function syncStockOps() {
-    // Защита от параллельных вызовов
     if (isSyncingOpsRef.current) {
-      console.log('[syncStockOps] уже идёт, пропускаем');
-      return;
+      scheduleStockSync(1_000, false);
+      return { ok: false, busy: true };
     }
-    // H3: max retries — после 20 попыток сдаёмся (не бесконечный цикл)
-    if (syncRetriesRef.current >= MAX_SYNC_RETRIES) {
-      console.warn(`[syncStockOps] Достигнут максимум retry (${MAX_SYNC_RETRIES}), останавливаемся. Unsynchronized ops: ${unsyncedOpsRef.current.size}`);
-      return;
-    }
-    // Throttle: не чаще раза в 5 секунд
+
     const now = Date.now();
-    if (now - lastSyncAttemptRef.current < 5000) {
-      console.log('[syncStockOps] throttle, пропускаем');
-      // Но если есть unsynced ops — запланируем retry с jitter
-      if (unsyncedOpsRef.current.size > 0) {
-        const jitter = 3000 + Math.random() * 4000; // 3-7 сек
-        setTimeout(() => { syncStockOps(); }, jitter);
-      }
-      return;
+    const throttleLeft = 3_000 - (now - lastSyncAttemptRef.current);
+    if (throttleLeft > 0) {
+      scheduleStockSync(throttleLeft + 50);
+      return { ok: false, throttled: true };
     }
+
+    const outbox = getStockOutbox();
+    if (outbox.length === 0) {
+      unsyncedOpsRef.current.clear();
+      const result = { ok: true, queued: false, value: stockOpsRef.current };
+      resolveStockWaiters(result);
+      return result;
+    }
+
     lastSyncAttemptRef.current = now;
     isSyncingOpsRef.current = true;
-    
+    setSyncStatus(navigator.onLine ? "syncing" : "offline");
+    let finalResult = { ok: true, queued: true };
+
     try {
-      // КРИТИЧНО: перед КАЖДОЙ записью читаем сервер и объединяем операции.
-      // Нельзя полагаться только на 409: dbGet/poll обновляет общий shaCache,
-      // поэтому устаревший локальный массив мог записаться с актуальным SHA
-      // и молча удалить операции другого устройства.
-      let remoteBeforeWrite = [];
-      try {
-        const remote = await dbGet("stock-ops");
-        if (Array.isArray(remote)) remoteBeforeWrite = remote;
-      } catch {}
-
-      const opsToSave = mergeStockOps(remoteBeforeWrite, stockOpsRef.current);
-      stockOpsRef.current = opsToSave;
-      const stockBeforeWrite = applyOpsToStock(opsToSave);
-      stockRef.current = stockBeforeWrite;
-      setStockOps(opsToSave);
-      setStock(stockBeforeWrite);
-      try { localStorage.setItem("stock_ops_local", JSON.stringify(opsToSave)); } catch {}
-
-      const result = await sSet("stock-ops", opsToSave);
-      setPendingCount(getQueue().length);
-      
-      // Post-write verify — только если запись прошла успешно
-      if (result && result.ok && unsyncedOpsRef.current.size > 0) {
-        try {
-          const finalOps = await dbGet("stock-ops");
-          if (Array.isArray(finalOps)) {
-            const serverIds = new Set(finalOps.map(o => o.opId));
-            // Убираем из unsynced те, что уже на сервере
-            for (const id of [...unsyncedOpsRef.current]) {
-              if (serverIds.has(id)) unsyncedOpsRef.current.delete(id);
-            }
-            
-            if (unsyncedOpsRef.current.size === 0) {
-              // Все операции дошли — обновляем state + refs синхронно (BUG-B)
-              syncRetriesRef.current = 0;
-              stockOpsRef.current = finalOps;
-              const verifiedStock = applyOpsToStock(finalOps);
-              stockRef.current = verifiedStock;
-              setStockOps(finalOps);
-              setStock(verifiedStock);
-              console.log(`[syncStockOps] All ops synced (${finalOps.length} total)`);
-            } else {
-              // Часть не дошла — retry с jitter (10-20 сек)
-              syncRetriesRef.current++;
-              const jitter = 10000 + Math.random() * 10000;
-              console.log(`[syncStockOps] ${unsyncedOpsRef.current.size} ops still missing (retry ${syncRetriesRef.current}/${MAX_SYNC_RETRIES}), retry in ${Math.round(jitter/1000)}s`);
-              setTimeout(() => { syncStockOps(); }, jitter);
-            }
-          }
-        } catch (e) {
-          console.warn('[syncStockOps] Post-write verify failed:', e.message);
-        }
-      } else if (result && result.ok) {
-        // Успешно и нет unsynced ops — сбрасываем counter
-        syncRetriesRef.current = 0;
-      } else if (result && !result.ok) {
-        // Запись не прошла — retry с jitter (10-20 сек)
-        syncRetriesRef.current++;
-        const jitter = 10000 + Math.random() * 10000;
-        console.warn(`[syncStockOps] Write failed (retry ${syncRetriesRef.current}/${MAX_SYNC_RETRIES}), retry in ${Math.round(jitter/1000)}s`);
-        setTimeout(() => { syncStockOps(); }, jitter);
+      if (!navigator.onLine) {
+        scheduleStockRetry();
+        return finalResult;
       }
+
+      let remote = [];
+      try {
+        const loaded = await dbGet("stock-ops");
+        if (Array.isArray(loaded)) remote = loaded;
+      } catch (error) {
+        syncRetriesRef.current++;
+        console.warn('[syncStockOps] Не удалось прочитать сервер:', error.message);
+        scheduleStockRetry();
+        return { ok: true, queued: true, error: error.message };
+      }
+
+      const localWithOutbox = mergeStockOps(stockOpsRef.current, outbox);
+      const opsToSave = mergeStockOps(remote, localWithOutbox);
+      const result = await sSet("stock-ops", opsToSave, { durableQueue: false });
+      finalResult = result;
+
+      if (result?.ok && !result.queued && Array.isArray(result.value)) {
+        const committedOps = result.value;
+        const committedIds = new Set(committedOps.map(op => op?.opId).filter(Boolean));
+        const confirmedIds = new Set(outbox.filter(op => committedIds.has(op.opId)).map(op => op.opId));
+        const remainingOutbox = removeStockOutboxIds(confirmedIds);
+        unsyncedOpsRef.current = new Set(remainingOutbox.map(op => op.opId).filter(Boolean));
+
+        stockOpsRef.current = committedOps;
+        persistStockSnapshot(committedOps);
+        const committedStock = applyOpsToStock(committedOps);
+        stockRef.current = committedStock;
+        setStockOps(committedOps);
+        setStock(committedStock);
+        syncRetriesRef.current = 0;
+        publishCommittedChange("stock-ops");
+        setSyncStatus(wsConnectedRef.current ? "ws" : "synced");
+
+        if (remainingOutbox.length > 0) {
+          syncRetriesRef.current++;
+          scheduleStockRetry();
+        }
+      } else {
+        syncRetriesRef.current++;
+        scheduleStockRetry();
+      }
+      return finalResult;
+    } catch (error) {
+      syncRetriesRef.current++;
+      console.warn('[syncStockOps] Ошибка:', error.message);
+      scheduleStockRetry();
+      finalResult = { ok: true, queued: true, error: error.message };
+      return finalResult;
     } finally {
       isSyncingOpsRef.current = false;
+      setPendingCount(getQueue().length + getStockOutbox().length);
+      resolveStockWaiters(finalResult);
     }
   }
   syncStockOpsRef.current = syncStockOps;
 
-  // Применить операцию, пришедшую с другого устройства через Ably
-  function applyRemoteStockOp(op) {
-    // Проверка дубликата по opId
-    if (stockOpsRef.current.some(o => o.opId === op.opId)) return;
-    const newOps = [...stockOpsRef.current, op];
-    // БАГ#3: СИНХРОННО обновляем refs — иначе быстрые Ably-сообщения теряют ops
-    stockOpsRef.current = newOps;
-    // Remote op тоже сохраняем локально: при перезагрузке до следующего poll
-    // устройство не должно временно возвращаться к старому остатку.
-    try { localStorage.setItem("stock_ops_local", JSON.stringify(newOps)); } catch {}
-    setStockOps(newOps);
-    const newStock = applyOpsToStock(newOps);
-    stockRef.current = newStock;
-    setStock(newStock);
-    detectConflict(op);
-  }
 
   // Обнаружение конфликтов set-операций
   function detectConflict(newOp) {
@@ -2212,9 +2223,19 @@ export default function App(){
     if (!authed) return;
 
     // Заполняем маппинг ключей → setters для мгновенного применения Ably-обновлений
+    const pendingItemFor = (key) => getQueue().find(item => item.key === key) || null;
+    const pendingFor = (key) => pendingItemFor(key)?.val;
+    const mergeServerWithPending = (key, serverValue) => {
+      const pendingItem = pendingItemFor(key);
+      if(!pendingItem) return serverValue;
+      if(pendingItem.mode === "patch") return applyObjectPatch(serverValue, pendingItem.patch);
+      const mergeFn = getMergeFn(key);
+      return mergeFn ? mergeFn(serverValue, pendingItem.val) : pendingItem.val;
+    };
+
     stateSettersRef.current = {
       "record-deletions": (items) => {
-        const merged = mergeById(items, recordDeletionsRef.current);
+        const merged = mergeById(Array.isArray(items) ? items : [], pendingFor("record-deletions") || []);
         recordDeletionsRef.current = merged;
         setRecordDeletionIds(merged);
         const cleaned = recordsRef.current.filter(r => !recordDeletionIds.has(r.id));
@@ -2222,113 +2243,58 @@ export default function App(){
         setRecords(cleaned);
       },
       "records": (recs) => {
-        // Merge с локальными — не перезаписываем несинхронизированные
-        const merged = mergeRecords(recs, recordsRef.current);
+        const merged = mergeRecords(Array.isArray(recs) ? recs : [], pendingFor("records") || []);
         recordsRef.current = merged;
         setRecords(merged);
+        try { localStorage.setItem("records_local", JSON.stringify(merged)); } catch {}
       },
-      "prices": setPrices,
+      "prices": (value) => { pricesRef.current = ensureObj(mergeServerWithPending("prices", value)); setPrices(pricesRef.current); },
       "stock-ops": (ops) => {
-        // Merge с локальными unsynced ops, не перезаписываем!
-        const merged = mergeStockOps(ops, stockOpsRef.current);
+        // Только сервер + явный durable outbox. Произвольный старый local snapshot
+        // больше не может сам вернуться на сервер или остаться в UI.
+        const merged = mergeStockOps(Array.isArray(ops) ? ops : [], getStockOutbox());
         stockOpsRef.current = merged;
-        const ms = applyOpsToStock(merged);
-        stockRef.current = ms;
+        persistStockSnapshot(merged);
+        const recalculated = applyOpsToStock(merged);
+        stockRef.current = recalculated;
         setStockOps(merged);
-        setStock(ms);
+        setStock(recalculated);
       },
-      "stock-moves": setStockMoves,
-      "stock:cfg": setStockCfg,
-      "custom:markers": setMarkers,
-      "marker-aliases": setAliases,
-      "marker-notes": setNotes,
-      "subcategories": setSubcategories,
-      "passwords": setPasswords,
+      "stock-moves": (value) => {
+        const merged = mergeServerWithPending("stock-moves", Array.isArray(value) ? value : []);
+        stockMovesRef.current = Array.isArray(merged) ? merged : [];
+        setStockMoves(stockMovesRef.current);
+      },
+      "stock:cfg": (value) => { stockCfgRef.current = ensureObj(mergeServerWithPending("stock:cfg", value)); setStockCfg(stockCfgRef.current); },
+      "custom:markers": (value) => {
+        const merged = ensureObj(mergeServerWithPending("custom:markers", value));
+        markersRef.current = Object.keys(merged).length ? merged : DEFAULT_MARKERS;
+        setMarkers(markersRef.current);
+      },
+      "marker-aliases": (value) => { aliasesRef.current = ensureObj(mergeServerWithPending("marker-aliases", value)); setAliases(aliasesRef.current); },
+      "marker-notes": (value) => { notesRef.current = ensureObj(mergeServerWithPending("marker-notes", value)); setNotes(notesRef.current); },
+      "subcategories": (value) => { subcategoriesRef.current = ensureObj(mergeServerWithPending("subcategories", value)); setSubcategories(subcategoriesRef.current); },
+      "passwords": (value) => { passwordsRef.current = ensureObj(mergeServerWithPending("passwords", value)); setPasswords(passwordsRef.current); },
     };
 
     // ── Ably (мгновенная синхронизация) ──
     const channel = ably.channels.get('masterskaya-sync');
     
+    // Ably не является источником истины. Клиентский ключ виден браузеру,
+    // поэтому входящий payload не применяем напрямую и тем более не отправляем
+    // затем в GitHub. Сообщение лишь сообщает: «на сервере что-то изменилось».
+    let ablyPollTimer = null;
+    const requestServerRefresh = () => {
+      if (ablyPollTimer) clearTimeout(ablyPollTimer);
+      ablyPollTimer = setTimeout(() => {
+        ablyPollTimer = null;
+        doPollRef.current?.();
+      }, 600);
+    };
     channel.subscribe((msg) => {
-      // Защита от получения собственных сообщений
-      if (msg.data && msg.data.from === clientIdRef.current) return;
-      
-      if (msg.name === 'update' && msg.data && msg.data.key) {
-        const { key, value, ts } = msg.data;
-        // Пропускаем устаревшие сообщения (если уже приняли более свежее)
-        const lastTs = lastBroadcastTsRef.current[key] || 0;
-        if (ts <= lastTs) return;
-        lastBroadcastTsRef.current[key] = ts;
-        
-        console.log('[ABLY] Получено обновление для:', key);
-        skipPollRef.current = 1; // не даём polling'у перезаписать наши данные
-        
-        // Сохраняем позицию скролла
-        const sY = window.scrollY;
-        
-        // Применяем value через setter
-        const setter = stateSettersRef.current[key];
-        if (setter) {
-          setter(value);
-        } else {
-          console.warn('[ABLY] Нет setter для ключа:', key);
-        }
-        
-        // Восстанавливаем позицию скролла
-        setTimeout(() => window.scrollTo(0, sY), 0);
-      } else if (msg.name === 'record-added' && msg.data && msg.data.rec) {
-        // Инкрементальное обновление records — не тянем весь массив с GitHub
-        const { rec } = msg.data;
-        console.log('[ABLY] Новая запись:', rec.marker);
-        skipPollRef.current = 1;
-        const sY = window.scrollY;
-        setRecords(prev => {
-          // Защита от дублей (по timestamp)
-          if (prev.some(r => r.id === rec.id)) return prev;
-          const next = [...prev, rec];
-          recordsRef.current = next;
-          try { localStorage.setItem("records_local", JSON.stringify(next)); } catch {}
-          return next;
-        });
-        setTimeout(() => window.scrollTo(0, sY), 0);
-      } else if (msg.name === 'record-updated' && msg.data && msg.data.id) {
-        const { id, rec } = msg.data;
-        console.log('[ABLY] Обновлена запись:', id, rec.marker);
-        skipPollRef.current = 1;
-        const sY = window.scrollY;
-        setRecords(prev => {
-          const next = prev.map(r => r.id === id ? rec : r);
-          recordsRef.current = next;
-          try { localStorage.setItem("records_local", JSON.stringify(next)); } catch {}
-          return next;
-        });
-        setTimeout(() => window.scrollTo(0, sY), 0);
-      } else if (msg.name === 'record-deleted' && msg.data && msg.data.id) {
-        const { id } = msg.data;
-        console.log('[ABLY] Удалена запись:', id);
-        const tombstone = { id, deletedAt: Date.now(), client: msg.data.from || "remote" };
-        recordDeletionsRef.current = mergeById(recordDeletionsRef.current, [tombstone]);
-        setRecordDeletionIds(recordDeletionsRef.current);
-        skipPollRef.current = 1;
-        const sY = window.scrollY;
-        setRecords(prev => {
-          const next = prev.filter(r => r.id !== id);
-          recordsRef.current = next;
-          try { localStorage.setItem("records_local", JSON.stringify(next)); } catch {}
-          return next;
-        });
-        setTimeout(() => window.scrollTo(0, sY), 0);
-      } else if (msg.name === 'stock-op' && msg.data && msg.data.op) {
-        // Инкрементальная синхронизация склада через event sourcing
-        const { op } = msg.data;
-        console.log('[ABLY] Stock op:', op.type, op.marker || op.oldMarker);
-        skipPollRef.current = 1;
-        applyRemoteStockOp(op);
-      } else if (msg.name === 'changed') {
-        // Fallback: большой payload, нужно сделать polling
-        console.log('[ABLY] Signal changed для:', msg.data?.key);
-        if (doPollRef.current) doPollRef.current();
-      }
+      if (msg.data?.from === clientIdRef.current) return;
+      console.log('[ABLY] Server refresh signal:', msg.name, msg.data?.key || '');
+      requestServerRefresh();
     });
 
     ably.connection.on('connected', () => {
@@ -2367,83 +2333,102 @@ export default function App(){
 
     // ── Polling (fallback если Ably не работает) ──
     const poll = async () => {
-      if (skipPollRef.current > 0) {
-        skipPollRef.current--;
-        setSyncStatus(wsConnectedRef.current ? "ws" : "synced");
+      if (isPollingRef.current) {
+        pollAgainRef.current = true;
         return;
       }
+      if (!navigator.onLine) {
+        setSyncStatus("offline");
+        return;
+      }
+
+      isPollingRef.current = true;
       setSyncStatus("syncing");
       try {
-        const [r,deletions,p,ops,sCfg,sm2,al,nt,mvs] = await Promise.all([
-          sGet("records"), sGet("record-deletions"), sGet("prices"),
-          sGet("stock-ops"),
-          sGet("stock:cfg"), sGet("custom:markers"), sGet("marker-aliases"), sGet("marker-notes"),
-          sGet("stock-moves"),
+        const [r,deletions,p,ops,sCfg,sm2,al,nt,sub,mvs,pwd] = await Promise.all([
+          sGet("records", {allowCache:false}),
+          sGet("record-deletions", {allowCache:false}),
+          sGet("prices", {allowCache:false}),
+          sGet("stock-ops", {allowCache:false}),
+          sGet("stock:cfg", {allowCache:false}),
+          sGet("custom:markers", {allowCache:false}),
+          sGet("marker-aliases", {allowCache:false}),
+          sGet("marker-notes", {allowCache:false}),
+          sGet("subcategories", {allowCache:false}),
+          sGet("stock-moves", {allowCache:false}),
+          sGet("passwords", {allowCache:false}),
         ]);
-        const hash = JSON.stringify({r, deletions, p, ops, sCfg, sm2, al, nt, mvs});
-        if (hash === lastDataHashRef.current) {
-          setSyncStatus(wsConnectedRef.current ? "ws" : "synced");
-          return;
-        }
-        lastDataHashRef.current = hash;
+
+        const pendingByKey = new Map(getQueue().map(item => [item.key, item]));
+        const pendingValue = (key) => pendingByKey.get(key)?.val;
+        const mergePending = (key, remoteValue) => {
+          const item = pendingByKey.get(key);
+          if (!item) return remoteValue;
+          if(item.mode === "patch") return applyObjectPatch(remoteValue, item.patch);
+          const mergeFn = getMergeFn(key);
+          return mergeFn ? mergeFn(remoteValue, item.val) : item.val;
+        };
+
         const sY = window.scrollY;
         if (Array.isArray(deletions)) {
-          recordDeletionsRef.current = mergeById(deletions, recordDeletionsRef.current);
+          const mergedDeletions = mergePending("record-deletions", deletions);
+          recordDeletionsRef.current = Array.isArray(mergedDeletions) ? mergedDeletions : [];
           setRecordDeletionIds(recordDeletionsRef.current);
         }
-        // Merge records с локальными — не перезаписываем, не теряем несинхронизированные
-        if(Array.isArray(r)){
-          const localRecs = recordsRef.current;
-          const localIds = new Set(localRecs.map(rec => rec.id || JSON.stringify({ts:rec.timestamp,w:rec.workshop,m:rec.marker,q:rec.qty,d:rec.defect,a:rec.amount,rt:rec.recordType,c:rec.comment})));
-          const hasLocalUnsynced = r.length < localRecs.length || localRecs.some(rec => {
-            const key = rec.id || JSON.stringify({ts:rec.timestamp,w:rec.workshop,m:rec.marker,q:rec.qty,d:rec.defect,a:rec.amount,rt:rec.recordType,c:rec.comment});
-            return !r.some(rr => (rr.id || JSON.stringify({ts:rr.timestamp,w:rr.workshop,m:rr.marker,q:rr.qty,d:rr.defect,a:rr.amount,rt:rr.recordType,c:rr.comment})) === key);
-          });
-          if(hasLocalUnsynced){
-            const merged = mergeRecords(r, localRecs);
-            recordsRef.current = merged;
-            setRecords(merged);
-          } else {
-            recordsRef.current = r;
-            setRecords(r);
-          }
+
+        if (Array.isArray(r)) {
+          const mergedRecords = mergeRecords(r, pendingValue("records") || []);
+          recordsRef.current = mergedRecords;
+          setRecords(mergedRecords);
+          try { localStorage.setItem("records_local", JSON.stringify(mergedRecords)); } catch {}
         }
-        if(p && typeof p === "object" && !Array.isArray(p)) setPrices(p);
-        // BUG-A FIX: ВСЕГДА мёржим stock-ops, не сравниваем длины
-        if(Array.isArray(ops)){
-          const localOps = stockOpsRef.current;
-          // Проверяем есть ли локальные ops, которых нет на сервере
-          const serverIds = new Set(ops.map(o => o.opId));
-          const hasLocalUnsynced = localOps.some(o => !serverIds.has(o.opId));
-          if(hasLocalUnsynced || localOps.length > ops.length){
-            // Мёржим — не теряем локальные unsynced ops. Все отсутствующие
-            // на сервере opId обязательно ставим на повторную доставку.
-            for (const op of localOps) {
-              if (op?.opId && !serverIds.has(op.opId)) unsyncedOpsRef.current.add(op.opId);
-            }
-            const merged = mergeStockOps(ops, localOps);
-            stockOpsRef.current = merged;
-            const mergedStock = applyOpsToStock(merged);
-            stockRef.current = mergedStock;
-            setStockOps(merged);
-            setStock(mergedStock);
-          } else {
-            stockOpsRef.current = ops;
-            const serverStock = applyOpsToStock(ops);
-            stockRef.current = serverStock;
-            setStockOps(ops);
-            setStock(serverStock);
-          }
+
+        if (Array.isArray(ops)) {
+          const outbox = getStockOutbox();
+          const mergedOps = mergeStockOps(ops, outbox);
+          stockOpsRef.current = mergedOps;
+          persistStockSnapshot(mergedOps);
+          const mergedStock = applyOpsToStock(mergedOps);
+          stockRef.current = mergedStock;
+          setStockOps(mergedOps);
+          setStock(mergedStock);
+          const serverIds = new Set(ops.map(op => op?.opId).filter(Boolean));
+          const confirmed = new Set(outbox.filter(op => serverIds.has(op.opId)).map(op => op.opId));
+          const remainingOutbox = removeStockOutboxIds(confirmed);
+          unsyncedOpsRef.current = new Set(remainingOutbox.map(op => op.opId).filter(Boolean));
+          if (remainingOutbox.length > 0) scheduleStockSync(250, false);
         }
-        if(sCfg && typeof sCfg === "object" && !Array.isArray(sCfg)) setStockCfg(sCfg);
-        if(sm2 && typeof sm2 === "object" && !Array.isArray(sm2)) setMarkers(sm2);
-        if(al && typeof al === "object" && !Array.isArray(al)) setAliases(al);
-        if(nt && typeof nt === "object" && !Array.isArray(nt)) setNotes(nt);
-        if(Array.isArray(mvs)) setStockMoves(mvs);
+
+        const nextPrices = mergePending("prices", ensureObj(p));
+        pricesRef.current = ensureObj(nextPrices); setPrices(pricesRef.current);
+        const nextCfg = mergePending("stock:cfg", ensureObj(sCfg));
+        stockCfgRef.current = ensureObj(nextCfg); setStockCfg(stockCfgRef.current);
+        const nextMarkers = mergePending("custom:markers", ensureObj(sm2));
+        markersRef.current = Object.keys(ensureObj(nextMarkers)).length ? ensureObj(nextMarkers) : DEFAULT_MARKERS;
+        setMarkers(markersRef.current);
+        const nextAliases = mergePending("marker-aliases", ensureObj(al));
+        aliasesRef.current = ensureObj(nextAliases); setAliases(aliasesRef.current);
+        const nextNotes = mergePending("marker-notes", ensureObj(nt));
+        notesRef.current = ensureObj(nextNotes); setNotes(notesRef.current);
+        const nextSubs = mergePending("subcategories", ensureObj(sub));
+        subcategoriesRef.current = ensureObj(nextSubs); setSubcategories(subcategoriesRef.current);
+        const nextMoves = mergePending("stock-moves", Array.isArray(mvs) ? mvs : []);
+        stockMovesRef.current = Array.isArray(nextMoves) ? nextMoves : []; setStockMoves(stockMovesRef.current);
+        const nextPasswords = mergePending("passwords", ensureObj(pwd));
+        passwordsRef.current = ensureObj(nextPasswords); setPasswords(passwordsRef.current);
+
+        setPendingCount(getQueue().length + getStockOutbox().length);
         setTimeout(()=>window.scrollTo(0, sY), 0);
         setSyncStatus(wsConnectedRef.current ? "ws" : "synced");
-      } catch(e) {
-        setSyncStatus("idle");
+      } catch(error) {
+        console.warn('[POLL] Ошибка:', error.message);
+        setSyncStatus(navigator.onLine ? "idle" : "offline");
+      } finally {
+        isPollingRef.current = false;
+        if (pollAgainRef.current) {
+          pollAgainRef.current = false;
+          setTimeout(() => doPollRef.current?.(), 250);
+        }
       }
     };
 
@@ -2451,61 +2436,58 @@ export default function App(){
 
     // ── flushQueue: отправляет накопленные в офлайне изменения на GitHub ──
     const flushQueue = async () => {
-      // Защита от параллельных вызовов
-      if (isFlushingRef.current) {
-        console.log('[OFFLINE] flushQueue уже идёт, пропускаем');
+      if (isFlushingRef.current) return;
+      if (!navigator.onLine) {
+        setSyncStatus("offline");
         return;
       }
       isFlushingRef.current = true;
       try {
-        const q = getQueue();
-        if (q.length === 0) {
-          setPendingCount(0);
-          // Даже если очередь пуста — перечитываем данные с сервера
-          // (телефон мог пропустить изменения пока был офлайн)
-          if (doPollRef.current) {
-            console.log('[OFFLINE] Очередь пуста, перечитываем данные с сервера');
-            doPollRef.current();
-          }
+        const snapshot = getQueue();
+        if (snapshot.length === 0) {
+          if (getStockOutbox().length > 0) scheduleStockSync(0);
+          setPendingCount(getStockOutbox().length);
+          doPollRef.current?.();
           return;
         }
-        console.log(`[OFFLINE] Отправляем очередь: ${q.length} элементов`);
+
+        console.log(`[OFFLINE] Отправляем очередь: ${snapshot.length} элементов`);
         setSyncStatus("syncing");
-        const remaining = [];
-        for (const item of q) {
+        for (const item of snapshot) {
           try {
-            // Используем mergeFn для всех ключей — иначе теряем данные другого устройства
-            const mergeFn = getMergeFn(item.key);
-            const result = await dbSet(item.key, item.val, mergeFn);
-            if (result.ok) {
-              cacheSet(item.key, item.val);
-              // Рассылаем через Ably — другие устройства тоже получат обновление
-              if (ablyChannelRef.current) {
-                try {
-                  const payload = { key: item.key, value: item.val, ts: Date.now(), from: clientIdRef.current };
-                  const size = new TextEncoder().encode(JSON.stringify(payload)).length;
-                  if (size < 60000) {
-                    ablyChannelRef.current.publish('update', payload);
-                  } else {
-                    ablyChannelRef.current.publish('changed', { key: item.key, ts: Date.now(), from: clientIdRef.current });
-                  }
-                } catch {}
-              }
-            } else {
-              remaining.push(item);
+            const isPatch = item.mode === "patch";
+            const result = await dbSet(
+              item.key,
+              isPatch ? item.patch : item.val,
+              isPatch ? applyObjectPatch : getMergeFn(item.key),
+            );
+            if (!result.ok) continue;
+
+            // Удаляем только именно ту версию, которую отправили. Новая запись
+            // того же key, созданная во время flush, останется в очереди.
+            removeQueuedWrite(item.key, item.id);
+            const committedValue = result.value ?? item.val;
+            cacheSet(item.key, committedValue);
+            const setter = stateSettersRef.current[item.key];
+            if (setter) setter(committedValue);
+            if (item.key === "records" && Array.isArray(committedValue)) {
+              recordsRef.current = committedValue;
+              try { localStorage.setItem("records_local", JSON.stringify(committedValue)); } catch {}
             }
-          } catch (e) {
-            console.warn(`[OFFLINE] Ошибка отправки "${item.key}":`, e.message);
-            remaining.push(item);
+            publishCommittedChange(item.key);
+          } catch (error) {
+            console.warn(`[OFFLINE] Ошибка отправки "${item.key}":`, error.message);
           }
         }
-        setQueue(remaining);
-        setPendingCount(remaining.length);
-        setSyncStatus(remaining.length === 0 ? (wsConnectedRef.current ? "ws" : "synced") : "offline");
-        if (remaining.length === 0 && doPollRef.current) {
-          // После успешной отправки — подтянем свежие данные
-          setTimeout(() => doPollRef.current && doPollRef.current(), 500);
-        }
+
+        const remaining = getQueue();
+        const stockPending = getStockOutbox().length;
+        setPendingCount(remaining.length + stockPending);
+        if (stockPending > 0) scheduleStockSync(0);
+        setSyncStatus(remaining.length + stockPending === 0
+          ? (wsConnectedRef.current ? "ws" : "synced")
+          : "offline");
+        if (remaining.length === 0) setTimeout(() => doPollRef.current?.(), 500);
       } finally {
         isFlushingRef.current = false;
       }
@@ -2516,10 +2498,15 @@ export default function App(){
     const handleOnline = () => {
       console.log('[OFFLINE] Сеть восстановлена (событие online)');
       setIsOnline(true);
-      // Сбрасываем хэш чтобы polling гарантированно применил свежие данные
-      lastDataHashRef.current = "";
-      // Небольшая задержка чтобы соединение установилось
-      setTimeout(() => flushQueueRef.current && flushQueueRef.current(), 1000);
+      syncRetriesRef.current = 0;
+      if (stockRetryTimerRef.current) {
+        clearTimeout(stockRetryTimerRef.current);
+        stockRetryTimerRef.current = null;
+      }
+      // Сначала доставляем локальную очередь, затем сверяем сервер.
+      setTimeout(() => flushQueueRef.current?.(), 500);
+      if (getStockOutbox().length > 0) scheduleStockSync(600);
+      setTimeout(() => doPollRef.current?.(), 1_000);
     };
     const handleOffline = () => {
       console.log('[OFFLINE] Сеть потеряна — работаем офлайн');
@@ -2546,15 +2533,20 @@ export default function App(){
       }
       // Также если мы "онлайн" но pendingCount > 0 — попробуем flush
       // (возможно flushQueue не сработал ранее)
-      if (currentState && getQueue().length > 0 && !isSyncingOpsRef.current) {
-        console.log(`[OFFLINE] Periodic check: очередь не пуста (${getQueue().length}), flush`);
-        flushQueueRef.current && flushQueueRef.current();
+      if (currentState && getQueue().length > 0) {
+        flushQueueRef.current?.();
+      }
+      if (currentState && getStockOutbox().length > 0 && !isSyncingOpsRef.current) {
+        scheduleStockSync(0, false);
       }
     }, 5000);
     
-    // Если стартовали онлайн, но в очереди что-то есть — отправим
+    // Если стартовали онлайн с локальными изменениями — доставим их.
     if (navigator.onLine && getQueue().length > 0) {
-      setTimeout(() => flushQueueRef.current && flushQueueRef.current(), 2000);
+      setTimeout(() => flushQueueRef.current?.(), 1_000);
+    }
+    if (navigator.onLine && getStockOutbox().length > 0) {
+      scheduleStockSync(1_200);
     }
 
     const initialTimer = setTimeout(poll, 3000);
@@ -2564,6 +2556,11 @@ export default function App(){
       clearTimeout(initialTimer);
       clearInterval(interval);
       clearInterval(onlineCheckInterval);
+      if (ablyPollTimer) clearTimeout(ablyPollTimer);
+      if (stockSyncTimerRef.current) clearTimeout(stockSyncTimerRef.current);
+      if (stockRetryTimerRef.current) clearTimeout(stockRetryTimerRef.current);
+      stockSyncTimerRef.current = null;
+      stockRetryTimerRef.current = null;
       channel.unsubscribe();
       // Очищаем Ably connection handlers (H1 fix)
       ably.connection.off('connected');
@@ -2573,6 +2570,11 @@ export default function App(){
       // Очищаем все debounced save timers (H2 fix)
       Object.values(saveTimersRef.current).forEach(t => clearTimeout(t));
       saveTimersRef.current = {};
+      for (const waiters of Object.values(saveWaitersRef.current)) {
+        for (const resolve of waiters) resolve({ok:true, queued:true});
+      }
+      saveWaitersRef.current = {};
+      resolveStockWaiters({ok:true, queued:true});
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
@@ -2630,48 +2632,61 @@ export default function App(){
         recordDeletionsRef.current = deletions;
         setRecordDeletionIds(deletions);
       }
-      // Merge records с локальным кешем localStorage — не теряем несинхронизированные
+      // Восстанавливаем только подтверждённые сервером записи + явную
+      // локальную очередь. Для совместимости один раз подхватываем records_local,
+      // созданный старой версией до появления durable queue.
       if(Array.isArray(r)){
         let localRecords = [];
         try { localRecords = JSON.parse(localStorage.getItem("records_local") || "[]"); } catch {}
-        if(localRecords.length > 0){
-          const merged = mergeRecords(r, localRecords);
-          recordsRef.current = merged;
-          setRecords(merged);
-          console.log(`[RECORDS] Загружено ${r.length} с сервера, ${localRecords.length} локально, merged: ${merged.length}`);
-        } else {
-          const cleaned = mergeRecords(r, []);
-          recordsRef.current = cleaned;
-          setRecords(cleaned);
+        const pendingRecords = getQueue().find(item => item.key === "records")?.val;
+        const mergedRecords = mergeRecords(r, Array.isArray(pendingRecords) ? pendingRecords : localRecords);
+        recordsRef.current = mergedRecords;
+        setRecords(mergedRecords);
+        try { localStorage.setItem("records_local", JSON.stringify(mergedRecords)); } catch {}
+        const serverVersion = JSON.stringify(mergeRecords(r, []));
+        if (!pendingRecords && JSON.stringify(mergedRecords) !== serverVersion) {
+          enqueueWrite("records", mergedRecords);
+          setPendingCount(getQueue().length + getStockOutbox().length);
         }
       }
-      if(p && typeof p === "object" && !Array.isArray(p)) setPrices(p);
+      if(p && typeof p === "object" && !Array.isArray(p)) {
+        pricesRef.current = p;
+        setPrices(p);
+      }
       
-      // Миграция на event sourcing:
-      // Если stock-ops.json есть — используем его
-      // Если нет — читаем старые stock.json или stock:main + stock:ws:X
-      // и преобразуем в начальные init-операции
+      // Event sourcing: серверный журнал + явный outbox локальных операций.
       if(Array.isArray(ops) && ops.length > 0){
-        // BUG-A FIX: ВСЕГДА мёржим с локальным кешем, не сравниваем длины!
-        // Локальный массив может быть короче, но содержать уникальные unsynced ops
         let localCached = [];
         try { localCached = JSON.parse(localStorage.getItem("stock_ops_local") || "[]"); } catch {}
-        const merged = mergeStockOps(ops, localCached);
+        const serverIds = new Set(ops.map(op => op?.opId).filter(Boolean));
+        let outbox = getStockOutbox();
+
+        // Одноразовая миграция со старой схемы: локальные операции, которых ещё
+        // нет на сервере, превращаем в явный outbox. После этого произвольный
+        // Ably/localStorage payload уже не может сам попасть в GitHub.
+        try {
+          if (localStorage.getItem(STOCK_OUTBOX_MIGRATED_KEY) !== "1") {
+            const outboxIds = new Set(outbox.map(op => op?.opId).filter(Boolean));
+            const legacyMissing = localCached.filter(op => op?.opId && !serverIds.has(op.opId) && !outboxIds.has(op.opId));
+            if (legacyMissing.length > 0) outbox = setStockOutbox([...outbox, ...legacyMissing]);
+            localStorage.setItem(STOCK_OUTBOX_MIGRATED_KEY, "1");
+          }
+        } catch (error) {
+          console.warn('[STOCK] Ошибка миграции outbox:', error.message);
+        }
+
+        const alreadyConfirmed = new Set(outbox.filter(op => serverIds.has(op.opId)).map(op => op.opId));
+        outbox = removeStockOutboxIds(alreadyConfirmed);
+        const merged = mergeStockOps(ops, outbox);
         stockOpsRef.current = merged;
+        persistStockSnapshot(merged);
         const mergedStock = applyOpsToStock(merged);
         stockRef.current = mergedStock;
         setStockOps(merged);
         setStock(mergedStock);
-        // Помечаем недостающие на сервере как unsynced
-        const serverIds = new Set(ops.map(o => o.opId));
-        for(const op of localCached){
-          if(!serverIds.has(op.opId)) unsyncedOpsRef.current.add(op.opId);
-        }
-        if(unsyncedOpsRef.current.size > 0){
-          console.log(`[STOCK] Восстановлено ${unsyncedOpsRef.current.size} несинхронизированных ops из localStorage`);
-          setTimeout(() => syncStockOpsRef.current && syncStockOpsRef.current(), 2000);
-        }
-        console.log(`[STOCK] Загружено ${ops.length} операций (local: ${localCached.length}, merged: ${merged.length})`);
+        unsyncedOpsRef.current = new Set(outbox.map(op => op?.opId).filter(Boolean));
+        if(outbox.length > 0) scheduleStockSync(1_000);
+        console.log(`[STOCK] Сервер: ${ops.length}, outbox: ${outbox.length}, итог: ${merged.length}`);
       } else {
         // Миграция: читаем старые данные
         let oldStock = null;
@@ -2732,8 +2747,10 @@ export default function App(){
           stockRef.current = initStock;
           setStockOps(initOps);
           setStock(initStock);
-          try { localStorage.setItem("stock_ops_local", JSON.stringify(initOps)); } catch {}
-          await sSet("stock-ops", initOps);
+          persistStockSnapshot(initOps);
+          setStockOutbox(initOps);
+          unsyncedOpsRef.current = new Set(initOps.map(op => op.opId));
+          await syncStockOpsRef.current?.();
           console.log(`[MIGRATION] Создано ${initOps.length} init-операций из старого stock`);
         } else {
           setStock({ main: {}, ws: { SMART: {}, Бегемот: {} } });
@@ -2802,6 +2819,10 @@ export default function App(){
           }
         } catch {}
       }
+    }).catch(error => {
+      // Сетевая ошибка не означает, что фото отсутствует: не заносим его в no-photo cache.
+      console.warn(`[photo] Не удалось загрузить «${marker}»:`, error.message);
+      setMarkerPhoto(null);
     });
   },[marker]);
 
@@ -2972,12 +2993,6 @@ export default function App(){
     recordsRef.current = next;
     // Не await'им — форма сбрасывается мгновенно, GitHub пишется в фоне
     saveAndSync("records", next, setRecords);
-    // Отправляем только новую запись через Ably (не весь массив — он >60KB)
-    if (ablyChannelRef.current && navigator.onLine) {
-      try {
-        ablyChannelRef.current.publish('record-added', { rec, from: clientIdRef.current });
-      } catch {}
-    }
 
     // Склад: списываем через stockDelta (для refund = 0, для sale = qty или defect)
     const delta = stockDelta(rec);
@@ -3034,13 +3049,6 @@ export default function App(){
     recordsRef.current = next;
     // Не await'им — модалка закрывается мгновенно
     saveAndSync("records", next, setRecords);
-    // Отправляем обновлённую запись по ID через Ably
-    if (ablyChannelRef.current && navigator.onLine) {
-      try {
-        const p = ablyChannelRef.current.publish('record-updated', { id: recId, rec: updated, from: clientIdRef.current });
-        if (p && p.catch) p.catch(() => {});
-      } catch {}
-    }
     setEditRec(null);
   }
 
@@ -3068,18 +3076,11 @@ export default function App(){
     setRecordDeletionIds(nextDeletions);
     // Tombstone отправляем раньше массива records. Даже если устройство было офлайн,
     // последующий merge не воскресит удалённую запись.
-    sSet("record-deletions", nextDeletions).catch(()=>{});
+    commitImmediate("record-deletions", nextDeletions).catch(()=>{});
     const next = recordsRef.current.filter(r => r.id !== recId);
     recordsRef.current = next;
     // Не await'им — модалка закрывается мгновенно
     saveAndSync("records", next, setRecords);
-    // Отправляем ID удалённой записи через Ably
-    if (ablyChannelRef.current && navigator.onLine) {
-      try {
-        const p = ablyChannelRef.current.publish('record-deleted', { id: recId, from: clientIdRef.current });
-        if (p && p.catch) p.catch(() => {});
-      } catch {}
-    }
     setEditRec(null);
   }
 
@@ -3257,25 +3258,13 @@ export default function App(){
       }
     }
     
-    // Записываем все изменения параллельно
-    const writes = [sSet("custom:markers", nextMarkers)];
-    if(aliases[m]) writes.push(sSet("marker-aliases", nextAliases));
-    if(prices[m] !== undefined) writes.push(sSet("prices", nextPrices));
-    if(notes[m] !== undefined) writes.push(sSet("marker-notes", nextNotes));
-    if(stockCfg[m] !== undefined) writes.push(sSet("stock:cfg", nextCfg));
-    
-    // Ably
-    if (ablyChannelRef.current && navigator.onLine) {
-      const ts = Date.now();
-      try {
-        ablyChannelRef.current.publish('update', { key: "custom:markers", value: nextMarkers, ts, from: clientIdRef.current });
-        if(aliases[m]) ablyChannelRef.current.publish('update', { key: "marker-aliases", value: nextAliases, ts, from: clientIdRef.current });
-        if(prices[m] !== undefined) ablyChannelRef.current.publish('update', { key: "prices", value: nextPrices, ts, from: clientIdRef.current });
-        if(notes[m] !== undefined) ablyChannelRef.current.publish('update', { key: "marker-notes", value: nextNotes, ts, from: clientIdRef.current });
-        if(stockCfg[m] !== undefined) ablyChannelRef.current.publish('update', { key: "stock:cfg", value: nextCfg, ts, from: clientIdRef.current });
-      } catch {}
-    }
-    
+    // Записываем все изменения параллельно. Ably получает только короткий
+    // сигнал после подтверждённого GitHub commit каждого файла.
+    const writes = [commitImmediate("custom:markers", nextMarkers)];
+    if(aliases[m]) writes.push(commitImmediate("marker-aliases", nextAliases));
+    if(prices[m] !== undefined) writes.push(commitImmediate("prices", nextPrices));
+    if(notes[m] !== undefined) writes.push(commitImmediate("marker-notes", nextNotes));
+    if(stockCfg[m] !== undefined) writes.push(commitImmediate("stock:cfg", nextCfg));
     try {
       await Promise.all(writes);
     } catch(e) { console.warn('[deleteMarker] error:', e.message); }
@@ -3375,34 +3364,24 @@ export default function App(){
     photoGet(oldMain).then(async photo => {
       if(photo){
         try {
-          await photoSet(newMain, photo);
-          await photoDelete(oldMain);
+          const saved = await photoSet(newMain, photo);
+          if(!saved.ok) throw new Error(saved.error || "PHOTO_SAVE_FAILED");
+          const removed = await photoDelete(oldMain);
+          if(!removed.ok) throw new Error(removed.error || "PHOTO_DELETE_FAILED");
         } catch(e) { console.warn('[promoteAlias] photo error:', e.message); }
       }
-    });
+    }).catch(e => console.warn('[promoteAlias] photo read error:', e.message));
     
-    // Записываем ВСЕ изменения параллельно
+    // Записываем ВСЕ изменения параллельно. Публикуется только сигнал
+    // после подтверждённой записи каждого файла.
     const writes = [
-      sSet("custom:markers", nextMarkers),
-      sSet("marker-aliases", nextAliases),
+      commitImmediate("custom:markers", nextMarkers),
+      commitImmediate("marker-aliases", nextAliases),
     ];
-    if(recChanged) writes.push(sSet("records", nextRecords));
-    if(prices[oldMain] !== undefined) writes.push(sSet("prices", nextPrices));
-    if(stockCfg[oldMain] !== undefined) writes.push(sSet("stock:cfg", nextCfg));
-    if(notes[oldMain] !== undefined) writes.push(sSet("marker-notes", nextNotes));
-    
-    // Ably
-    if (ablyChannelRef.current && navigator.onLine) {
-      const ts = Date.now();
-      try {
-        ablyChannelRef.current.publish('update', { key: "custom:markers", value: nextMarkers, ts, from: clientIdRef.current });
-        ablyChannelRef.current.publish('update', { key: "marker-aliases", value: nextAliases, ts, from: clientIdRef.current });
-        if(recChanged) ablyChannelRef.current.publish('changed', { key: "records", ts, from: clientIdRef.current });
-        if(prices[oldMain] !== undefined) ablyChannelRef.current.publish('update', { key: "prices", value: nextPrices, ts, from: clientIdRef.current });
-        if(stockCfg[oldMain] !== undefined) ablyChannelRef.current.publish('update', { key: "stock:cfg", value: nextCfg, ts, from: clientIdRef.current });
-        if(notes[oldMain] !== undefined) ablyChannelRef.current.publish('update', { key: "marker-notes", value: nextNotes, ts, from: clientIdRef.current });
-      } catch {}
-    }
+    if(recChanged) writes.push(commitImmediate("records", nextRecords));
+    if(prices[oldMain] !== undefined) writes.push(commitImmediate("prices", nextPrices));
+    if(stockCfg[oldMain] !== undefined) writes.push(commitImmediate("stock:cfg", nextCfg));
+    if(notes[oldMain] !== undefined) writes.push(commitImmediate("marker-notes", nextNotes));
     
     if(hasInStock){
       appendStockOp("rename", { oldMarker: oldMain, newMarker: newMain });
@@ -3485,8 +3464,10 @@ export default function App(){
     photoGet(oldName).then(async photo => {
       if(photo){
         try {
-          await photoSet(newName, photo);
-          await photoDelete(oldName);
+          const saved = await photoSet(newName, photo);
+          if(!saved.ok) throw new Error(saved.error || "PHOTO_SAVE_FAILED");
+          const removed = await photoDelete(oldName);
+          if(!removed.ok) throw new Error(removed.error || "PHOTO_DELETE_FAILED");
           setPhotoCache(p=>{
             const next = {...p};
             next[newName] = photo;
@@ -3495,29 +3476,17 @@ export default function App(){
           });
         } catch(e) { console.warn('[rename] photo error:', e.message); }
       }
-    });
+    }).catch(e => console.warn('[rename] photo read error:', e.message));
     
-    // Записываем ВСЕ изменения параллельно одним пакетом
-    // Каждое с mergeFn — при 409 conflict данные не теряются
+    // Записываем ВСЕ изменения параллельно одним пакетом.
+    // Каждое изменение сохраняется в durable queue до GitHub commit.
     const writes = [
-      sSet("custom:markers", nextMarkers),
+      commitImmediate("custom:markers", nextMarkers),
     ];
-    if(recChanged) writes.push(sSet("records", nextRecords));
-    if(prices[oldName] !== undefined) writes.push(sSet("prices", nextPrices));
-    if(stockCfg[oldName] !== undefined) writes.push(sSet("stock:cfg", nextCfg));
-    if(notes[oldName] !== undefined) writes.push(sSet("marker-notes", nextNotes));
-    
-    // Ably — рассылаем все обновления
-    if (ablyChannelRef.current && navigator.onLine) {
-      const ts = Date.now();
-      try {
-        ablyChannelRef.current.publish('update', { key: "custom:markers", value: nextMarkers, ts, from: clientIdRef.current });
-        if(recChanged) ablyChannelRef.current.publish('changed', { key: "records", ts, from: clientIdRef.current });
-        if(prices[oldName] !== undefined) ablyChannelRef.current.publish('update', { key: "prices", value: nextPrices, ts, from: clientIdRef.current });
-        if(stockCfg[oldName] !== undefined) ablyChannelRef.current.publish('update', { key: "stock:cfg", value: nextCfg, ts, from: clientIdRef.current });
-        if(notes[oldName] !== undefined) ablyChannelRef.current.publish('update', { key: "marker-notes", value: nextNotes, ts, from: clientIdRef.current });
-      } catch {}
-    }
+    if(recChanged) writes.push(commitImmediate("records", nextRecords));
+    if(prices[oldName] !== undefined) writes.push(commitImmediate("prices", nextPrices));
+    if(stockCfg[oldName] !== undefined) writes.push(commitImmediate("stock:cfg", nextCfg));
+    if(notes[oldName] !== undefined) writes.push(commitImmediate("marker-notes", nextNotes));
     
     // stock-ops — через appendStockOp (тоже параллельно)
     if(hasInStock){
