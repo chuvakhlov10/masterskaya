@@ -63,5 +63,9 @@ export function deriveSyncView({ online, syncStatus, pendingCount, lastError, bu
     return { kind: "live", icon: "⚡", label: "Сохранено · Live" };
   }
 
-  return { kind: "saved", icon: "✓", label: "Сохранено" };
+  if (syncStatus === "synced") {
+    return { kind: "saved", icon: "✓", label: "Сохранено" };
+  }
+
+  return { kind: "sending", icon: "…", label: "Проверка..." };
 }
