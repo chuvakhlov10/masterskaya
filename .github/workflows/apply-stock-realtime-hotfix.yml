@@ -46,7 +46,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git add -A src/App.jsx tests/sync-core.test.mjs .hotfix-trigger
+          git add -A src/App.jsx tests/sync-core.test.mjs
           if ! git diff --cached --quiet; then
             git diff --cached --check
             git commit -m "Fix realtime stock refresh on open devices"
