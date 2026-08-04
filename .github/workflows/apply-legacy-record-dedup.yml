@@ -1,0 +1,54 @@
+name: Apply legacy record dedup hotfix
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-push:
+    if: github.head_ref == 'hotfix/legacy-record-dedup'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout hotfix branch
+        uses: actions/checkout@v4
+        with:
+          ref: hotfix/legacy-record-dedup
+          fetch-depth: 0
+
+      - name: Merge current main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git merge --no-edit origin/main
+
+      - name: Apply patch
+        run: python3 scripts/apply-legacy-record-dedup.py
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests and production build
+        run: npm run check
+
+      - name: Commit and push hotfix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -A src/sync-core.js tests/sync-core.test.mjs
+          if ! git diff --cached --quiet; then
+            git diff --cached --check
+            git commit -m "Prevent migrated legacy record duplication"
+          fi
+          git push origin HEAD:hotfix/legacy-record-dedup
