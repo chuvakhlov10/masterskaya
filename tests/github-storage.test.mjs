@@ -148,3 +148,18 @@ test('writes to one key are serialized', async () => {
 
   assert.equal(maxActiveRequests, 1);
 });
+
+test('backup status is read from the data-backups branch', async () => {
+  let requestedUrl = '';
+  const expected = { last_attempt: { valid: true }, latest_good: { counts: { records: 10 } } };
+  const storage = await loadStorage(async (url) => {
+    requestedUrl = String(url);
+    return jsonResponse({ sha: 'status-sha', content: encodeJson(expected) });
+  });
+
+  const result = await storage.backupStatusGet();
+  assert.deepEqual(result, expected);
+  const parsed = new URL(requestedUrl);
+  assert.equal(parsed.pathname.endsWith('/contents/status.json'), true);
+  assert.equal(parsed.searchParams.get('ref'), 'data-backups');
+});
