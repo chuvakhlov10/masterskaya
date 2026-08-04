@@ -39,6 +39,33 @@ export function recordVersion(record) {
   return Number.isFinite(value) ? value : 0;
 }
 
+export function recordRevision(record) {
+  if (!record || typeof record !== "object") return 0;
+  const value = Number(record.revision);
+  if (Number.isInteger(value) && value >= 0) return value;
+  return record.id ? 1 : 0;
+}
+
+export function sameRecordVersion(current, opened) {
+  if (!current || !opened || typeof current !== "object" || typeof opened !== "object") return false;
+  if (current.id || opened.id) {
+    if (!current.id || current.id !== opened.id) return false;
+  }
+  return recordRevision(current) === recordRevision(opened)
+    && String(current.lastMutationId || "") === String(opened.lastMutationId || "")
+    && recordVersion(current) === recordVersion(opened);
+}
+
+function compareRecordState(candidate, previous) {
+  const revisionDiff = recordRevision(candidate) - recordRevision(previous);
+  if (revisionDiff) return revisionDiff;
+  const versionDiff = recordVersion(candidate) - recordVersion(previous);
+  if (versionDiff) return versionDiff;
+  const mutationDiff = String(candidate?.lastMutationId || "").localeCompare(String(previous?.lastMutationId || ""));
+  if (mutationDiff) return mutationDiff;
+  return canonicalJson(candidate).localeCompare(canonicalJson(previous));
+}
+
 
 // Finds the exact record selected by the user. Modern records are resolved by
 // immutable id. Legacy records without id may be resolved only when their
@@ -76,7 +103,7 @@ export function mergeRecords(remote, local, deletedIds = new Set()) {
     if (!key) continue;
     if (record.id && deleted.has(record.id)) continue;
     const previous = map.get(key);
-    if (!previous || recordVersion(record) >= recordVersion(previous)) map.set(key, record);
+    if (!previous || compareRecordState(record, previous) >= 0) map.set(key, record);
   }
 
   return [...map.values()].sort((a, b) => {
@@ -105,6 +132,13 @@ export function stockOpIdentity(op) {
     delta: op.delta,
     qty: op.qty,
     recordId: op.recordId,
+    mutationId: op.mutationId,
+    baseMutationId: op.baseMutationId,
+    baseRevision: op.baseRevision,
+    revision: op.revision,
+    mutationKind: op.mutationKind,
+    before: op.before,
+    after: op.after,
     reason: op.reason,
   })}`;
 }
@@ -136,6 +170,72 @@ function parseLocation(location, workshops) {
   return workshops.includes(workshop) ? { scope: "ws", workshop } : null;
 }
 
+function recordMutationPriority(op) {
+  return op?.mutationKind === "delete" ? 1 : 0;
+}
+
+function compareRecordEffectTerminal(candidate, previous) {
+  const deleteDiff = recordMutationPriority(candidate) - recordMutationPriority(previous);
+  if (deleteDiff) return deleteDiff;
+  const revisionDiff = Number(candidate.revision) - Number(previous.revision);
+  if (revisionDiff) return revisionDiff;
+  const timeDiff = Number(candidate.updatedAt ?? candidate.ts ?? 0) - Number(previous.updatedAt ?? previous.ts ?? 0);
+  if (timeDiff) return timeDiff;
+  return String(candidate.mutationId).localeCompare(String(previous.mutationId));
+}
+
+function traceRecordEffectChain(candidate, byMutationId) {
+  const reversed = [];
+  const visited = new Set();
+  let current = candidate;
+  while (current) {
+    if (visited.has(current.mutationId)) return null;
+    visited.add(current.mutationId);
+    reversed.push(current);
+    const parentId = typeof current.baseMutationId === "string" ? current.baseMutationId : "";
+    if (!parentId) return reversed.reverse();
+    const parent = byMutationId.get(parentId);
+    if (!parent || Number(parent.revision) !== Number(current.baseRevision)) return null;
+    current = parent;
+  }
+  return null;
+}
+
+export function selectRecordEffectOps(ops) {
+  const groups = new Map();
+  for (const op of Array.isArray(ops) ? ops : []) {
+    if (!op || op.type !== "record-effect" || !op.recordId || !op.mutationId) continue;
+    const baseRevision = Number(op.baseRevision);
+    const revision = Number(op.revision);
+    if (!Number.isInteger(baseRevision) || baseRevision < 0 ||
+        !Number.isInteger(revision) || revision <= baseRevision) continue;
+    if (!groups.has(op.recordId)) groups.set(op.recordId, []);
+    groups.get(op.recordId).push(op);
+  }
+
+  const selected = [];
+  for (const recordOps of groups.values()) {
+    const byMutationId = new Map(recordOps.map(op => [op.mutationId, op]));
+    const candidates = [...recordOps].sort((a, b) => compareRecordEffectTerminal(b, a));
+    for (const candidate of candidates) {
+      const chain = traceRecordEffectChain(candidate, byMutationId);
+      if (!chain) continue;
+      selected.push(...chain);
+      break;
+    }
+  }
+
+  const unique = new Map();
+  for (const op of selected) {
+    const identity = stockOpIdentity(op);
+    if (identity && !unique.has(identity)) unique.set(identity, op);
+  }
+  return [...unique.values()].sort((a, b) =>
+    Number(a?.ts || 0) - Number(b?.ts || 0) ||
+    String(stockOpIdentity(a)).localeCompare(String(stockOpIdentity(b)))
+  );
+}
+
 export function applyOpsToStock(ops, options = {}) {
   const workshops = Array.isArray(options.workshops) && options.workshops.length
     ? options.workshops
@@ -160,6 +260,9 @@ export function applyOpsToStock(ops, options = {}) {
     const tsDiff = Number(a.ts) - Number(b.ts);
     return tsDiff || String(stockOpIdentity(a)).localeCompare(String(stockOpIdentity(b)));
   });
+  const selectedRecordEffectIds = new Set(
+    selectRecordEffectOps(sortedOps).map(op => stockOpIdentity(op)).filter(Boolean)
+  );
 
   const renamedTo = new Map();
   const resolveMarker = (marker) => {
@@ -178,6 +281,14 @@ export function applyOpsToStock(ops, options = {}) {
     if (!parsed) return null;
     return parsed.scope === "main" ? result.main : result.ws[parsed.workshop];
   };
+  const applyRecordEffect = (effect, multiplier) => {
+    if (!effect || typeof effect !== "object") return;
+    const bucket = getBucket(effect.location);
+    const marker = resolveMarker(effect.marker);
+    const qty = Number(effect.qty);
+    if (!bucket || !marker || !Number.isFinite(qty) || qty <= 0) return;
+    bucket[marker] = (Number(bucket[marker]) || 0) + multiplier * qty;
+  };
 
   for (const op of sortedOps) {
     try {
@@ -191,6 +302,13 @@ export function applyOpsToStock(ops, options = {}) {
           bucket[newMarker] = (Number(bucket[newMarker]) || 0) + (Number(bucket[oldMarker]) || 0);
           delete bucket[oldMarker];
         }
+        continue;
+      }
+
+      if (op.type === "record-effect") {
+        if (!selectedRecordEffectIds.has(stockOpIdentity(op))) continue;
+        applyRecordEffect(op.before, 1);
+        applyRecordEffect(op.after, -1);
         continue;
       }
 
@@ -232,6 +350,16 @@ function itemVersion(item) {
   return 0;
 }
 
+function compareVersionedItems(candidate, previous) {
+  const candidateRevision = Number.isInteger(Number(candidate?.revision)) ? Number(candidate.revision) : 0;
+  const previousRevision = Number.isInteger(Number(previous?.revision)) ? Number(previous.revision) : 0;
+  if (candidateRevision !== previousRevision) return candidateRevision - previousRevision;
+  const timeDiff = itemVersion(candidate) - itemVersion(previous);
+  if (timeDiff) return timeDiff;
+  return String(candidate?.mutationId || candidate?.lastMutationId || "")
+    .localeCompare(String(previous?.mutationId || previous?.lastMutationId || ""));
+}
+
 export function mergeById(remote, local) {
   const remoteItems = Array.isArray(remote) ? remote : [];
   const localItems = Array.isArray(local) ? local : [];
@@ -240,7 +368,7 @@ export function mergeById(remote, local) {
     if (!item || typeof item !== "object") continue;
     const id = item.id || `legacy:${canonicalJson(item)}`;
     const previous = map.get(id);
-    if (!previous || itemVersion(item) >= itemVersion(previous)) map.set(id, item);
+    if (!previous || compareVersionedItems(item, previous) >= 0) map.set(id, item);
   }
   return [...map.values()];
 }

@@ -6,6 +6,8 @@ import {
   applyOpsToStock,
   createObjectPatch,
   findRecordIndex,
+  recordRevision,
+  sameRecordVersion,
   mergeById,
   mergeObject,
   mergeObjectPatches,
@@ -1988,6 +1990,8 @@ export default function App(){
   //   { type: "init",   location, marker, value, ts, client, opId }   стартовое значение (миграция)
   //   { type: "move",   from, to, marker, qty, ts, client, opId }
   //   { type: "rename", oldMarker, newMarker, ts, client, opId }
+  //   { type: "record-effect", recordId, mutationId, baseMutationId,
+  //     baseRevision, revision, mutationKind, before, after, ts, client, opId }
   // location: "main" | "ws:SMART" | "ws:Бегемот"
   //
   // Конфликты: только set-операции могут конфликтовать (два устройства установили
@@ -2065,13 +2069,15 @@ export default function App(){
     }, delay);
   }
 
-  async function appendStockOp(type, payload) {
+  function stageStockOp(type, payload = {}) {
+    const { opId: requestedOpId, ts: requestedTs, client: _client, type: _type, ...body } = payload || {};
+    const numericTs = Number(requestedTs);
     const op = {
-      ...payload,
+      ...body,
       type,
-      ts: Date.now(),
+      ts: Number.isFinite(numericTs) ? numericTs : Date.now(),
       client: clientIdRef.current,
-      opId: makeOpId(),
+      opId: requestedOpId || makeOpId(),
     };
 
     try {
@@ -2092,7 +2098,12 @@ export default function App(){
     const newStock = applyOpsToStock(newOps);
     stockRef.current = newStock;
     setStock(newStock);
+    return { ok:true, queued:true, op };
+  }
 
+  async function appendStockOp(type, payload) {
+    const staged = stageStockOp(type, payload);
+    if (!staged.ok) return staged;
     scheduleStockSync(700);
     return new Promise(resolve => stockSyncWaitersRef.current.push(resolve));
   }
@@ -3043,6 +3054,43 @@ async function refreshStockFromServer() {
     return {ok:true, text:"Пароль обновлён"};
   }
 
+  function makeRecordMutationId(recordId){
+    return `mut-${recordId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  function stockEffectForRecord(record){
+    if(!record) return null;
+    const used = stockDelta(record);
+    if(!(used > 0)) return null;
+    return { location: `ws:${record.workshop}`, marker: record.marker, qty: used };
+  }
+
+  function stageRecordEffect({kind, beforeRecord, afterRecord, mutationId, revision, now}){
+    const source = afterRecord || beforeRecord;
+    if(!source?.id) return {ok:false, error:"RECORD_ID_REQUIRED"};
+    return stageStockOp("record-effect", {
+      opId: `record-effect:${mutationId}`,
+      recordId: source.id,
+      mutationId,
+      baseMutationId: beforeRecord?.lastMutationId || null,
+      baseRevision: beforeRecord ? recordRevision(beforeRecord) : 0,
+      revision,
+      mutationKind: kind,
+      before: stockEffectForRecord(beforeRecord),
+      after: stockEffectForRecord(afterRecord),
+      updatedAt: now,
+      ts: now,
+    });
+  }
+
+  function checkCommittedRecordMutation(result, recordId, mutationId){
+    if(!result || result.queued || !Array.isArray(result.value)) return;
+    const committed = result.value.find(record => record?.id === recordId);
+    if(committed && committed.lastMutationId !== mutationId){
+      alert("Эта запись одновременно менялась на другом устройстве. Применён более новый вариант; откройте запись заново.");
+    }
+  }
+
   // ── добавление записи ──
   async function submitRecord(){
     if(!marker.trim()){setSubmitMsg({ok:false,text:"Укажите маркировку"});return;}
@@ -3051,29 +3099,28 @@ async function refreshStockFromServer() {
     }
     if(amount<0){setSubmitMsg({ok:false,text:"Сумма не может быть отрицательной"});return;}
 
+    const now = Date.now();
     const m = marker.trim();
+    const recordId = `rec-${now}-${Math.random().toString(36).slice(2, 8)}`;
+    const mutationId = makeRecordMutationId(recordId);
     const rec = {
-      id: `rec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      workshop, category, marker: m, qty, defect, amount, comment,
-      recordType, timestamp: Date.now(), updatedAt: Date.now()
+      id: recordId, workshop, category, marker: m, qty, defect, amount, comment,
+      recordType, timestamp: now, updatedAt: now, revision: 1, lastMutationId: mutationId,
     };
-    const next = [...recordsRef.current, rec];
-    recordsRef.current = next;
-    // Не await'им — форма сбрасывается мгновенно, GitHub пишется в фоне
-    saveAndSync("records", next, setRecords);
-
-    // Склад: списываем через stockDelta (для refund = 0, для sale = qty или defect)
-    const delta = stockDelta(rec);
-    if(delta > 0){
-      // Списание через delta-операцию (не конфликтует с другими устройствами)
-      appendStockOp("delta", {
-        location: `ws:${workshop}`,
-        marker: m,
-        delta: -delta,
-      });
+    const staged = stageRecordEffect({
+      kind: "create", beforeRecord: null, afterRecord: rec, mutationId, revision: 1, now,
+    });
+    if(!staged.ok){
+      setSubmitMsg({ok:false,text:"Не удалось надёжно сохранить операцию. Освободите место и повторите."});
+      return;
     }
 
-    // Сброс формы — мгновенно, не ждём GitHub
+    const next = [...recordsRef.current, rec];
+    recordsRef.current = next;
+    const savePromise = saveAndSync("records", next, setRecords);
+    scheduleStockSync(700);
+    savePromise.then(result => checkCommittedRecordMutation(result, recordId, mutationId)).catch(()=>{});
+
     setMarker(""); setQty(0); setDefect(0); setAmount(0);
     setManualAmount(false); setComment(""); setRecordType("sale");
     setSubmitMsg({ok:true, text: rec.recordType==="refund" ? "Возврат оформлен" : (rec.qty===0&&rec.defect>0 ? `Брак оформлен (${rec.defect} шт)` : "Запись добавлена")});
@@ -3081,43 +3128,39 @@ async function refreshStockFromServer() {
   }
 
   // ── сохранение редактируемой записи ──
-  // Современные записи ищем по постоянному id. Для старой записи без id
-  // допускаем только однозначное совпадение; при дубле ничего не меняем.
   async function handleEditSave(updated){
     const targetRecord = editRec?.record || updated;
     const oldIdx = findRecordIndex(recordsRef.current, targetRecord);
     if (oldIdx === -1) {
-      console.warn('[handleEditSave] запись не найдена или legacy-совпадение неоднозначно');
       alert('Не удалось однозначно найти запись. Обновите приложение и повторите действие.');
       setEditRec(null);
       return;
     }
     const old = recordsRef.current[oldIdx];
-    const recId = old.id || updated.id || `rec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const nextRecord = { ...updated, id: recId, updatedAt: Date.now() };
+    if(!sameRecordVersion(old, targetRecord)){
+      alert("Запись уже изменилась на другом устройстве. Откройте её заново.");
+      setEditRec(null);
+      return;
+    }
 
-    // 1) Возвращаем старое списание (через stockDelta)
-    const oldDelta = stockDelta(old);
-    if(oldDelta > 0){
-      appendStockOp("delta", {
-        location: `ws:${old.workshop}`,
-        marker: old.marker,
-        delta: oldDelta,
-      });
-    }
-    // 2) Применяем новое списание (через stockDelta)
-    const newDelta = stockDelta(nextRecord);
-    if(newDelta > 0){
-      appendStockOp("delta", {
-        location: `ws:${nextRecord.workshop}`,
-        marker: nextRecord.marker,
-        delta: -newDelta,
-      });
-    }
+    const now = Date.now();
+    const recId = old.id || updated.id || `rec-${now}-${Math.random().toString(36).slice(2, 8)}`;
+    const mutationId = makeRecordMutationId(recId);
+    const revision = recordRevision(old) + 1;
+    const nextRecord = {
+      ...updated, id: recId, timestamp: old.timestamp, updatedAt: now,
+      revision, lastMutationId: mutationId,
+    };
+    const staged = stageRecordEffect({
+      kind: "edit", beforeRecord: old, afterRecord: nextRecord, mutationId, revision, now,
+    });
+    if(!staged.ok) return;
 
     const next = recordsRef.current.map((record, index) => index === oldIdx ? nextRecord : record);
     recordsRef.current = next;
-    saveAndSync("records", next, setRecords);
+    const savePromise = saveAndSync("records", next, setRecords);
+    scheduleStockSync(700);
+    savePromise.then(result => checkCommittedRecordMutation(result, recId, mutationId)).catch(()=>{});
     setEditRec(null);
   }
 
@@ -3126,34 +3169,39 @@ async function refreshStockFromServer() {
     const targetRecord = typeof recordOrId === "string" ? { id: recordOrId } : recordOrId;
     const oldIdx = findRecordIndex(recordsRef.current, targetRecord);
     if (oldIdx === -1) {
-      console.warn('[handleEditDelete] запись не найдена или legacy-совпадение неоднозначно');
       alert('Не удалось однозначно найти запись. Обновите приложение и повторите действие.');
       setEditRec(null);
       return;
     }
     const old = recordsRef.current[oldIdx];
-    const recId = old.id || targetRecord?.id || `rec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-
-    // Возвращаем списание через stockDelta
-    const oldDelta = stockDelta(old);
-    if(oldDelta > 0){
-      appendStockOp("delta", {
-        location: `ws:${old.workshop}`,
-        marker: old.marker,
-        delta: oldDelta,
-      });
+    if(!sameRecordVersion(old, targetRecord)){
+      alert("Запись уже изменилась на другом устройстве. Откройте её заново перед удалением.");
+      setEditRec(null);
+      return;
     }
-    const tombstone = { id: recId, deletedAt: Date.now(), client: clientIdRef.current };
+
+    const now = Date.now();
+    const recId = old.id || targetRecord?.id || `rec-${now}-${Math.random().toString(36).slice(2, 8)}`;
+    const mutationId = makeRecordMutationId(recId);
+    const revision = recordRevision(old) + 1;
+    const staged = stageRecordEffect({
+      kind: "delete", beforeRecord: old, afterRecord: null, mutationId, revision, now,
+    });
+    if(!staged.ok) return;
+
+    const tombstone = {
+      id: recId, deletedAt: now, updatedAt: now, revision, mutationId,
+      baseMutationId: old.lastMutationId || null, client: clientIdRef.current,
+    };
     const nextDeletions = mergeById(recordDeletionsRef.current, [tombstone]);
     recordDeletionsRef.current = nextDeletions;
     setRecordDeletionIds(nextDeletions);
     commitImmediate("record-deletions", nextDeletions).catch(()=>{});
 
-    // Удаляем именно найденный элемент по индексу. Это безопасно и для legacy
-    // записи, которой id присваивается только в момент удаления.
     const next = recordsRef.current.filter((_, index) => index !== oldIdx);
     recordsRef.current = next;
     saveAndSync("records", next, setRecords);
+    scheduleStockSync(700);
     setEditRec(null);
   }
 

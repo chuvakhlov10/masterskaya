@@ -5,6 +5,9 @@ import {
   applyOpsToStock,
   createObjectPatch,
   findRecordIndex,
+  recordRevision,
+  sameRecordVersion,
+  selectRecordEffectOps,
   mergeById,
   mergeObjectPatches,
   mergeRecords,
@@ -144,4 +147,178 @@ test('findRecordIndex resolves one unique legacy record without id', () => {
 test('findRecordIndex rejects ambiguous duplicate legacy records', () => {
   const legacy = { timestamp: 10, workshop: 'SMART', category: 'Дверные', marker: 'ELB12D', qty: 1, defect: 0, amount: 400, recordType: 'sale', comment: '' };
   assert.equal(findRecordIndex([{ ...legacy }, { ...legacy }], { ...legacy }), -1);
+});
+
+
+test('record-effect retry is idempotent by deterministic opId', () => {
+  const effect = op({
+    type: 'record-effect', opId: 'record-effect:create', recordId: 'rec-1',
+    mutationId: 'create', baseMutationId: null, baseRevision: 0, revision: 1,
+    mutationKind: 'create', before: null,
+    after: { location: 'main', marker: 'TEST', qty: 2 },
+    delta: undefined, ts: 1_800_000_000_010,
+  });
+  const merged = mergeStockOps([effect], [{ ...effect }]);
+  assert.equal(merged.length, 1);
+  assert.equal(applyOpsToStock(merged).main.TEST, -2);
+});
+
+test('one record edit atomically returns old effect and applies new effect', () => {
+  const stock = applyOpsToStock([
+    op({ type: 'init', opId: 'init-effect', value: 9, delta: undefined, ts: 1_800_000_000_001 }),
+    op({
+      type: 'record-effect', opId: 'record-effect:edit-1', recordId: 'rec-1',
+      mutationId: 'edit-1', baseMutationId: null, baseRevision: 1, revision: 2,
+      mutationKind: 'edit',
+      before: { location: 'main', marker: 'TEST', qty: 1 },
+      after: { location: 'main', marker: 'TEST', qty: 3 },
+      delta: undefined, ts: 1_800_000_000_010,
+    }),
+  ]);
+  assert.equal(stock.main.TEST, 7);
+});
+
+test('concurrent edits from one base revision apply only one winner', () => {
+  const editA = op({
+    type: 'record-effect', opId: 'record-effect:a', recordId: 'rec-1',
+    mutationId: 'a', baseMutationId: null, baseRevision: 1, revision: 2,
+    mutationKind: 'edit',
+    before: { location: 'main', marker: 'TEST', qty: 1 },
+    after: { location: 'main', marker: 'TEST', qty: 2 },
+    delta: undefined, updatedAt: 20, ts: 1_800_000_000_020,
+  });
+  const editB = {
+    ...editA, opId: 'record-effect:b', mutationId: 'b',
+    after: { location: 'main', marker: 'TEST', qty: 3 },
+    updatedAt: 30, ts: 1_800_000_000_030,
+  };
+  assert.deepEqual(selectRecordEffectOps([editA, editB]).map(item => item.mutationId), ['b']);
+  const stock = applyOpsToStock([
+    op({ type: 'init', opId: 'init-concurrent', value: 9, delta: undefined, ts: 1_800_000_000_001 }),
+    editA, editB,
+  ]);
+  assert.equal(stock.main.TEST, 7);
+});
+
+test('delete wins over concurrent edit from the same revision', () => {
+  const edit = op({
+    type: 'record-effect', opId: 'record-effect:edit', recordId: 'rec-delete',
+    mutationId: 'edit', baseMutationId: null, baseRevision: 1, revision: 2,
+    mutationKind: 'edit',
+    before: { location: 'main', marker: 'TEST', qty: 1 },
+    after: { location: 'main', marker: 'TEST', qty: 2 },
+    delta: undefined, updatedAt: 50, ts: 1_800_000_000_050,
+  });
+  const deletion = {
+    ...edit, opId: 'record-effect:delete', mutationId: 'delete',
+    mutationKind: 'delete', after: null, updatedAt: 40, ts: 1_800_000_000_040,
+  };
+  const stock = applyOpsToStock([
+    op({ type: 'init', opId: 'init-delete', value: 9, delta: undefined, ts: 1_800_000_000_001 }),
+    edit, deletion,
+  ]);
+  assert.equal(stock.main.TEST, 10);
+});
+
+test('record chain preserves a manual absolute set between edits', () => {
+  const edit1 = op({
+    type: 'record-effect', opId: 'record-effect:m1', recordId: 'rec-chain',
+    mutationId: 'm1', baseMutationId: null, baseRevision: 1, revision: 2,
+    mutationKind: 'edit',
+    before: { location: 'main', marker: 'TEST', qty: 1 },
+    after: { location: 'main', marker: 'TEST', qty: 2 },
+    delta: undefined, ts: 1_800_000_000_020,
+  });
+  const edit2 = {
+    ...edit1, opId: 'record-effect:m2', mutationId: 'm2',
+    baseMutationId: 'm1', baseRevision: 2, revision: 3,
+    before: { location: 'main', marker: 'TEST', qty: 2 },
+    after: { location: 'main', marker: 'TEST', qty: 3 },
+    ts: 1_800_000_000_040,
+  };
+  const stock = applyOpsToStock([
+    op({ type: 'init', opId: 'init-chain', value: 9, delta: undefined, ts: 1_800_000_000_010 }),
+    edit1,
+    op({ type: 'set', opId: 'manual-set', value: 20, delta: undefined, ts: 1_800_000_000_030 }),
+    edit2,
+  ]);
+  assert.equal(stock.main.TEST, 19);
+});
+
+test('mergeRecords prefers higher revision over a newer stale clock', () => {
+  const remote = [{ id: 'rec-rev', revision: 3, updatedAt: 100, lastMutationId: 'm3', marker: 'SERVER' }];
+  const stale = [{ id: 'rec-rev', revision: 2, updatedAt: 999999, lastMutationId: 'm2', marker: 'STALE' }];
+  const merged = mergeRecords(remote, stale);
+  assert.equal(merged[0].marker, 'SERVER');
+  assert.equal(recordRevision(merged[0]), 3);
+});
+
+test('sameRecordVersion detects a stale opened record', () => {
+  const opened = { id: 'rec-version', revision: 2, updatedAt: 20, lastMutationId: 'm2' };
+  assert.equal(sameRecordVersion({ ...opened }, opened), true);
+  assert.equal(sameRecordVersion({ ...opened, revision: 3, lastMutationId: 'm3' }, opened), false);
+});
+
+
+test('higher descendant revision selects its complete competing branch', () => {
+  const editA = op({
+    type: 'record-effect', opId: 'record-effect:branch-a', recordId: 'rec-branch',
+    mutationId: 'branch-a', baseMutationId: null, baseRevision: 1, revision: 2,
+    mutationKind: 'edit',
+    before: { location: 'main', marker: 'TEST', qty: 1 },
+    after: { location: 'main', marker: 'TEST', qty: 2 },
+    delta: undefined, updatedAt: 20, ts: 1_800_000_000_020,
+  });
+  const editB = {
+    ...editA, opId: 'record-effect:branch-b', mutationId: 'branch-b',
+    after: { location: 'main', marker: 'TEST', qty: 3 },
+    updatedAt: 30, ts: 1_800_000_000_030,
+  };
+  const editA2 = {
+    ...editA, opId: 'record-effect:branch-a2', mutationId: 'branch-a2',
+    baseMutationId: 'branch-a', baseRevision: 2, revision: 3,
+    before: { location: 'main', marker: 'TEST', qty: 2 },
+    after: { location: 'main', marker: 'TEST', qty: 4 },
+    updatedAt: 40, ts: 1_800_000_000_040,
+  };
+  assert.deepEqual(
+    selectRecordEffectOps([editA, editB, editA2]).map(item => item.mutationId),
+    ['branch-a', 'branch-a2']
+  );
+  const stock = applyOpsToStock([
+    op({ type: 'init', opId: 'init-branch', value: 9, delta: undefined, ts: 1_800_000_000_001 }),
+    editA, editB, editA2,
+  ]);
+  assert.equal(stock.main.TEST, 6);
+});
+
+test('delete prevents a higher stale edit branch from resurrecting stock effect', () => {
+  const staleEdit = op({
+    type: 'record-effect', opId: 'record-effect:stale-edit', recordId: 'rec-permanent-delete',
+    mutationId: 'stale-edit', baseMutationId: null, baseRevision: 1, revision: 2,
+    mutationKind: 'edit',
+    before: { location: 'main', marker: 'TEST', qty: 1 },
+    after: { location: 'main', marker: 'TEST', qty: 2 },
+    delta: undefined, updatedAt: 20, ts: 1_800_000_000_020,
+  });
+  const staleEdit2 = {
+    ...staleEdit, opId: 'record-effect:stale-edit-2', mutationId: 'stale-edit-2',
+    baseMutationId: 'stale-edit', baseRevision: 2, revision: 3,
+    before: { location: 'main', marker: 'TEST', qty: 2 },
+    after: { location: 'main', marker: 'TEST', qty: 4 },
+    updatedAt: 40, ts: 1_800_000_000_040,
+  };
+  const deletion = {
+    ...staleEdit, opId: 'record-effect:permanent-delete', mutationId: 'permanent-delete',
+    mutationKind: 'delete', after: null, updatedAt: 30, ts: 1_800_000_000_030,
+  };
+  assert.deepEqual(
+    selectRecordEffectOps([staleEdit, staleEdit2, deletion]).map(item => item.mutationId),
+    ['permanent-delete']
+  );
+  const stock = applyOpsToStock([
+    op({ type: 'init', opId: 'init-permanent-delete', value: 9, delta: undefined, ts: 1_800_000_000_001 }),
+    staleEdit, staleEdit2, deletion,
+  ]);
+  assert.equal(stock.main.TEST, 10);
 });
