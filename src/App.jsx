@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, Component } from "react";
 import { dbGet, dbSet, backupStatusGet, hasToken, setToken, clearToken, verifyToken, photoGet, photoSet, photoDelete } from "./github-storage.js";
 import Ably from "ably";
+import { installSecureAblyProbe } from "./ably-auth.js";
 import {
   applyObjectPatch,
   applyOpsToStock,
@@ -28,6 +29,7 @@ const ably = new Ably.Realtime({
   idlePeriod: 5000,                 // ждём 5 сек перед idle check (увеличиваем активность)
   heartbeatInterval: 5000,          // пинг каждые 5 сек чтобы соединение не падало
 });
+installSecureAblyProbe(Ably);
 
 const DEFAULT_MARKERS = {
   "Автомобильные": ["Замена корпуса","HD39RP","Нарезка лезвия","LD-1P","MIT8AP","MIT8RP (п.ч.)","XT27A"],
