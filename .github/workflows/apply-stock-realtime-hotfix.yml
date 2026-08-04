@@ -25,6 +25,7 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           import re
+          import textwrap
 
           app_path = Path('src/App.jsx')
           test_path = Path('tests/sync-core.test.mjs')
@@ -44,21 +45,13 @@ jobs:
                   '  const isPollingRef = useRef(false);\n  const pollAgainRef = useRef(false);\n  const isStockRefreshingRef = useRef(false);\n  const stockRefreshAgainRef = useRef(false);',
                   'stock refresh refs',
               )
-
               app = replace_once(
                   app,
                   '    const base = Math.min(10_000 * (2 ** Math.max(0, attempt - 1)), 300_000);\n    const delay = base + Math.random() * Math.min(base * 0.3, 15_000);',
                   '    const base = Math.min(2_500 * (2 ** Math.max(0, attempt - 1)), 60_000);\n    const delay = base + Math.random() * Math.min(base * 0.25, 5_000);',
                   'stock retry delay',
               )
-
-              app = replace_once(
-                  app,
-                  '    scheduleStockSync(2_000);',
-                  '    scheduleStockSync(700);',
-                  'stock debounce',
-              )
-
+              app = replace_once(app, '    scheduleStockSync(2_000);', '    scheduleStockSync(700);', 'stock debounce')
               app = replace_once(
                   app,
                   '    const throttleLeft = 3_000 - (now - lastSyncAttemptRef.current);',
@@ -66,61 +59,65 @@ jobs:
                   'stock throttle',
               )
 
-              helper = r'''
-  // REALTIME_STOCK_REFRESH_HOTFIX_V1
-  // Быстрое обновление склада читает только stock-ops.json. Ошибка любого
-  // другого файла приложения больше не блокирует получение нового остатка.
-  function applyServerStockOps(serverOps) {
-    const outbox = getStockOutbox();
-    const mergedOps = mergeStockOps(Array.isArray(serverOps) ? serverOps : [], outbox);
-    stockOpsRef.current = mergedOps;
-    persistStockSnapshot(mergedOps);
-    const mergedStock = applyOpsToStock(mergedOps);
-    stockRef.current = mergedStock;
-    setStockOps(mergedOps);
-    setStock(mergedStock);
+              helper = textwrap.dedent('''
 
-    const serverIds = new Set((Array.isArray(serverOps) ? serverOps : []).map(op => op?.opId).filter(Boolean));
-    const confirmed = new Set(outbox.filter(op => serverIds.has(op.opId)).map(op => op.opId));
-    const remainingOutbox = removeStockOutboxIds(confirmed);
-    unsyncedOpsRef.current = new Set(remainingOutbox.map(op => op.opId).filter(Boolean));
-    setPendingCount(getQueue().length + remainingOutbox.length);
-    if (remainingOutbox.length > 0) scheduleStockSync(250, false);
-    return mergedOps;
-  }
+                // REALTIME_STOCK_REFRESH_HOTFIX_V1
+                // Быстрое обновление склада читает только stock-ops.json. Ошибка любого
+                // другого файла приложения больше не блокирует получение нового остатка.
+                function applyServerStockOps(serverOps) {
+                  const outbox = getStockOutbox();
+                  const normalizedServerOps = Array.isArray(serverOps) ? serverOps : [];
+                  const mergedOps = mergeStockOps(normalizedServerOps, outbox);
+                  stockOpsRef.current = mergedOps;
+                  persistStockSnapshot(mergedOps);
+                  const mergedStock = applyOpsToStock(mergedOps);
+                  stockRef.current = mergedStock;
+                  setStockOps(mergedOps);
+                  setStock(mergedStock);
 
-  async function refreshStockFromServer() {
-    if (!navigator.onLine) return { ok: false, offline: true };
-    if (isStockRefreshingRef.current) {
-      stockRefreshAgainRef.current = true;
-      return { ok: false, busy: true };
-    }
+                  const serverIds = new Set(normalizedServerOps.map(op => op?.opId).filter(Boolean));
+                  const confirmed = new Set(outbox.filter(op => serverIds.has(op.opId)).map(op => op.opId));
+                  const remainingOutbox = removeStockOutboxIds(confirmed);
+                  unsyncedOpsRef.current = new Set(remainingOutbox.map(op => op.opId).filter(Boolean));
+                  setPendingCount(getQueue().length + remainingOutbox.length);
+                  if (remainingOutbox.length > 0) scheduleStockSync(250, false);
+                  return mergedOps;
+                }
 
-    isStockRefreshingRef.current = true;
-    try {
-      const serverOps = await sGet("stock-ops", { allowCache: false });
-      if (!Array.isArray(serverOps)) throw new Error("INVALID_STOCK_OPS_RESPONSE");
-      const mergedOps = applyServerStockOps(serverOps);
-      setSyncStatus(wsConnectedRef.current ? "ws" : "synced");
-      return { ok: true, value: mergedOps };
-    } catch (error) {
-      console.warn('[STOCK REFRESH] Ошибка:', error.message);
-      return { ok: false, error: error.message };
-    } finally {
-      isStockRefreshingRef.current = false;
-      if (stockRefreshAgainRef.current) {
-        stockRefreshAgainRef.current = false;
-        setTimeout(() => refreshStockFromServer(), 150);
-      }
-    }
-  }
-'''
-              app = replace_once(
+                async function refreshStockFromServer() {
+                  if (!navigator.onLine) return { ok: false, offline: true };
+                  if (isStockRefreshingRef.current) {
+                    stockRefreshAgainRef.current = true;
+                    return { ok: false, busy: true };
+                  }
+
+                  isStockRefreshingRef.current = true;
+                  try {
+                    const serverOps = await sGet("stock-ops", { allowCache: false });
+                    if (!Array.isArray(serverOps)) throw new Error("INVALID_STOCK_OPS_RESPONSE");
+                    const mergedOps = applyServerStockOps(serverOps);
+                    setSyncStatus(wsConnectedRef.current ? "ws" : "synced");
+                    return { ok: true, value: mergedOps };
+                  } catch (error) {
+                    console.warn('[STOCK REFRESH] Ошибка:', error.message);
+                    return { ok: false, error: error.message };
+                  } finally {
+                    isStockRefreshingRef.current = false;
+                    if (stockRefreshAgainRef.current) {
+                      stockRefreshAgainRef.current = false;
+                      setTimeout(() => refreshStockFromServer(), 150);
+                    }
+                  }
+                }
+              ''')
+              app, count = re.subn(
+                  r'(  syncStockOpsRef\.current = syncStockOps;\n)',
+                  r'\1' + helper,
                   app,
-                  '  syncStockOpsRef.current = syncStockOps;\n\n\n  // Обнаружение конфликтов set-операций',
-                  '  syncStockOpsRef.current = syncStockOps;\n' + helper + '\n  // Обнаружение конфликтов set-операций',
-                  'stock refresh helper insertion',
+                  count=1,
               )
+              if count != 1:
+                  raise SystemExit(f'stock refresh helper insertion: expected one match, found {count}')
 
               stock_block_pattern = re.compile(
                   r'''        if \(Array\.isArray\(ops\)\) \{\n'''
@@ -139,11 +136,7 @@ jobs:
                   r'''          if \(remainingOutbox\.length > 0\) scheduleStockSync\(250, false\);\n'''
                   r'''        \}'''
               )
-              app, count = stock_block_pattern.subn(
-                  '        if (Array.isArray(ops)) applyServerStockOps(ops);',
-                  app,
-                  count=1,
-              )
+              app, count = stock_block_pattern.subn('        if (Array.isArray(ops)) applyServerStockOps(ops);', app, count=1)
               if count != 1:
                   raise SystemExit(f'full poll stock block: expected one match, found {count}')
 
@@ -202,7 +195,6 @@ jobs:
     });''',
                   'Ably connected refresh',
               )
-
               app = replace_once(
                   app,
                   '''    if (ably.connection.state === 'connected') {
@@ -216,7 +208,6 @@ jobs:
     }''',
                   'already connected refresh',
               )
-
               app = replace_once(
                   app,
                   '''    window.addEventListener('online', handleOnline);
@@ -233,7 +224,6 @@ jobs:
     document.addEventListener('visibilitychange', handleVisibilityChange);''',
                   'focus visibility listeners',
               )
-
               app = replace_once(
                   app,
                   '''    const initialTimer = setTimeout(poll, 3000);
@@ -244,7 +234,6 @@ jobs:
     const interval = setInterval(poll, 60000); // полный polling раз в 60 сек''',
                   'stock polling interval',
               )
-
               app = replace_once(
                   app,
                   '''      clearTimeout(initialTimer);
@@ -260,7 +249,6 @@ jobs:
       if (ablyStockTimer) clearTimeout(ablyStockTimer);''',
                   'timer cleanup',
               )
-
               app = replace_once(
                   app,
                   '''      window.removeEventListener('online', handleOnline);
@@ -271,11 +259,10 @@ jobs:
       document.removeEventListener('visibilitychange', handleVisibilityChange);''',
                   'listener cleanup',
               )
-
               app_path.write_text(app, encoding='utf-8')
 
           tests = test_path.read_text(encoding='utf-8')
-          test_name = "two consecutive set operations keep the final zero value"
+          test_name = 'two consecutive set operations keep the final zero value'
           if test_name not in tests:
               tests += '''\n\ntest('two consecutive set operations keep the final zero value', () => {\n  const stock = applyOpsToStock([\n    op({ type: 'set', opId: 'set-three', marker: 'TEST', location: 'main', value: 3, delta: undefined, ts: 1_800_000_000_010 }),\n    op({ type: 'set', opId: 'set-zero', marker: 'TEST', location: 'main', value: 0, delta: undefined, ts: 1_800_000_000_020 }),\n  ]);\n  assert.equal(stock.main.TEST, 0);\n});\n'''
               test_path.write_text(tests, encoding='utf-8')
@@ -293,7 +280,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git add src/App.jsx tests/sync-core.test.mjs .hotfix-trigger 2>/dev/null || true
+          git add -A src/App.jsx tests/sync-core.test.mjs .hotfix-trigger
           if git diff --cached --quiet; then
             echo "Hotfix already applied"
             exit 0
