@@ -5,6 +5,7 @@ import {
   applyOpsToStock,
   createObjectPatch,
   findRecordIndex,
+  legacyRecordFingerprint,
   recordRevision,
   sameRecordVersion,
   selectRecordEffectOps,
@@ -321,4 +322,42 @@ test('delete prevents a higher stale edit branch from resurrecting stock effect'
     staleEdit, staleEdit2, deletion,
   ]);
   assert.equal(stock.main.TEST, 10);
+});
+
+
+test('legacy fingerprint matches migrated source record', () => {
+  const record = {
+    workshop: 'SMART', category: 'Домофонные', marker: 'Proxy', qty: 1,
+    defect: 0, amount: 250, comment: '', recordType: 'sale', timestamp: 1782110055316,
+  };
+  assert.equal(legacyRecordFingerprint(record), '8258805b32fcc15f');
+});
+
+test('mergeRecords drops a stale no-id copy claimed by migrated record fingerprint', () => {
+  const legacy = {
+    workshop: 'SMART', category: 'Домофонные', marker: 'Proxy', qty: 1,
+    defect: 0, amount: 250, comment: '', recordType: 'sale', timestamp: 1782110055316,
+  };
+  const modern = {
+    ...legacy, id: 'legacy-4e22f164920235cf8c00c334', marker: 'Proxy edited',
+    legacyFingerprint: legacyRecordFingerprint(legacy), revision: 2,
+    updatedAt: 1783000000000, lastMutationId: 'm2',
+  };
+  const merged = mergeRecords([modern], [legacy]);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].id, modern.id);
+  assert.equal(merged[0].marker, 'Proxy edited');
+});
+
+test('mergeRecords preserves an unmatched legitimate legacy record', () => {
+  const modern = {
+    id: 'rec-modern', timestamp: 1, workshop: 'SMART', marker: 'A', qty: 1,
+    defect: 0, amount: 100, comment: '', recordType: 'sale', category: 'Дверные',
+  };
+  const legacy = {
+    timestamp: 2, workshop: 'SMART', marker: 'B', qty: 1,
+    defect: 0, amount: 200, comment: '', recordType: 'sale', category: 'Дверные',
+  };
+  const merged = mergeRecords([modern], [legacy]);
+  assert.equal(merged.length, 2);
 });

@@ -17,6 +17,27 @@ function canonicalJson(value) {
   catch { return String(value); }
 }
 
+// LEGACY_RECORD_DEDUP_V1
+function fnv1a64(text) {
+  const bytes = new TextEncoder().encode(String(text));
+  let hash = 0xcbf29ce484222325n;
+  for (const byte of bytes) {
+    hash ^= BigInt(byte);
+    hash = (hash * 0x100000001b3n) & 0xffffffffffffffffn;
+  }
+  return hash.toString(16).padStart(16, "0");
+}
+
+export function legacyRecordFingerprint(record) {
+  if (!record || typeof record !== "object") return null;
+  const value = {};
+  for (const [key, item] of Object.entries(record)) {
+    if (key === "id" || key === "legacyFingerprint") continue;
+    value[key] = item;
+  }
+  return fnv1a64(canonicalJson(value));
+}
+
 export function recordKey(record) {
   if (!record || typeof record !== "object") return null;
   if (record.id) return `id:${record.id}`;
@@ -96,17 +117,39 @@ export function mergeRecords(remote, local, deletedIds = new Set()) {
   const remoteItems = Array.isArray(remote) ? remote : [];
   const localItems = Array.isArray(local) ? local : [];
   const deleted = deletedIds instanceof Set ? deletedIds : new Set(deletedIds || []);
-  const map = new Map();
+  const modern = new Map();
+  const legacy = [];
 
   for (const record of [...remoteItems, ...localItems]) {
-    const key = recordKey(record);
-    if (!key) continue;
-    if (record.id && deleted.has(record.id)) continue;
-    const previous = map.get(key);
-    if (!previous || compareRecordState(record, previous) >= 0) map.set(key, record);
+    if (!record || typeof record !== "object") continue;
+    if (!record.id) {
+      legacy.push(record);
+      continue;
+    }
+    if (deleted.has(record.id)) continue;
+    const key = `id:${record.id}`;
+    const previous = modern.get(key);
+    if (!previous || compareRecordState(record, previous) >= 0) modern.set(key, record);
   }
 
-  return [...map.values()].sort((a, b) => {
+  const claimedFingerprints = new Set();
+  for (const record of modern.values()) {
+    if (typeof record.legacyFingerprint === "string" && record.legacyFingerprint) {
+      claimedFingerprints.add(record.legacyFingerprint);
+    }
+  }
+
+  const legacyMap = new Map();
+  for (const record of legacy) {
+    const fingerprint = legacyRecordFingerprint(record);
+    if (fingerprint && claimedFingerprints.has(fingerprint)) continue;
+    const key = recordKey(record);
+    if (!key) continue;
+    const previous = legacyMap.get(key);
+    if (!previous || compareRecordState(record, previous) >= 0) legacyMap.set(key, record);
+  }
+
+  return [...modern.values(), ...legacyMap.values()].sort((a, b) => {
     const ts = Number(a?.timestamp || 0) - Number(b?.timestamp || 0);
     return ts || String(recordKey(a)).localeCompare(String(recordKey(b)));
   });
