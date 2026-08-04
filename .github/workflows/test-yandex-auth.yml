@@ -1,0 +1,28 @@
+name: Validate Yandex Ably auth
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - name: Verify standalone Yandex package
+        run: |
+          node -c yandex-function/index.js
+          mkdir -p /tmp/yandex-package
+          cp yandex-function/index.js /tmp/yandex-package/index.js
+          cd /tmp/yandex-package
+          zip -q function.zip index.js
+          test "$(unzip -Z1 function.zip)" = "index.js"
