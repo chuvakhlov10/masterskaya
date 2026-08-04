@@ -4,6 +4,7 @@ import {
   applyObjectPatch,
   applyOpsToStock,
   createObjectPatch,
+  findRecordIndex,
   mergeById,
   mergeObjectPatches,
   mergeRecords,
@@ -123,4 +124,24 @@ test('two consecutive set operations keep the final zero value', () => {
     op({ type: 'set', opId: 'set-zero', marker: 'TEST', location: 'main', value: 0, delta: undefined, ts: 1_800_000_000_020 }),
   ]);
   assert.equal(stock.main.TEST, 0);
+});
+
+
+test('findRecordIndex resolves a reordered modern record by id', () => {
+  const records = [
+    { id: 'rec-b', timestamp: 2, marker: 'B' },
+    { id: 'rec-a', timestamp: 1, marker: 'A' },
+  ];
+  assert.equal(findRecordIndex(records, { id: 'rec-a', timestamp: 1, marker: 'A' }), 1);
+});
+
+test('findRecordIndex resolves one unique legacy record without id', () => {
+  const legacy = { timestamp: 10, workshop: 'SMART', category: 'Дверные', marker: 'ELB12D', qty: 1, defect: 0, amount: 400, recordType: 'sale', comment: '' };
+  const records = [{ id: 'modern' }, { ...legacy }];
+  assert.equal(findRecordIndex(records, { ...legacy }), 1);
+});
+
+test('findRecordIndex rejects ambiguous duplicate legacy records', () => {
+  const legacy = { timestamp: 10, workshop: 'SMART', category: 'Дверные', marker: 'ELB12D', qty: 1, defect: 0, amount: 400, recordType: 'sale', comment: '' };
+  assert.equal(findRecordIndex([{ ...legacy }, { ...legacy }], { ...legacy }), -1);
 });
