@@ -32,7 +32,10 @@ export function legacyRecordFingerprint(record) {
   if (!record || typeof record !== "object") return null;
   const value = {};
   for (const [key, item] of Object.entries(record)) {
-    if (key === "id" || key === "legacyFingerprint") continue;
+    // Sync metadata is not part of the original sale identity. Ignoring it lets
+    // an old no-id snapshot match the same migrated record after metadata was added.
+    if (key === "id" || key === "legacyFingerprint" || key === "revision" ||
+        key === "updatedAt" || key === "lastMutationId") continue;
     value[key] = item;
   }
   return fnv1a64(canonicalJson(value));
@@ -133,16 +136,38 @@ export function mergeRecords(remote, local, deletedIds = new Set()) {
   }
 
   const claimedFingerprints = new Set();
-  for (const record of modern.values()) {
+  const exactModernByFingerprint = new Map();
+  for (const [key, record] of modern.entries()) {
     if (typeof record.legacyFingerprint === "string" && record.legacyFingerprint) {
       claimedFingerprints.add(record.legacyFingerprint);
+    }
+
+    // A migrated record may have lost legacyFingerprint in an old snapshot. Its
+    // current canonical contents still claim an exactly matching no-id copy.
+    const exactFingerprint = legacyRecordFingerprint(record);
+    if (exactFingerprint) {
+      claimedFingerprints.add(exactFingerprint);
+      if (!exactModernByFingerprint.has(exactFingerprint)) exactModernByFingerprint.set(exactFingerprint, []);
+      exactModernByFingerprint.get(exactFingerprint).push(key);
     }
   }
 
   const legacyMap = new Map();
   for (const record of legacy) {
     const fingerprint = legacyRecordFingerprint(record);
-    if (fingerprint && claimedFingerprints.has(fingerprint)) continue;
+    if (fingerprint && claimedFingerprints.has(fingerprint)) {
+      // Restore the durable original fingerprint when exactly one modern record
+      // matches. Future edits can then reject this stale copy by the stored claim.
+      const exactMatches = exactModernByFingerprint.get(fingerprint) || [];
+      if (exactMatches.length === 1) {
+        const key = exactMatches[0];
+        const modernRecord = modern.get(key);
+        if (modernRecord && !modernRecord.legacyFingerprint) {
+          modern.set(key, { ...modernRecord, legacyFingerprint: fingerprint });
+        }
+      }
+      continue;
+    }
     const key = recordKey(record);
     if (!key) continue;
     const previous = legacyMap.get(key);
