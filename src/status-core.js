@@ -1,4 +1,4 @@
-export const APP_VERSION = "1.3.2";
+export const APP_VERSION = "1.3.3";
 
 function nonNegativeInt(value) {
   const number = Number(value);
@@ -7,6 +7,21 @@ function nonNegativeInt(value) {
 
 function stringList(value) {
   return Array.isArray(value) ? value.filter(item => typeof item === "string") : [];
+}
+
+function operationWord(value) {
+  const number = Math.abs(nonNegativeInt(value));
+  const mod100 = number % 100;
+  const mod10 = number % 10;
+  if (mod100 >= 11 && mod100 <= 14) return "операций";
+  if (mod10 === 1) return "операция";
+  if (mod10 >= 2 && mod10 <= 4) return "операции";
+  return "операций";
+}
+
+function operationCount(value) {
+  const pending = nonNegativeInt(value);
+  return `${pending} ${operationWord(pending)}`;
 }
 
 export function normalizeBackupStatus(raw) {
@@ -39,7 +54,7 @@ export function deriveSyncView({ online, syncStatus, pendingCount, lastError, bu
     return {
       kind: "offline",
       icon: "📴",
-      label: pending > 0 ? `Офлайн · в очереди: ${pending}` : "Офлайн",
+      label: pending > 0 ? `Офлайн · ожидает отправки: ${operationCount(pending)}` : "Офлайн",
     };
   }
 
@@ -47,7 +62,7 @@ export function deriveSyncView({ online, syncStatus, pendingCount, lastError, bu
     return {
       kind: "error",
       icon: "⚠",
-      label: pending > 0 ? `Ошибка · в очереди: ${pending}` : "Ошибка синхронизации",
+      label: pending > 0 ? `Ошибка · ожидает отправки: ${operationCount(pending)}` : "Ошибка синхронизации",
     };
   }
 
@@ -55,7 +70,7 @@ export function deriveSyncView({ online, syncStatus, pendingCount, lastError, bu
     return {
       kind: "sending",
       icon: "↻",
-      label: pending > 0 ? `Отправляется · осталось: ${pending}` : "Обновление...",
+      label: pending > 0 ? `Отправляется · осталось: ${operationCount(pending)}` : "Обновление...",
     };
   }
 

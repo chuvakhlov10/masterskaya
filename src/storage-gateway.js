@@ -1,3 +1,8 @@
+import {
+  recordSessionRenewal,
+  recordStorageRequestResult,
+} from "./diagnostics.js";
+
 const DEFAULT_ENDPOINT = "https://functions.yandexcloud.net/d4ep5fmjtp6t09f06tvt";
 const LEGACY_TOKEN_KEY = "github_token_v1";
 const SESSION_KEY = "masterskaya_storage_session_v1";
@@ -191,6 +196,7 @@ async function postGateway({
   maxAttempts = 3,
   waitImpl = wait,
   random = Math.random,
+  onRetry,
 }) {
   let lastError;
   for (let attempt = 0; attempt < Math.max(1, maxAttempts); attempt++) {
@@ -199,6 +205,7 @@ async function postGateway({
     } catch (error) {
       lastError = error;
       if (!isTransientGatewayError(error) || attempt >= maxAttempts - 1) throw error;
+      try { onRetry?.({ attempt: attempt + 1, code: errorCode(error) }); } catch {}
       const base = RETRY_DELAYS_MS[Math.min(attempt, RETRY_DELAYS_MS.length - 1)] || 1_400;
       await waitImpl(base + Math.floor(random() * Math.min(350, base * .25)));
     }
@@ -233,6 +240,7 @@ export async function renewStorageSession({
   session = readStoredStorageSession(storage),
   waitImpl,
   random,
+  onRetry,
 } = {}) {
   if (!session?.token) throw makeError("SESSION_REQUIRED");
   const payload = await postGateway({
@@ -242,9 +250,12 @@ export async function renewStorageSession({
     body: { action: "renew" },
     waitImpl,
     random,
+    onRetry,
   });
   if (payload?.clientId !== session.clientId) throw makeError("SESSION_CLIENT_ID_MISMATCH");
-  return storeSession(payload, storage);
+  const renewed = storeSession(payload, storage);
+  recordSessionRenewal({ storage });
+  return renewed;
 }
 
 const renewalInFlight = new Map();
@@ -273,6 +284,7 @@ export async function ensureStorageSession({
   eventTarget = globalThis,
   waitImpl,
   random = Math.random,
+  onRetry,
 } = {}) {
   const existing = readStoredStorageSession(storage);
   if (!existing) throw makeError("SESSION_REQUIRED");
@@ -286,7 +298,7 @@ export async function ensureStorageSession({
   if ((renewalRetryAfter.get(key) || 0) > now) return existing;
 
   try {
-    const renewed = await sharedRenew({ endpoint, fetchImpl, storage, session: existing, waitImpl, random });
+    const renewed = await sharedRenew({ endpoint, fetchImpl, storage, session: existing, waitImpl, random, onRetry });
     renewalRetryAfter.delete(key);
     return renewed;
   } catch (error) {
@@ -320,8 +332,12 @@ export async function storageGatewayRequest({
   waitImpl,
   random,
 } = {}) {
-  const session = await ensureStorageSession({ endpoint, fetchImpl, storage, eventTarget, waitImpl, random });
+  let retries = 0;
+  const onRetry = () => { retries += 1; };
+  const operation = `${String(method || "REQUEST").toUpperCase()} ${String(path || "gateway")}`;
+
   try {
+    const session = await ensureStorageSession({ endpoint, fetchImpl, storage, eventTarget, waitImpl, random, onRetry });
     const payload = await postGateway({
       endpoint,
       fetchImpl,
@@ -330,12 +346,15 @@ export async function storageGatewayRequest({
       maxAttempts,
       waitImpl,
       random,
+      onRetry,
     });
     // Сессия доказала доступ к рабочему хранилищу. Долгоживущий PAT больше не
     // нужен и удаляется только после успешного ответа, а не при сетевой ошибке.
     clearLegacyGithubToken(storage);
+    recordStorageRequestResult({ ok: true, operation, retries, storage });
     return payload;
   } catch (error) {
+    recordStorageRequestResult({ ok: false, code: errorCode(error), operation, retries, storage });
     if (isTerminalSessionError(error)) {
       invalidateStoredStorageSession({ code: errorCode(error), storage, eventTarget });
     }
