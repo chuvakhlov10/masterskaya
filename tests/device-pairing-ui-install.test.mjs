@@ -26,6 +26,13 @@ test('connected-device manager can create and revoke device access', () => {
   assert.match(gateSource, /Отключить/);
 });
 
+test('expired or revoked sessions return the device to pairing', () => {
+  assert.match(gateSource, /STORAGE_SESSION_EVENT/);
+  assert.match(gateSource, /DEVICE_REVOKED/);
+  assert.match(gateSource, /SESSION_EXPIRED/);
+  assert.match(gateSource, /setSessionEpoch/);
+});
+
 test('connected application exposes safe server health checks', () => {
   assert.match(mainSource, /import SystemHealthControl from ['"]\.\/SystemHealthControl\.jsx['"]/);
   assert.match(mainSource, /<SystemHealthControl \/>/);
@@ -34,6 +41,6 @@ test('connected application exposes safe server health checks', () => {
   assert.match(healthSource, /Live-синхронизация/);
 });
 
-test('server health release is version 1.3.1', () => {
-  assert.match(statusSource, /APP_VERSION = "1\.3\.1"/);
+test('session resilience release is version 1.3.2', () => {
+  assert.match(statusSource, /APP_VERSION = "1\.3\.2"/);
 });
