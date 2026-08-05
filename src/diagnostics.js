@@ -4,6 +4,7 @@ const DEVICE_NAME_KEY = "masterskaya_device_name_v1";
 const PENDING_WRITES_KEY = "pending_writes";
 const STOCK_OUTBOX_KEY = "stock_ops_outbox_v1";
 const LAST_SYNC_KEY = "last_successful_sync_v1";
+const SELF_CHECK_OPERATIONS = new Set(["GET status.json"]);
 
 function safeGet(storage, key) {
   try { return storage?.getItem?.(key) || ""; }
@@ -56,10 +57,13 @@ export function recordStorageRequestResult({
   storage = globalThis.localStorage,
 } = {}) {
   const previous = readDiagnosticMetrics(storage);
+  const normalizedOperation = String(operation || "").slice(0, 160);
+  if (SELF_CHECK_OPERATIONS.has(normalizedOperation)) return previous;
+
   const retryCount = Number.isInteger(Number(retries)) ? Math.max(0, Number(retries)) : 0;
   const next = {
     ...previous,
-    lastStorageOperation: String(operation || "").slice(0, 160),
+    lastStorageOperation: normalizedOperation,
     lastStorageRetries: retryCount,
     totalStorageRetries: previous.totalStorageRetries + retryCount,
   };
