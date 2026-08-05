@@ -6,10 +6,22 @@ import {
   createSecureAblyRealtimeOptions,
 } from "../src/ably-secure-client.js";
 
-function storageWith(token = "github-token-abcdefghijklmnopqrstuvwxyz") {
-  const values = new Map([["github_token_v1", token]]);
+const CLIENT_ID = "client-12345678";
+const SESSION_TOKEN = "session.header.signature";
+
+function storageWithSession() {
+  const values = new Map([
+    ["github_token_v1", "github-token-abcdefghijklmnopqrstuvwxyz"],
+    ["masterskaya_storage_session_v1", JSON.stringify({
+      token: SESSION_TOKEN,
+      expiresAt: Date.now() + 10 * 24 * 60 * 60 * 1000,
+      clientId: "web-device-12345678",
+    })],
+  ]);
   return {
     getItem(key) { return values.get(key) || null; },
+    setItem(key, value) { values.set(key, String(value)); },
+    removeItem(key) { values.delete(key); },
   };
 }
 
@@ -32,13 +44,13 @@ function callAuth(authCallback) {
 
 test("Realtime options use authCallback and never contain a permanent API key", () => {
   const options = createSecureAblyRealtimeOptions({
-    clientId: "client-12345678",
-    storage: storageWith(),
+    clientId: CLIENT_ID,
+    storage: storageWithSession(),
     fetchImpl: async () => response({}),
     autoConnect: false,
   });
 
-  assert.equal(options.clientId, "client-12345678");
+  assert.equal(options.clientId, CLIENT_ID);
   assert.equal(options.autoConnect, false);
   assert.equal(typeof options.authCallback, "function");
   assert.equal(Object.hasOwn(options, "key"), false);
@@ -47,18 +59,20 @@ test("Realtime options use authCallback and never contain a permanent API key", 
   assert.equal(options.suspendedRetryTimeout, 5_000);
 });
 
-test("authCallback obtains a fresh Yandex JWT whenever Ably asks for authorization", async () => {
+test("authCallback obtains a fresh Yandex JWT through the shared session whenever Ably asks", async () => {
   let requestCount = 0;
   const authCallback = createSecureAblyAuthCallback({
-    clientId: "client-12345678",
+    clientId: CLIENT_ID,
     endpoint: "https://function.example/token",
-    storage: storageWith(),
-    fetchImpl: async () => {
+    storage: storageWithSession(),
+    fetchImpl: async (_url, options) => {
       requestCount += 1;
+      assert.equal(options.headers["X-Masterskaya-Session"], SESSION_TOKEN);
+      assert.equal(options.headers["X-Masterskaya-GitHub-Token"], undefined);
       return response({
         ok: true,
         token: `header.payload.signature${requestCount}`,
-        clientId: "client-12345678",
+        clientId: CLIENT_ID,
         expiresAt: 1_800_000_000_000 + requestCount,
       });
     },
@@ -69,16 +83,18 @@ test("authCallback obtains a fresh Yandex JWT whenever Ably asks for authorizati
   assert.equal(requestCount, 2);
 });
 
-test("authCallback propagates Yandex authorization errors to Ably", async () => {
+test("authCallback propagates Yandex session authorization errors when fallback is unavailable", async () => {
+  const storage = storageWithSession();
+  storage.removeItem("github_token_v1");
   const authCallback = createSecureAblyAuthCallback({
-    clientId: "client-12345678",
-    storage: storageWith(),
-    fetchImpl: async () => response({ ok: false, error: "GITHUB_ACCESS_DENIED" }, 403),
+    clientId: CLIENT_ID,
+    storage,
+    fetchImpl: async () => response({ ok: false, error: "SESSION_INVALID" }, 401),
   });
 
   await assert.rejects(
     callAuth(authCallback),
-    error => error.code === "GITHUB_ACCESS_DENIED",
+    error => ["SESSION_INVALID", "GITHUB_TOKEN_MISSING"].includes(error.code),
   );
 });
 
