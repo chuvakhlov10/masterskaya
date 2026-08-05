@@ -9,10 +9,10 @@ const SESSION_KEY = "masterskaya_storage_session_v1";
 const DEVICE_NAME_KEY = "masterskaya_device_name_v1";
 const REQUEST_TIMEOUT_MS = 20_000;
 // Recovery performs several sequential GitHub reads/writes inside one function
-// invocation. The browser must wait longer than the Cloud Function's 30-second
-// execution timeout so it can receive either the completed response or the real
-// server-side error instead of aborting the request first.
-export const RECOVERY_REQUEST_TIMEOUT_MS = 40_000;
+// invocation. The browser must wait longer than the Cloud Function's dedicated
+// 60-second execution timeout so it can receive either the completed response or
+// the real server-side error instead of aborting the request first.
+export const RECOVERY_REQUEST_TIMEOUT_MS = 75_000;
 
 function makeError(code, cause) {
   const error = new Error(String(code || "DEVICE_REQUEST_FAILED"));
