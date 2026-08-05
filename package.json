@@ -5,9 +5,11 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:functions": "node scripts/build-yandex-functions.mjs",
+    "verify:functions": "node scripts/verify-yandex-bundles.mjs",
     "preview": "vite preview",
     "test": "node --experimental-default-type=module --test tests/*.test.mjs",
-    "check": "npm run test && npm run build"
+    "check": "npm run test && npm run build && npm run build:functions && npm run verify:functions"
   },
   "dependencies": {
     "ably": "^2.23.0",
