@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 
 const mainSource = await readFile(new URL('../src/main.jsx', import.meta.url), 'utf8');
 const gateSource = await readFile(new URL('../src/DevicePairingGate.jsx', import.meta.url), 'utf8');
+const healthSource = await readFile(new URL('../src/SystemHealthControl.jsx', import.meta.url), 'utf8');
 const statusSource = await readFile(new URL('../src/status-core.js', import.meta.url), 'utf8');
 
 test('main application is wrapped by the device pairing gate', () => {
@@ -25,6 +26,14 @@ test('connected-device manager can create and revoke device access', () => {
   assert.match(gateSource, /Отключить/);
 });
 
-test('pairing UI release is version 1.3.0', () => {
-  assert.match(statusSource, /APP_VERSION = "1\.3\.0"/);
+test('connected application exposes safe server health checks', () => {
+  assert.match(mainSource, /import SystemHealthControl from ['"]\.\/SystemHealthControl\.jsx['"]/);
+  assert.match(mainSource, /<SystemHealthControl \/>/);
+  assert.match(healthSource, /checkServerHealth/);
+  assert.match(healthSource, /Хранилище/);
+  assert.match(healthSource, /Live-синхронизация/);
+});
+
+test('server health release is version 1.3.1', () => {
+  assert.match(statusSource, /APP_VERSION = "1\.3\.1"/);
 });
