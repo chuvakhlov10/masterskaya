@@ -49,6 +49,7 @@ function event(token=session()){
 
 test('active device registry check is required before an Ably JWT is issued',async()=>{
   const calls=[];
+  const sessionToken=session();
   const handler=createHandler({
     env:ENV,
     now:()=>NOW,
@@ -57,14 +58,14 @@ test('active device registry check is required before an Ably JWT is issued',asy
       return jsonResponse({ok:true,device:{id:DEVICE_ID,name:'Ноутбук',lastSeenAt:NOW}});
     },
   });
-  const response=await handler(event());
+  const response=await handler(event(sessionToken));
   const payload=JSON.parse(response.body);
   assert.equal(response.statusCode,200);
   assert.equal(payload.ok,true);
   assert.equal(payload.clientId,CLIENT_ID);
   assert.equal(calls.length,1);
   assert.equal(calls[0].url,DEFAULT_STORAGE_GATEWAY_URL);
-  assert.equal(calls[0].options.headers['X-Masterskaya-Session'],session());
+  assert.equal(calls[0].options.headers['X-Masterskaya-Session'],sessionToken);
   assert.deepEqual(JSON.parse(calls[0].options.body),{action:'session-check'});
 });
 
