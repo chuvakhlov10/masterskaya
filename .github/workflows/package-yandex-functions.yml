@@ -1,0 +1,36 @@
+name: Package Yandex functions
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build deployment ZIPs
+        run: |
+          set -euo pipefail
+          mkdir -p package/storage package/ably output
+          cp yandex-storage-function/index.js package/storage/index.js
+          cp yandex-storage-function/pairing-index.js package/storage/pairing-index.js
+          cp yandex-storage-function/device-index.js package/storage/device-index.js
+          cp yandex-storage-function/device-auth.js package/storage/device-auth.js
+          cp yandex-function/index.js package/ably/index.js
+          cp yandex-function/device-aware-index.js package/ably/device-aware-index.js
+          (cd package/storage && zip -9 ../../output/masterskaya-storage-device-pairing.zip *.js)
+          (cd package/ably && zip -9 ../../output/masterskaya-ably-device-auth.zip *.js)
+          sha256sum output/*.zip > output/SHA256SUMS.txt
+          unzip -l output/masterskaya-storage-device-pairing.zip
+          unzip -l output/masterskaya-ably-device-auth.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yandex-function-zips
+          path: output/*
+          if-no-files-found: error
+          retention-days: 3
