@@ -1,4 +1,4 @@
-export const APP_VERSION = "1.4.2";
+export const APP_VERSION = "1.4.3";
 
 function nonNegativeInt(value) {
   const number = Number(value);
