@@ -12,6 +12,7 @@ Security properties:
 - issues signed 30-day device sessions;
 - creates 12-character pairing codes with about 60 bits of entropy, valid for ten minutes and consumed once;
 - checks the device registry before renewal and every data request; revoked devices are denied;
+- exposes an authenticated `session-check` action so the separate Ably function can deny revoked devices before issuing a Live token;
 - keeps the legacy PAT bootstrap action only as a temporary rollback path during migration;
 - never returns or logs the GitHub App private key, installation token, session secret, bootstrap PAT, or raw pairing code after creation;
 - has no external npm dependencies.
@@ -21,12 +22,12 @@ Security properties:
 Use the existing function named `masterskaya-storage-gateway`.
 
 - Runtime: Node.js 22
-- Entry point: `pairing-index.handler`
+- Entry point: `device-index.handler`
 - Memory: 128 MB
 - Timeout: 30 seconds
 - Service account: not required
 - Public function: enabled
-- Upload: ZIP archive with `index.js`, `pairing-index.js`, and `device-auth.js` at the archive root
+- Upload: ZIP archive with `index.js`, `pairing-index.js`, `device-index.js`, and `device-auth.js` at the archive root
 - Do not use `?integration=raw`
 
 ## Environment variables
@@ -53,6 +54,7 @@ Authenticated requests use header `X-Masterskaya-Session` and support:
 
 - `renew` — rotate the 30-day session;
 - `github` — restricted data read/write;
+- `session-check` — confirm that the device is still active;
 - `devices` — list connected and revoked devices;
 - `pairing-create` — create a ten-minute one-time pairing code;
 - `device-rename` — rename a device;
