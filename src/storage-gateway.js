@@ -30,6 +30,10 @@ function safeRemove(storage, key) {
   catch {}
 }
 
+function clearLegacyGithubToken(storage) {
+  safeRemove(storage, LEGACY_TOKEN_KEY);
+}
+
 function randomId() {
   const uuid = globalThis.crypto?.randomUUID?.();
   if (uuid) return `web-${uuid}`;
@@ -178,12 +182,16 @@ export async function storageGatewayRequest({
   storage = globalThis.localStorage,
 } = {}) {
   const session = await ensureStorageSession({ endpoint, fetchImpl, storage });
-  return postGateway({
+  const payload = await postGateway({
     endpoint,
     fetchImpl,
     headers: { "X-Masterskaya-Session": session.token },
     body: { action: "github", method, path, ...(ref ? { ref } : {}), ...(body !== undefined ? { body } : {}) },
   });
+  // Сессия доказала доступ к рабочему хранилищу. Долгоживущий PAT больше не
+  // нужен и удаляется только после успешного ответа, а не при сетевой ошибке.
+  clearLegacyGithubToken(storage);
+  return payload;
 }
 
 export async function verifyStorageGatewayRead(options = {}) {
