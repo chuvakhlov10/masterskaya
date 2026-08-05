@@ -92,7 +92,6 @@ test("gateway read uses the stored session and never sends the PAT", async () =>
     path: "status.json",
     ref: "data-backups",
     storage,
-    now: 1_800_000_000_000,
     fetchImpl: async (_url, options) => {
       calls.push(options);
       return response({ content: "e30=", sha: "a".repeat(40) });
@@ -112,6 +111,7 @@ test("renew replaces a near-expiry session without using the PAT", async () => {
   });
   const calls = [];
   const renewed = await ensureStorageSession({
+    endpoint: "https://function.example/renew-success",
     storage,
     now: 1_800_000_000_000,
     fetchImpl: async (_url, options) => {
@@ -128,30 +128,43 @@ test("renew replaces a near-expiry session without using the PAT", async () => {
   assert.equal(calls[0].headers["X-Masterskaya-GitHub-Token"], undefined);
 });
 
-test("temporary renew failure keeps the still-valid session", async () => {
+test("temporary renew failure keeps the session and backs off later renew attempts", async () => {
+  const endpoint = "https://function.example/renew-outage";
   const storage = makeStorage({
     github_token_v1: "legacy-token-must-not-be-used",
     masterskaya_storage_session_v1: storedSession(SESSION_TOKEN, 1_800_000_100_000),
   });
   let calls = 0;
+  const fetchImpl = async () => {
+    calls++;
+    throw new TypeError("network down");
+  };
   const session = await ensureStorageSession({
+    endpoint,
     storage,
     now: 1_800_000_000_000,
-    fetchImpl: async () => {
-      calls++;
-      throw new TypeError("network down");
-    },
+    fetchImpl,
+    waitImpl: noWait,
+    random: noRandom,
+  });
+  const duringBackoff = await ensureStorageSession({
+    endpoint,
+    storage,
+    now: 1_800_000_001_000,
+    fetchImpl,
     waitImpl: noWait,
     random: noRandom,
   });
 
   assert.equal(calls, 3);
   assert.equal(session.token, SESSION_TOKEN);
+  assert.equal(duringBackoff.token, SESSION_TOKEN);
   assert.equal(readStoredStorageSession(storage)?.token, SESSION_TOKEN);
   assert.equal(storage.getItem("github_token_v1"), "legacy-token-must-not-be-used");
 });
 
 test("concurrent session checks share one renewal request", async () => {
+  const endpoint = "https://function.example/renew-concurrent";
   const storage = makeStorage({
     masterskaya_storage_session_v1: storedSession(SESSION_TOKEN, 1_800_000_100_000),
   });
@@ -164,8 +177,8 @@ test("concurrent session checks share one renewal request", async () => {
     return response({ ok: true, sessionToken: "renewed.payload.signature", expiresAt: FUTURE, clientId: CLIENT_ID });
   };
 
-  const first = ensureStorageSession({ storage, now: 1_800_000_000_000, fetchImpl });
-  const second = ensureStorageSession({ storage, now: 1_800_000_000_000, fetchImpl });
+  const first = ensureStorageSession({ endpoint, storage, now: 1_800_000_000_000, fetchImpl });
+  const second = ensureStorageSession({ endpoint, storage, now: 1_800_000_000_000, fetchImpl });
   await Promise.resolve();
   assert.equal(calls, 1);
   release();
@@ -204,7 +217,6 @@ test("revoked device clears the session and emits a pairing event", async () => 
       method: "GET",
       path: "data/records.json",
       storage,
-      now: 1_800_000_000_000,
       eventTarget: eventTarget(events),
       fetchImpl: async () => response({ ok: false, error: "DEVICE_REVOKED" }, 401),
       waitImpl: noWait,
@@ -223,7 +235,6 @@ test("temporary gateway failure is retried without clearing the session", async 
     method: "GET",
     path: "data/records.json",
     storage,
-    now: 1_800_000_000_000,
     fetchImpl: async () => {
       calls++;
       if (calls < 3) return response({ ok: false, error: "GITHUB_REQUEST_FAILED" }, 503);
@@ -242,7 +253,6 @@ test("read verification requires a GitHub Contents response", async () => {
   await assert.rejects(
     verifyStorageGatewayRead({
       storage,
-      now: 1_800_000_000_000,
       fetchImpl: async () => response({ ok: true }),
     }),
     error => error.code === "GATEWAY_READ_INVALID",
