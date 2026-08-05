@@ -27,10 +27,27 @@ function response(payload, status = 200) {
   };
 }
 
+function eventTarget(events) {
+  return {
+    CustomEvent: class {
+      constructor(type, options = {}) { this.type = type; this.detail = options.detail; }
+    },
+    dispatchEvent(event) { events.push(event); return true; },
+  };
+}
+
 const SESSION_TOKEN = "header.payload.signature";
 const CLIENT_ID = "web-device-12345678";
+const FUTURE = 1_900_000_000_000;
 
-test("bootstrap sends the legacy PAT only in the custom header and stores the returned session", async () => {
+function storedSession(token = SESSION_TOKEN, expiresAt = FUTURE) {
+  return JSON.stringify({ token, expiresAt, clientId: CLIENT_ID });
+}
+
+const noWait = async () => {};
+const noRandom = () => 0;
+
+test("explicit bootstrap sends the legacy PAT only in the custom header", async () => {
   const storage = makeStorage({
     github_token_v1: "github_pat_abcdefghijklmnopqrstuvwxyz012345",
     masterskaya_device_id_v1: CLIENT_ID,
@@ -41,7 +58,7 @@ test("bootstrap sends the legacy PAT only in the custom header and stores the re
     storage,
     fetchImpl: async (url, options) => {
       calls.push({ url, options });
-      return response({ ok: true, sessionToken: SESSION_TOKEN, expiresAt: 1_900_000_000_000, clientId: CLIENT_ID });
+      return response({ ok: true, sessionToken: SESSION_TOKEN, expiresAt: FUTURE, clientId: CLIENT_ID });
     },
   });
 
@@ -50,10 +67,9 @@ test("bootstrap sends the legacy PAT only in the custom header and stores the re
   assert.equal(calls[0].options.headers["X-Masterskaya-GitHub-Token"], "github_pat_abcdefghijklmnopqrstuvwxyz012345");
   assert.equal(calls[0].options.headers.Authorization, undefined);
   assert.deepEqual(JSON.parse(calls[0].options.body), { action: "bootstrap", clientId: CLIENT_ID });
-  assert.equal(readStoredStorageSession(storage)?.token, SESSION_TOKEN);
 });
 
-test("missing PAT fails before bootstrap network request", async () => {
+test("missing PAT fails before explicit bootstrap network request", async () => {
   let called = false;
   await assert.rejects(
     bootstrapStorageSession({
@@ -68,11 +84,7 @@ test("missing PAT fails before bootstrap network request", async () => {
 test("gateway read uses the stored session and never sends the PAT", async () => {
   const storage = makeStorage({
     github_token_v1: "github_pat_should_not_be_sent",
-    masterskaya_storage_session_v1: JSON.stringify({
-      token: SESSION_TOKEN,
-      expiresAt: Date.now() + 10 * 24 * 60 * 60 * 1000,
-      clientId: CLIENT_ID,
-    }),
+    masterskaya_storage_session_v1: storedSession(),
   });
   const calls = [];
   const payload = await storageGatewayRequest({
@@ -89,31 +101,25 @@ test("gateway read uses the stored session and never sends the PAT", async () =>
   assert.equal(payload.sha, "a".repeat(40));
   assert.equal(calls[0].headers["X-Masterskaya-Session"], SESSION_TOKEN);
   assert.equal(calls[0].headers["X-Masterskaya-GitHub-Token"], undefined);
-  assert.deepEqual(JSON.parse(calls[0].body), {
-    action: "github",
-    method: "GET",
-    path: "status.json",
-    ref: "data-backups",
-  });
+  assert.equal(storage.getItem("github_token_v1"), null);
 });
 
 test("renew replaces a near-expiry session without using the PAT", async () => {
   const storage = makeStorage({
     github_token_v1: "github_pat_should_not_be_sent",
-    masterskaya_storage_session_v1: JSON.stringify({
-      token: SESSION_TOKEN,
-      expiresAt: 1_800_000_100_000,
-      clientId: CLIENT_ID,
-    }),
+    masterskaya_storage_session_v1: storedSession(SESSION_TOKEN, 1_800_000_100_000),
   });
   const calls = [];
   const renewed = await ensureStorageSession({
+    endpoint: "https://function.example/renew-success",
     storage,
     now: 1_800_000_000_000,
     fetchImpl: async (_url, options) => {
       calls.push(options);
-      return response({ ok: true, sessionToken: "renewed.payload.signature", expiresAt: 1_900_000_000_000, clientId: CLIENT_ID });
+      return response({ ok: true, sessionToken: "renewed.payload.signature", expiresAt: FUTURE, clientId: CLIENT_ID });
     },
+    waitImpl: noWait,
+    random: noRandom,
   });
 
   assert.equal(renewed.token, "renewed.payload.signature");
@@ -122,46 +128,133 @@ test("renew replaces a near-expiry session without using the PAT", async () => {
   assert.equal(calls[0].headers["X-Masterskaya-GitHub-Token"], undefined);
 });
 
-test("expired stored session falls back to one-time bootstrap", async () => {
+test("temporary renew failure keeps the session and backs off later renew attempts", async () => {
+  const endpoint = "https://function.example/renew-outage";
   const storage = makeStorage({
-    github_token_v1: "github_pat_abcdefghijklmnopqrstuvwxyz012345",
-    masterskaya_device_id_v1: CLIENT_ID,
-    masterskaya_storage_session_v1: JSON.stringify({ token: SESSION_TOKEN, expiresAt: 1, clientId: CLIENT_ID }),
+    github_token_v1: "legacy-token-must-not-be-used",
+    masterskaya_storage_session_v1: storedSession(SESSION_TOKEN, 1_800_000_100_000),
   });
-  const calls = [];
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls++;
+    throw new TypeError("network down");
+  };
   const session = await ensureStorageSession({
+    endpoint,
     storage,
     now: 1_800_000_000_000,
-    fetchImpl: async (_url, options) => {
-      calls.push(options);
-      return response({ ok: true, sessionToken: "fresh.payload.signature", expiresAt: 1_900_000_000_000, clientId: CLIENT_ID });
-    },
+    fetchImpl,
+    waitImpl: noWait,
+    random: noRandom,
   });
-  assert.equal(session.token, "fresh.payload.signature");
-  assert.deepEqual(JSON.parse(calls[0].body), { action: "bootstrap", clientId: CLIENT_ID });
+  const duringBackoff = await ensureStorageSession({
+    endpoint,
+    storage,
+    now: 1_800_000_001_000,
+    fetchImpl,
+    waitImpl: noWait,
+    random: noRandom,
+  });
+
+  assert.equal(calls, 3);
+  assert.equal(session.token, SESSION_TOKEN);
+  assert.equal(duringBackoff.token, SESSION_TOKEN);
+  assert.equal(readStoredStorageSession(storage)?.token, SESSION_TOKEN);
+  assert.equal(storage.getItem("github_token_v1"), "legacy-token-must-not-be-used");
 });
 
-test("gateway error code is preserved", async () => {
+test("concurrent session checks share one renewal request", async () => {
+  const endpoint = "https://function.example/renew-concurrent";
   const storage = makeStorage({
-    github_token_v1: "github_pat_abcdefghijklmnopqrstuvwxyz012345",
-    masterskaya_device_id_v1: CLIENT_ID,
+    masterskaya_storage_session_v1: storedSession(SESSION_TOKEN, 1_800_000_100_000),
   });
+  let calls = 0;
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  const fetchImpl = async () => {
+    calls++;
+    await pending;
+    return response({ ok: true, sessionToken: "renewed.payload.signature", expiresAt: FUTURE, clientId: CLIENT_ID });
+  };
+
+  const first = ensureStorageSession({ endpoint, storage, now: 1_800_000_000_000, fetchImpl });
+  const second = ensureStorageSession({ endpoint, storage, now: 1_800_000_000_000, fetchImpl });
+  await Promise.resolve();
+  assert.equal(calls, 1);
+  release();
+  const [a, b] = await Promise.all([first, second]);
+  assert.equal(a.token, "renewed.payload.signature");
+  assert.equal(b.token, "renewed.payload.signature");
+  assert.equal(calls, 1);
+});
+
+test("expired session is cleared and never bootstrapped automatically", async () => {
+  const events = [];
+  const storage = makeStorage({
+    github_token_v1: "legacy-token-must-not-be-used",
+    masterskaya_storage_session_v1: storedSession(SESSION_TOKEN, 1),
+  });
+  let called = false;
   await assert.rejects(
-    bootstrapStorageSession({ storage, fetchImpl: async () => response({ ok: false, error: "GITHUB_APP_NOT_CONFIGURED" }, 503) }),
-    error => error.code === "GITHUB_APP_NOT_CONFIGURED",
+    ensureStorageSession({
+      storage,
+      now: 1_800_000_000_000,
+      eventTarget: eventTarget(events),
+      fetchImpl: async () => { called = true; },
+    }),
+    error => error.code === "SESSION_EXPIRED",
   );
+  assert.equal(called, false);
+  assert.equal(readStoredStorageSession(storage), null);
+  assert.equal(events[0]?.detail?.code, "SESSION_EXPIRED");
+});
+
+test("revoked device clears the session and emits a pairing event", async () => {
+  const events = [];
+  const storage = makeStorage({ masterskaya_storage_session_v1: storedSession() });
+  await assert.rejects(
+    storageGatewayRequest({
+      method: "GET",
+      path: "data/records.json",
+      storage,
+      eventTarget: eventTarget(events),
+      fetchImpl: async () => response({ ok: false, error: "DEVICE_REVOKED" }, 401),
+      waitImpl: noWait,
+      random: noRandom,
+    }),
+    error => error.code === "DEVICE_REVOKED",
+  );
+  assert.equal(readStoredStorageSession(storage), null);
+  assert.equal(events[0]?.detail?.code, "DEVICE_REVOKED");
+});
+
+test("temporary gateway failure is retried without clearing the session", async () => {
+  const storage = makeStorage({ masterskaya_storage_session_v1: storedSession() });
+  let calls = 0;
+  const payload = await storageGatewayRequest({
+    method: "GET",
+    path: "data/records.json",
+    storage,
+    fetchImpl: async () => {
+      calls++;
+      if (calls < 3) return response({ ok: false, error: "GITHUB_REQUEST_FAILED" }, 503);
+      return response({ sha: "a".repeat(40), content: "e30=" });
+    },
+    waitImpl: noWait,
+    random: noRandom,
+  });
+  assert.equal(calls, 3);
+  assert.equal(payload.sha, "a".repeat(40));
+  assert.equal(readStoredStorageSession(storage)?.token, SESSION_TOKEN);
 });
 
 test("read verification requires a GitHub Contents response", async () => {
-  const storage = makeStorage({
-    masterskaya_storage_session_v1: JSON.stringify({
-      token: SESSION_TOKEN,
-      expiresAt: Date.now() + 10 * 24 * 60 * 60 * 1000,
-      clientId: CLIENT_ID,
-    }),
-  });
+  const storage = makeStorage({ masterskaya_storage_session_v1: storedSession() });
   await assert.rejects(
-    verifyStorageGatewayRead({ storage, fetchImpl: async () => response({ ok: true }) }),
+    verifyStorageGatewayRead({
+      storage,
+      fetchImpl: async () => response({ ok: true }),
+    }),
     error => error.code === "GATEWAY_READ_INVALID",
   );
 });

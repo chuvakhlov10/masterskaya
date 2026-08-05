@@ -5,14 +5,58 @@ const DEVICE_ID_KEY = "masterskaya_device_id_v1";
 const PROBE_RESULT_KEY = "masterskaya_storage_probe_v1";
 const REQUEST_TIMEOUT_MS = 20_000;
 const SESSION_RENEW_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
+const RENEW_RETRY_BASE_MS = 5 * 60 * 1000;
+const RENEW_RETRY_JITTER_MS = 60 * 1000;
+const RETRY_DELAYS_MS = [450, 1_400];
 
 export const STORAGE_GATEWAY_ENDPOINT = DEFAULT_ENDPOINT;
+export const STORAGE_SESSION_EVENT = "masterskaya-storage-session";
 
-function makeError(code, cause) {
+export const TERMINAL_SESSION_ERRORS = new Set([
+  "SESSION_REQUIRED",
+  "SESSION_INVALID",
+  "SESSION_EXPIRED",
+  "DEVICE_REVOKED",
+  "DEVICE_NOT_FOUND",
+]);
+
+const TRANSIENT_ERROR_CODES = new Set([
+  "FETCH_UNAVAILABLE",
+  "GATEWAY_REQUEST_TIMEOUT",
+  "GATEWAY_REQUEST_FAILED",
+  "GATEWAY_RESPONSE_INVALID",
+  "GITHUB_REQUEST_TIMEOUT",
+  "GITHUB_REQUEST_FAILED",
+  "GITHUB_ACCESS_CHECK_FAILED",
+  "GITHUB_APP_TOKEN_FAILED",
+  "GITHUB_INSTALLATION_LOOKUP_FAILED",
+  "DEVICE_AUTH_CHECK_TIMEOUT",
+  "DEVICE_AUTH_CHECK_FAILED",
+]);
+
+function makeError(code, cause, status) {
   const error = new Error(code);
   error.code = code;
   if (cause) error.cause = cause;
+  if (Number.isInteger(status)) error.status = status;
   return error;
+}
+
+function errorCode(error) {
+  return String(error?.code || error?.message || "GATEWAY_REQUEST_FAILED");
+}
+
+export function isTerminalSessionError(error) {
+  return TERMINAL_SESSION_ERRORS.has(errorCode(error));
+}
+
+export function isTransientGatewayError(error) {
+  const code = errorCode(error);
+  if (TRANSIENT_ERROR_CODES.has(code)) return true;
+  const status = Number(error?.status);
+  if ([408, 425, 429, 500, 502, 503, 504].includes(status)) return true;
+  const match = /^GATEWAY_HTTP_(\d{3})$/.exec(code);
+  return !!match && [408, 425, 429, 500, 502, 503, 504].includes(Number(match[1]));
 }
 
 function safeGet(storage, key) {
@@ -70,6 +114,27 @@ export function clearStoredStorageSession(storage = globalThis.localStorage) {
   safeRemove(storage, SESSION_KEY);
 }
 
+function dispatchSessionEvent(code, eventTarget = globalThis) {
+  try {
+    if (typeof eventTarget?.dispatchEvent !== "function") return;
+    const EventCtor = eventTarget.CustomEvent || globalThis.CustomEvent;
+    if (typeof EventCtor === "function") {
+      eventTarget.dispatchEvent(new EventCtor(STORAGE_SESSION_EVENT, { detail: { code } }));
+      return;
+    }
+    eventTarget.dispatchEvent({ type: STORAGE_SESSION_EVENT, detail: { code } });
+  } catch {}
+}
+
+export function invalidateStoredStorageSession({
+  code = "SESSION_INVALID",
+  storage = globalThis.localStorage,
+  eventTarget = globalThis,
+} = {}) {
+  clearStoredStorageSession(storage);
+  dispatchSessionEvent(code, eventTarget);
+}
+
 function storeSession(details, storage) {
   const normalized = {
     token: details.sessionToken,
@@ -86,10 +151,10 @@ function storeSession(details, storage) {
 
 async function readJson(response) {
   try { return await response.json(); }
-  catch (cause) { throw makeError("GATEWAY_RESPONSE_INVALID", cause); }
+  catch (cause) { throw makeError("GATEWAY_RESPONSE_INVALID", cause, response?.status); }
 }
 
-async function postGateway({ endpoint, headers, body, fetchImpl, timeoutMs = REQUEST_TIMEOUT_MS }) {
+async function postGatewayOnce({ endpoint, headers, body, fetchImpl, timeoutMs = REQUEST_TIMEOUT_MS }) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   let response;
@@ -109,8 +174,36 @@ async function postGateway({ endpoint, headers, body, fetchImpl, timeoutMs = REQ
   }
 
   const payload = await readJson(response);
-  if (!response.ok) throw makeError(String(payload?.error || `GATEWAY_HTTP_${response.status}`));
+  if (!response.ok) throw makeError(String(payload?.error || `GATEWAY_HTTP_${response.status}`), undefined, response.status);
   return payload;
+}
+
+function wait(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function postGateway({
+  endpoint,
+  headers,
+  body,
+  fetchImpl,
+  timeoutMs = REQUEST_TIMEOUT_MS,
+  maxAttempts = 3,
+  waitImpl = wait,
+  random = Math.random,
+}) {
+  let lastError;
+  for (let attempt = 0; attempt < Math.max(1, maxAttempts); attempt++) {
+    try {
+      return await postGatewayOnce({ endpoint, headers, body, fetchImpl, timeoutMs });
+    } catch (error) {
+      lastError = error;
+      if (!isTransientGatewayError(error) || attempt >= maxAttempts - 1) throw error;
+      const base = RETRY_DELAYS_MS[Math.min(attempt, RETRY_DELAYS_MS.length - 1)] || 1_400;
+      await waitImpl(base + Math.floor(random() * Math.min(350, base * .25)));
+    }
+  }
+  throw lastError || makeError("GATEWAY_REQUEST_FAILED");
 }
 
 export async function bootstrapStorageSession({
@@ -138,6 +231,8 @@ export async function renewStorageSession({
   fetchImpl = globalThis.fetch,
   storage = globalThis.localStorage,
   session = readStoredStorageSession(storage),
+  waitImpl,
+  random,
 } = {}) {
   if (!session?.token) throw makeError("SESSION_REQUIRED");
   const payload = await postGateway({
@@ -145,9 +240,29 @@ export async function renewStorageSession({
     fetchImpl,
     headers: { "X-Masterskaya-Session": session.token },
     body: { action: "renew" },
+    waitImpl,
+    random,
   });
   if (payload?.clientId !== session.clientId) throw makeError("SESSION_CLIENT_ID_MISMATCH");
   return storeSession(payload, storage);
+}
+
+const renewalInFlight = new Map();
+const renewalRetryAfter = new Map();
+
+function renewalKey({ endpoint, session }) {
+  return `${endpoint}|${session?.clientId || ""}|${session?.token || ""}`;
+}
+
+function sharedRenew(options) {
+  const key = renewalKey(options);
+  if (!renewalInFlight.has(key)) {
+    const request = renewStorageSession(options).finally(() => {
+      renewalInFlight.delete(key);
+    });
+    renewalInFlight.set(key, request);
+  }
+  return renewalInFlight.get(key);
 }
 
 export async function ensureStorageSession({
@@ -155,21 +270,41 @@ export async function ensureStorageSession({
   fetchImpl = globalThis.fetch,
   storage = globalThis.localStorage,
   now = Date.now(),
+  eventTarget = globalThis,
+  waitImpl,
+  random = Math.random,
 } = {}) {
   const existing = readStoredStorageSession(storage);
-  if (!existing || existing.expiresAt <= now) {
-    clearStoredStorageSession(storage);
-    return bootstrapStorageSession({ endpoint, fetchImpl, storage });
+  if (!existing) throw makeError("SESSION_REQUIRED");
+  if (existing.expiresAt <= now) {
+    invalidateStoredStorageSession({ code: "SESSION_EXPIRED", storage, eventTarget });
+    throw makeError("SESSION_EXPIRED");
   }
-  if (existing.expiresAt - now <= SESSION_RENEW_WINDOW_MS) {
-    try {
-      return await renewStorageSession({ endpoint, fetchImpl, storage, session: existing });
-    } catch {
-      clearStoredStorageSession(storage);
-      return bootstrapStorageSession({ endpoint, fetchImpl, storage, clientId: existing.clientId });
+  if (existing.expiresAt - now > SESSION_RENEW_WINDOW_MS) return existing;
+
+  const key = renewalKey({ endpoint, session: existing });
+  if ((renewalRetryAfter.get(key) || 0) > now) return existing;
+
+  try {
+    const renewed = await sharedRenew({ endpoint, fetchImpl, storage, session: existing, waitImpl, random });
+    renewalRetryAfter.delete(key);
+    return renewed;
+  } catch (error) {
+    if (isTerminalSessionError(error)) {
+      renewalRetryAfter.delete(key);
+      invalidateStoredStorageSession({ code: errorCode(error), storage, eventTarget });
+      throw error;
     }
+    if (isTransientGatewayError(error)) {
+      // Старая сессия ещё действует. Сетевой сбой не должен удалять её и
+      // переводить устройство на повторное подключение. Следующая попытка
+      // продления откладывается, чтобы обычные запросы не тормозили и не
+      // создавали шторм запросов во время сбоя.
+      renewalRetryAfter.set(key, now + RENEW_RETRY_BASE_MS + Math.floor(random() * RENEW_RETRY_JITTER_MS));
+      return existing;
+    }
+    throw error;
   }
-  return existing;
 }
 
 export async function storageGatewayRequest({
@@ -180,18 +315,32 @@ export async function storageGatewayRequest({
   endpoint = DEFAULT_ENDPOINT,
   fetchImpl = globalThis.fetch,
   storage = globalThis.localStorage,
+  eventTarget = globalThis,
+  maxAttempts = 3,
+  waitImpl,
+  random,
 } = {}) {
-  const session = await ensureStorageSession({ endpoint, fetchImpl, storage });
-  const payload = await postGateway({
-    endpoint,
-    fetchImpl,
-    headers: { "X-Masterskaya-Session": session.token },
-    body: { action: "github", method, path, ...(ref ? { ref } : {}), ...(body !== undefined ? { body } : {}) },
-  });
-  // Сессия доказала доступ к рабочему хранилищу. Долгоживущий PAT больше не
-  // нужен и удаляется только после успешного ответа, а не при сетевой ошибке.
-  clearLegacyGithubToken(storage);
-  return payload;
+  const session = await ensureStorageSession({ endpoint, fetchImpl, storage, eventTarget, waitImpl, random });
+  try {
+    const payload = await postGateway({
+      endpoint,
+      fetchImpl,
+      headers: { "X-Masterskaya-Session": session.token },
+      body: { action: "github", method, path, ...(ref ? { ref } : {}), ...(body !== undefined ? { body } : {}) },
+      maxAttempts,
+      waitImpl,
+      random,
+    });
+    // Сессия доказала доступ к рабочему хранилищу. Долгоживущий PAT больше не
+    // нужен и удаляется только после успешного ответа, а не при сетевой ошибке.
+    clearLegacyGithubToken(storage);
+    return payload;
+  } catch (error) {
+    if (isTerminalSessionError(error)) {
+      invalidateStoredStorageSession({ code: errorCode(error), storage, eventTarget });
+    }
+    throw error;
+  }
 }
 
 export async function verifyStorageGatewayRead(options = {}) {
@@ -248,7 +397,7 @@ export function installStorageGatewayProbe(options = {}) {
       showNotice(result);
       console.info("[STORAGE GATEWAY] GitHub App read verified");
     } catch (error) {
-      const code = String(error?.code || error?.message || "STORAGE_PROBE_FAILED");
+      const code = errorCode(error);
       const result = { ok: false, checkedAt, endpoint: options.endpoint || DEFAULT_ENDPOINT, code };
       safeSet(storage, PROBE_RESULT_KEY, JSON.stringify(result));
       showNotice(result);
