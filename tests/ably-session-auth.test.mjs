@@ -72,9 +72,10 @@ test("valid shared session authorizes Ably without sending the PAT", async () =>
 });
 
 test("temporary Ably auth failure is retried and keeps the shared session", async () => {
+  const originalSession = storedSession();
   const storage = makeStorage({
     github_token_v1: PAT,
-    masterskaya_storage_session_v1: storedSession(),
+    masterskaya_storage_session_v1: originalSession,
   });
   let calls = 0;
   const details = await requestSessionAuthorizedAblyToken({
@@ -94,7 +95,7 @@ test("temporary Ably auth failure is retried and keeps the shared session", asyn
 
   assert.equal(calls, 3);
   assert.equal(details.authMode, "session");
-  assert.equal(storage.getItem("masterskaya_storage_session_v1"), storedSession());
+  assert.equal(storage.getItem("masterskaya_storage_session_v1"), originalSession);
 });
 
 test("server-rejected session clears it and returns device to pairing", async () => {
