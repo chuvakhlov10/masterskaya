@@ -245,15 +245,21 @@ export async function renewStorageSession({
   return storeSession(payload, storage);
 }
 
-let renewalInFlight = null;
+const renewalInFlight = new Map();
+
+function renewalKey({ endpoint, session }) {
+  return `${endpoint}|${session?.clientId || ""}|${session?.token || ""}`;
+}
 
 function sharedRenew(options) {
-  if (!renewalInFlight) {
-    renewalInFlight = renewStorageSession(options).finally(() => {
-      renewalInFlight = null;
+  const key = renewalKey(options);
+  if (!renewalInFlight.has(key)) {
+    const request = renewStorageSession(options).finally(() => {
+      renewalInFlight.delete(key);
     });
+    renewalInFlight.set(key, request);
   }
-  return renewalInFlight;
+  return renewalInFlight.get(key);
 }
 
 export async function ensureStorageSession({
