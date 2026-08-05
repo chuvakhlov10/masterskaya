@@ -11,6 +11,7 @@ import {
   renameDevice,
   revokeDevice,
 } from "./device-pairing-client.js";
+import { STORAGE_SESSION_EVENT } from "./storage-gateway.js";
 
 const palette = {
   bg: "#111318",
@@ -51,7 +52,18 @@ function remainingText(expiresAt, now) {
   return `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
-function NewDeviceScreen({ onEmergency }) {
+function sessionProblemText(code) {
+  switch (String(code || "")) {
+    case "DEVICE_REVOKED": return "Доступ этого устройства отключён. Создайте новый код на действующем устройстве.";
+    case "DEVICE_NOT_FOUND": return "Устройство отсутствует в реестре. Подключите его заново одноразовым кодом.";
+    case "SESSION_EXPIRED": return "Срок подключения истёк. Подключите устройство заново одноразовым кодом.";
+    case "SESSION_INVALID": return "Сессия устройства больше недействительна. Подключите устройство заново.";
+    case "SESSION_REQUIRED": return "На этом устройстве нет действующей сессии подключения.";
+    default: return "";
+  }
+}
+
+function NewDeviceScreen({ onEmergency, reason }) {
   const [deviceName, setDeviceName] = useState(() => readDeviceName());
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
@@ -80,6 +92,12 @@ function NewDeviceScreen({ onEmergency }) {
             Создайте одноразовый код на уже подключённом ноутбуке или телефоне.
           </div>
         </div>
+
+        {reason && (
+          <div style={{ background: "#3a1717", border: "1px solid #7f1d1d", borderRadius: 10, padding: 12, color: "#fecaca", fontSize: 12, fontWeight: 800, lineHeight: 1.5, marginBottom: 12 }}>
+            {reason}
+          </div>
+        )}
 
         <div style={{ background: palette.panel, border: `1px solid ${palette.border}`, borderRadius: 12, padding: 16 }}>
           <label style={{ display: "block", fontSize: 11, fontWeight: 800, color: palette.sub, marginBottom: 7, textTransform: "uppercase", letterSpacing: ".6px" }}>Название устройства</label>
@@ -264,9 +282,31 @@ function DeviceManager({ open, onClose }) {
 export default function DevicePairingGate({ children }) {
   const [emergency, setEmergency] = useState(false);
   const [managerOpen, setManagerOpen] = useState(false);
+  const [sessionProblem, setSessionProblem] = useState("");
+  const [, setSessionEpoch] = useState(0);
+
+  useEffect(() => {
+    const target = globalThis.window || globalThis;
+    const onSessionState = event => {
+      const code = String(event?.detail?.code || "SESSION_INVALID");
+      setSessionProblem(code);
+      setEmergency(false);
+      setManagerOpen(false);
+      setSessionEpoch(value => value + 1);
+    };
+    target?.addEventListener?.(STORAGE_SESSION_EVENT, onSessionState);
+    const timer = setInterval(() => setSessionEpoch(value => value + 1), 30_000);
+    return () => {
+      target?.removeEventListener?.(STORAGE_SESSION_EVENT, onSessionState);
+      clearInterval(timer);
+    };
+  }, []);
+
   const connected = hasActivePairingSession();
 
-  if (!connected && !emergency) return <NewDeviceScreen onEmergency={() => setEmergency(true)} />;
+  if (!connected && !emergency) {
+    return <NewDeviceScreen reason={sessionProblemText(sessionProblem)} onEmergency={() => setEmergency(true)} />;
+  }
 
   return (
     <>
