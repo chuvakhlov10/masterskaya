@@ -5,6 +5,8 @@ const DEVICE_ID_KEY = "masterskaya_device_id_v1";
 const PROBE_RESULT_KEY = "masterskaya_storage_probe_v1";
 const REQUEST_TIMEOUT_MS = 20_000;
 const SESSION_RENEW_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
+const RENEW_RETRY_BASE_MS = 5 * 60 * 1000;
+const RENEW_RETRY_JITTER_MS = 60 * 1000;
 const RETRY_DELAYS_MS = [450, 1_400];
 
 export const STORAGE_GATEWAY_ENDPOINT = DEFAULT_ENDPOINT;
@@ -246,6 +248,7 @@ export async function renewStorageSession({
 }
 
 const renewalInFlight = new Map();
+const renewalRetryAfter = new Map();
 
 function renewalKey({ endpoint, session }) {
   return `${endpoint}|${session?.clientId || ""}|${session?.token || ""}`;
@@ -269,7 +272,7 @@ export async function ensureStorageSession({
   now = Date.now(),
   eventTarget = globalThis,
   waitImpl,
-  random,
+  random = Math.random,
 } = {}) {
   const existing = readStoredStorageSession(storage);
   if (!existing) throw makeError("SESSION_REQUIRED");
@@ -279,16 +282,25 @@ export async function ensureStorageSession({
   }
   if (existing.expiresAt - now > SESSION_RENEW_WINDOW_MS) return existing;
 
+  const key = renewalKey({ endpoint, session: existing });
+  if ((renewalRetryAfter.get(key) || 0) > now) return existing;
+
   try {
-    return await sharedRenew({ endpoint, fetchImpl, storage, session: existing, waitImpl, random });
+    const renewed = await sharedRenew({ endpoint, fetchImpl, storage, session: existing, waitImpl, random });
+    renewalRetryAfter.delete(key);
+    return renewed;
   } catch (error) {
     if (isTerminalSessionError(error)) {
+      renewalRetryAfter.delete(key);
       invalidateStoredStorageSession({ code: errorCode(error), storage, eventTarget });
       throw error;
     }
     if (isTransientGatewayError(error)) {
       // Старая сессия ещё действует. Сетевой сбой не должен удалять её и
-      // переводить устройство на повторное подключение.
+      // переводить устройство на повторное подключение. Следующая попытка
+      // продления откладывается, чтобы обычные запросы не тормозили и не
+      // создавали шторм запросов во время сбоя.
+      renewalRetryAfter.set(key, now + RENEW_RETRY_BASE_MS + Math.floor(random() * RENEW_RETRY_JITTER_MS));
       return existing;
     }
     throw error;
