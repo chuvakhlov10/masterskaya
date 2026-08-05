@@ -1,7 +1,9 @@
 import {
   SECURE_ABLY_AUTH_ENDPOINT,
-  requestSecureAblyToken,
 } from "./ably-auth.js";
+import {
+  requestSessionAuthorizedAblyToken,
+} from "./ably-session-auth.js";
 
 const DEFAULT_RETRY_OPTIONS = Object.freeze({
   disconnectedRetryTimeout: 2_000,
@@ -30,7 +32,7 @@ export function createSecureAblyAuthCallback({
   return (_tokenParams, callback) => {
     if (typeof callback !== "function") return;
 
-    requestSecureAblyToken({
+    requestSessionAuthorizedAblyToken({
       clientId,
       endpoint,
       fetchImpl,
