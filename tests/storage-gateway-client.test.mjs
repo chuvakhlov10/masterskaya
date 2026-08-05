@@ -62,6 +62,7 @@ test("gateway read uses the stored device session", async () => {
 
   assert.equal(payload.sha, "a".repeat(40));
   assert.equal(calls[0].headers["X-Masterskaya-Session"], SESSION_TOKEN);
+  assert.equal(JSON.parse(calls[0].body).storageProtocolVersion, 4);
 });
 
 test("renew replaces a near-expiry session", async () => {

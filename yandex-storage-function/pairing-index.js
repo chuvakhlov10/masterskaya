@@ -120,6 +120,46 @@ function sessionVersion(env) {
   return Number.isInteger(value) && value > 0 ? value : 1;
 }
 
+function storageProtocolVersion(value) {
+  const number = Number.parseInt(String(value || ''), 10);
+  return Number.isInteger(number) && number > 0 ? number : 1;
+}
+
+function minimumStorageProtocol(env) {
+  return storageProtocolVersion(env.MASTERSKAYA_MIN_STORAGE_PROTOCOL || 1);
+}
+
+function requiredStockEpoch(env) {
+  const number = Number.parseInt(String(env.MASTERSKAYA_STOCK_EPOCH || '0'), 10);
+  return Number.isInteger(number) && number > 0 ? number : 0;
+}
+
+function readStockJournalEnvelope(body) {
+  try {
+    const encoded = String(body?.body?.content || '').replace(/\s+/g, '');
+    const value = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'));
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function requireStockWriteProtocol(body, env) {
+  const method = String(body?.method || '').toUpperCase();
+  const path = String(body?.path || '');
+  if (method !== 'PUT' || path !== 'data/stock-ops.json') return;
+  if (storageProtocolVersion(body.storageProtocolVersion) < minimumStorageProtocol(env)) {
+    throw makeError('STORAGE_PROTOCOL_UPGRADE_REQUIRED', 426);
+  }
+  const epoch = requiredStockEpoch(env);
+  if (epoch > 0) {
+    const journal = readStockJournalEnvelope(body);
+    if (Number(journal?.schemaVersion) !== 4 || Number(journal?.epoch) !== epoch || !Array.isArray(journal?.ops)) {
+      throw makeError('STOCK_ARCHIVE_EPOCH_REQUIRED', 428);
+    }
+  }
+}
+
 function createHandler({
   fetchImpl = globalThis.fetch,
   env = process.env,
@@ -248,6 +288,7 @@ function createHandler({
 
       if (action === 'github') {
         await auth.authorize(claims, body.deviceName);
+        requireStockWriteProtocol(body, env);
         const result = await getAppClient().request(body);
         return reply(result.status, result.payload, origin);
       }
@@ -292,4 +333,8 @@ module.exports = {
   createAppClientWithInternalAccess,
   createHandler,
   handler,
+  minimumStorageProtocol,
+  requiredStockEpoch,
+  requireStockWriteProtocol,
+  storageProtocolVersion,
 };

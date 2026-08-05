@@ -36,18 +36,18 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist/yandex/packages
-          (cd dist/yandex/storage && zip -9 ../packages/masterskaya-storage-gateway-1.4.1.zip index.js)
+          (cd dist/yandex/storage && zip -9 ../packages/masterskaya-storage-gateway-1.5.0.zip index.js)
           (cd dist/yandex/ably && zip -9 ../packages/masterskaya-ably-auth-1.4.1.zip index.js)
           cp dist/yandex/manifest.json dist/yandex/packages/manifest.json
           (cd dist/yandex/packages && sha256sum *.zip > SHA256SUMS.txt)
-          test "$(unzip -Z1 dist/yandex/packages/masterskaya-storage-gateway-1.4.1.zip | wc -l)" -eq 1
-          test "$(unzip -Z1 dist/yandex/packages/masterskaya-storage-gateway-1.4.1.zip)" = "index.js"
+          test "$(unzip -Z1 dist/yandex/packages/masterskaya-storage-gateway-1.5.0.zip | wc -l)" -eq 1
+          test "$(unzip -Z1 dist/yandex/packages/masterskaya-storage-gateway-1.5.0.zip)" = "index.js"
           test "$(unzip -Z1 dist/yandex/packages/masterskaya-ably-auth-1.4.1.zip | wc -l)" -eq 1
           test "$(unzip -Z1 dist/yandex/packages/masterskaya-ably-auth-1.4.1.zip)" = "index.js"
           cat dist/yandex/packages/SHA256SUMS.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: yandex-functions-1.4.1
+          name: yandex-functions-1.5.0
           path: dist/yandex/packages/*
           if-no-files-found: error
           retention-days: 30

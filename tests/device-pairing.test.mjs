@@ -294,6 +294,84 @@ test('devices and pairing-create use the active device session', async () => {
   assert.equal(JSON.parse(pairing.body).code, 'AAAA-AAAA-AAAA');
 });
 
+test('stock writes can require the archive-aware storage protocol without blocking reads', async () => {
+  let requests = 0;
+  const client = {
+    ...appClient,
+    async request(input){ requests++; return {status:200,ok:true,payload:{echo:input.path}}; },
+  };
+  const handler = createHandler({
+    env: { ...ENV, MASTERSKAYA_MIN_STORAGE_PROTOCOL: '4' },
+    now: () => NOW,
+    appClient: client,
+    deviceAuthService: fakeAuth(),
+    fetchImpl: async () => { throw new Error('network not expected'); },
+  });
+  const session = base.createSessionToken({
+    secret: SESSION_SECRET,
+    clientId:'device-client-123',
+    subject:'device:device-client-123',
+    nowMs:NOW,
+    version:2,
+  });
+  const headers = {'x-masterskaya-session':session.token};
+
+  const oldWrite = await handler(event({
+    action:'github', method:'PUT', path:'data/stock-ops.json',
+    body:{message:'old client',content:'W10='},
+  }, headers));
+  assert.equal(oldWrite.statusCode, 426);
+  assert.equal(JSON.parse(oldWrite.body).error, 'STORAGE_PROTOCOL_UPGRADE_REQUIRED');
+  assert.equal(requests, 0);
+
+  const read = await handler(event({action:'github',method:'GET',path:'data/stock-ops.json'}, headers));
+  assert.equal(read.statusCode, 200);
+  assert.equal(requests, 1);
+
+  const currentWrite = await handler(event({
+    action:'github', storageProtocolVersion:4, method:'PUT', path:'data/stock-ops.json',
+    body:{message:'current client',content:'W10='},
+  }, headers));
+  assert.equal(currentWrite.statusCode, 200);
+  assert.equal(requests, 2);
+});
+
+test('cutover lock accepts only the configured stock epoch envelope', async () => {
+  let requests = 0;
+  const client = {
+    ...appClient,
+    async request(){ requests++; return {status:200,ok:true,payload:{}}; },
+  };
+  const handler = createHandler({
+    env: { ...ENV, MASTERSKAYA_MIN_STORAGE_PROTOCOL: '4', MASTERSKAYA_STOCK_EPOCH: '1' },
+    now: () => NOW,
+    appClient: client,
+    deviceAuthService: fakeAuth(),
+    fetchImpl: async () => { throw new Error('network not expected'); },
+  });
+  const session = base.createSessionToken({
+    secret: SESSION_SECRET,
+    clientId:'device-client-123',
+    subject:'device:device-client-123',
+    nowMs:NOW,
+    version:2,
+  });
+  const headers = {'x-masterskaya-session':session.token};
+  const write = content => handler(event({
+    action:'github', storageProtocolVersion:4, method:'PUT', path:'data/stock-ops.json',
+    body:{message:'stock write',content},
+  }, headers));
+
+  const legacy = await write(Buffer.from('[]').toString('base64'));
+  assert.equal(legacy.statusCode, 428);
+  assert.equal(JSON.parse(legacy.body).error, 'STOCK_ARCHIVE_EPOCH_REQUIRED');
+  const wrongEpoch = await write(Buffer.from(JSON.stringify({schemaVersion:4,epoch:2,ops:[]})).toString('base64'));
+  assert.equal(wrongEpoch.statusCode, 428);
+  const current = await write(Buffer.from(JSON.stringify({schemaVersion:4,epoch:1,ops:[]})).toString('base64'));
+  assert.equal(current.statusCode, 200);
+  assert.equal(requests, 1);
+});
+
 test('revoked device is denied before a GitHub data request', async () => {
   let requests = 0;
   const client = {

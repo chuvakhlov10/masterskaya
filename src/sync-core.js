@@ -252,6 +252,40 @@ function compareRecordEffectTerminal(candidate, previous) {
   return String(candidate.mutationId).localeCompare(String(previous.mutationId));
 }
 
+function cloneStockBucket(value) {
+  const result = {};
+  if (!isPlainObject(value)) return result;
+  for (const [marker, raw] of Object.entries(value)) {
+    const amount = Number(raw);
+    if (typeof marker === "string" && marker.trim() && Number.isFinite(amount)) {
+      result[marker] = amount;
+    }
+  }
+  return result;
+}
+
+function initialStockState(baseStock, workshops) {
+  const result = {
+    main: cloneStockBucket(baseStock?.main),
+    ws: {},
+  };
+  for (const workshop of workshops) {
+    result.ws[workshop] = cloneStockBucket(baseStock?.ws?.[workshop]);
+  }
+  return result;
+}
+
+function normalizeRenameAliases(value) {
+  const result = {};
+  if (!isPlainObject(value)) return result;
+  for (const [oldMarker, newMarker] of Object.entries(value)) {
+    const oldName = typeof oldMarker === "string" ? oldMarker.trim() : "";
+    const newName = typeof newMarker === "string" ? newMarker.trim() : "";
+    if (oldName && newName && oldName !== newName) result[oldName] = newName;
+  }
+  return result;
+}
+
 function traceRecordEffectChain(candidate, byMutationId) {
   const reversed = [];
   const visited = new Set();
@@ -304,7 +338,7 @@ export function selectRecordEffectOps(ops) {
   );
 }
 
-export function applyOpsToStock(ops, options = {}) {
+export function replayStockOps(ops, options = {}) {
   const workshops = Array.isArray(options.workshops) && options.workshops.length
     ? options.workshops
     : DEFAULT_WORKSHOPS;
@@ -312,9 +346,8 @@ export function applyOpsToStock(ops, options = {}) {
     ? options.minTimestamp
     : new Date("2020-01-01T00:00:00Z").getTime();
 
-  const result = { main: {}, ws: {} };
-  for (const workshop of workshops) result.ws[workshop] = {};
-  if (!Array.isArray(ops)) return result;
+  const result = initialStockState(options.baseStock, workshops);
+  if (!Array.isArray(ops)) return { stock: result, renameAliases: normalizeRenameAliases(options.renameAliases) };
 
   // Не отбрасываем операции только из-за часов, ушедших вперёд. Иначе остаток
   // сначала исчезает, а спустя дни внезапно появляется. Время используется лишь
@@ -328,11 +361,16 @@ export function applyOpsToStock(ops, options = {}) {
     const tsDiff = Number(a.ts) - Number(b.ts);
     return tsDiff || String(stockOpIdentity(a)).localeCompare(String(stockOpIdentity(b)));
   });
+  const recordEffectPrelude = Array.isArray(options.recordEffectPrelude)
+    ? options.recordEffectPrelude
+    : [];
   const selectedRecordEffectIds = new Set(
-    selectRecordEffectOps(sortedOps).map(op => stockOpIdentity(op)).filter(Boolean)
+    selectRecordEffectOps([...recordEffectPrelude, ...sortedOps])
+      .map(op => stockOpIdentity(op))
+      .filter(Boolean)
   );
 
-  const renamedTo = new Map();
+  const renamedTo = new Map(Object.entries(normalizeRenameAliases(options.renameAliases)));
   const resolveMarker = (marker) => {
     if (typeof marker !== "string" || !marker.trim()) return null;
     let current = marker.trim();
@@ -406,7 +444,136 @@ export function applyOpsToStock(ops, options = {}) {
     }
   }
 
-  return result;
+  const renameAliases = {};
+  for (const oldMarker of renamedTo.keys()) {
+    const newMarker = resolveMarker(oldMarker);
+    if (newMarker && oldMarker !== newMarker) renameAliases[oldMarker] = newMarker;
+  }
+  return { stock: result, renameAliases };
+}
+
+export function applyOpsToStock(ops, options = {}) {
+  return replayStockOps(ops, options).stock;
+}
+
+export function normalizeStockCheckpoint(value, options = {}) {
+  if (!isPlainObject(value) || Number(value.schemaVersion) !== 4) return null;
+  const epoch = Number(value.epoch);
+  const cutoffTs = Number(value.cutoffTs);
+  if (!Number.isInteger(epoch) || epoch < 1 || !Number.isFinite(cutoffTs)) return null;
+  const workshops = Array.isArray(options.workshops) && options.workshops.length
+    ? options.workshops
+    : DEFAULT_WORKSHOPS;
+  return {
+    schemaVersion: 4,
+    epoch,
+    cutoffTs,
+    createdAt: typeof value.createdAt === "string" ? value.createdAt : null,
+    stock: initialStockState(value.stock, workshops),
+    renameAliases: normalizeRenameAliases(value.renameAliases),
+    recordEffectAnchors: Array.isArray(value.recordEffectAnchors)
+      ? value.recordEffectAnchors.filter(op => op && typeof op === "object")
+      : [],
+    archive: isPlainObject(value.archive) ? value.archive : {},
+  };
+}
+
+export function applyStockCheckpoint(checkpoint, hotOps, options = {}) {
+  const normalized = normalizeStockCheckpoint(checkpoint, options);
+  if (!normalized) return applyOpsToStock(hotOps, options);
+  return replayStockOps(hotOps, {
+    ...options,
+    baseStock: normalized.stock,
+    renameAliases: normalized.renameAliases,
+    recordEffectPrelude: normalized.recordEffectAnchors,
+  }).stock;
+}
+
+export function normalizeStockJournal(value, checkpoint, options = {}) {
+  const normalizedCheckpoint = normalizeStockCheckpoint(checkpoint, options);
+  if (!normalizedCheckpoint) {
+    if (value === null || value === undefined) return { schemaVersion: 3, epoch: 0, ops: [] };
+    if (!Array.isArray(value)) throw new Error("STOCK_CHECKPOINT_REQUIRED");
+    return { schemaVersion: 3, epoch: 0, ops: mergeStockOps([], value) };
+  }
+  if (!isPlainObject(value) || Number(value.schemaVersion) !== 4 ||
+      Number(value.epoch) !== normalizedCheckpoint.epoch || !Array.isArray(value.ops)) {
+    throw new Error("STOCK_ARCHIVE_EPOCH_MISMATCH");
+  }
+  const ops = mergeStockOps([], value.ops);
+  for (const op of ops) {
+    if (Number(op?.ts) < normalizedCheckpoint.cutoffTs &&
+        Number(op?.archiveEpoch) !== normalizedCheckpoint.epoch) {
+      throw new Error("STOCK_ARCHIVE_LATE_OPERATION_UNSTAMPED");
+    }
+  }
+  return { schemaVersion: 4, epoch: normalizedCheckpoint.epoch, ops };
+}
+
+export function createStockJournal(ops, checkpoint, options = {}) {
+  const normalizedCheckpoint = normalizeStockCheckpoint(checkpoint, options);
+  const normalizedOps = mergeStockOps([], Array.isArray(ops) ? ops : []);
+  if (!normalizedCheckpoint) return normalizedOps;
+  return {
+    schemaVersion: 4,
+    epoch: normalizedCheckpoint.epoch,
+    ops: normalizedOps,
+  };
+}
+
+export function mergeStockJournals(remote, local, checkpoint, options = {}) {
+  const remoteJournal = normalizeStockJournal(remote, checkpoint, options);
+  const localJournal = normalizeStockJournal(local, checkpoint, options);
+  return createStockJournal(mergeStockOps(remoteJournal.ops, localJournal.ops), checkpoint, options);
+}
+
+function terminalRecordEffectAnchors(ops) {
+  const byRecord = new Map();
+  for (const op of selectRecordEffectOps(ops)) {
+    const previous = byRecord.get(op.recordId);
+    if (!previous || compareRecordEffectTerminal(op, previous) >= 0) byRecord.set(op.recordId, op);
+  }
+  return [...byRecord.values()].map(op => ({
+    ...op,
+    baseMutationId: null,
+    checkpointAnchor: true,
+  }));
+}
+
+export function createStockArchivePlan(ops, cutoffTs, options = {}) {
+  const cutoff = Number(cutoffTs);
+  if (!Array.isArray(ops) || !Number.isFinite(cutoff)) throw new Error("STOCK_ARCHIVE_INPUT_INVALID");
+  const archivedOps = mergeStockOps([], ops.filter(op => Number(op?.ts) < cutoff));
+  const hotOps = mergeStockOps([], ops.filter(op => Number(op?.ts) >= cutoff));
+  const prefix = replayStockOps(archivedOps, options);
+  const checkpoint = {
+    schemaVersion: 4,
+    epoch: Number.isInteger(options.epoch) && options.epoch > 0 ? options.epoch : 1,
+    cutoffTs: cutoff,
+    createdAt: typeof options.createdAt === "string" ? options.createdAt : new Date().toISOString(),
+    stock: prefix.stock,
+    renameAliases: prefix.renameAliases,
+    recordEffectAnchors: terminalRecordEffectAnchors(archivedOps),
+    archive: {
+      opCount: archivedOps.length,
+      firstTs: archivedOps.length ? Number(archivedOps[0].ts) : null,
+      lastTs: archivedOps.length ? Number(archivedOps.at(-1).ts) : null,
+    },
+  };
+  return { checkpoint, archivedOps, hotOps };
+}
+
+export function classifyLateStockOps(checkpoint, hotOps, options = {}) {
+  const normalized = normalizeStockCheckpoint(checkpoint, options);
+  if (!normalized || !Array.isArray(hotOps)) return { safe: [], blocking: [] };
+  const safeTypes = new Set(["delta", "move"]);
+  const safe = [];
+  const blocking = [];
+  for (const op of hotOps) {
+    if (!op || Number(op.ts) >= normalized.cutoffTs) continue;
+    (safeTypes.has(op.type) ? safe : blocking).push(op);
+  }
+  return { safe, blocking };
 }
 
 function itemVersion(item) {

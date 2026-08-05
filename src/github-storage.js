@@ -106,6 +106,20 @@ export async function backupStatusGet() {
   }
 }
 
+export async function stockArchiveGet(month) {
+  const normalized = String(month || "").trim();
+  if (!/^\d{4}-\d{2}$/.test(normalized)) throw makeError("INVALID_ARCHIVE_MONTH");
+  try {
+    const data = await ghRequest("GET", `archives/stock-ops/${normalized}.json`);
+    if (!data) return null;
+    return parseJsonFile(`stock-archive:${normalized}`, data.content);
+  } catch (error) {
+    if (error.status === 404) return null;
+    console.warn(`[stockArchiveGet] "${normalized}":`, error.message);
+    throw error;
+  }
+}
+
 export async function dbGet(key) {
   const path = `${DATA_PREFIX}${keyToFileName(key)}.json`;
   try {

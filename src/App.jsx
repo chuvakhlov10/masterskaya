@@ -1,12 +1,14 @@
 import { useState, useEffect, useRef, Component } from "react";
-import { dbGet, dbSet, backupStatusGet, disconnectStorage, hasStorageAccess, photoGet, photoSet, photoDelete } from "./github-storage.js";
+import { dbGet, dbSet, backupStatusGet, disconnectStorage, hasStorageAccess, photoGet, photoSet, photoDelete, stockArchiveGet } from "./github-storage.js";
 import Ably from "ably";
 import { createSecureAblyRealtimeOptions } from "./ably-secure-client.js";
 import { installStorageGatewayProbe } from "./storage-gateway.js";
 import {
   applyObjectPatch,
-  applyOpsToStock,
+  applyStockCheckpoint,
+  classifyLateStockOps,
   createObjectPatch,
+  createStockJournal,
   findRecordIndex,
   recordRevision,
   sameRecordVersion,
@@ -14,7 +16,10 @@ import {
   mergeObject,
   mergeObjectPatches,
   mergeRecords as mergeRecordsCore,
+  mergeStockJournals,
   mergeStockOps,
+  normalizeStockCheckpoint,
+  normalizeStockJournal,
 } from "./sync-core.js";
 import { APP_VERSION, deriveSyncView, normalizeBackupStatus } from "./status-core.js";
 
@@ -474,7 +479,7 @@ async function sSet(key, val, options = {}){
 
   const isPatch = queueItem?.mode === "patch";
   const valueToWrite = isPatch ? queueItem.patch : val;
-  const mergeFn = isPatch ? applyObjectPatch : getMergeFn(key);
+  const mergeFn = isPatch ? applyObjectPatch : (options.mergeFn || getMergeFn(key));
   try {
     const result = await dbSet(key, valueToWrite, mergeFn);
     if (result.ok) {
@@ -1643,12 +1648,73 @@ export default function App(){
   const pricesRef = useRef({});
   useEffect(() => { pricesRef.current = prices; }, [prices]);
   // ── EVENT SOURCING для склада ──
-  // stockOps — журнал всех операций (источник правды)
+  // stockOps — активный журнал; после архивирования его дополняет checkpoint
   // stock — пересчитанное состояние (кеш для UI)
   // Операции только добавляются (append-only), что исключает конфликты при merge
   const [stockOps, setStockOps] = useState([]);
   const stockOpsRef = useRef([]);
   useEffect(() => { stockOpsRef.current = stockOps; }, [stockOps]);
+  const [, setStockCheckpoint] = useState(null);
+  const stockCheckpointRef = useRef(null);
+  function activateStockCheckpoint(value) {
+    const normalized = normalizeStockCheckpoint(value);
+    stockCheckpointRef.current = normalized;
+    setStockCheckpoint(normalized);
+    return normalized;
+  }
+  function calculateStock(ops) {
+    return applyStockCheckpoint(stockCheckpointRef.current, ops);
+  }
+  function readStockJournal(value) {
+    return normalizeStockJournal(value, stockCheckpointRef.current);
+  }
+  function encodeStockJournal(ops) {
+    return createStockJournal(ops, stockCheckpointRef.current);
+  }
+  async function readConsistentStockPair(options = {}) {
+    const allowCache = options.allowCache !== false;
+    const attempts = navigator.onLine ? Math.max(1, Number(options.attempts) || 4) : 1;
+    let lastError = null;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      const [checkpointValue, journalValue] = await Promise.all([
+        sGet("stock-checkpoint", { allowCache }),
+        sGet("stock-ops", { allowCache }),
+      ]);
+      const checkpoint = normalizeStockCheckpoint(checkpointValue);
+      try {
+        return {
+          checkpoint,
+          journal: normalizeStockJournal(journalValue, checkpoint),
+          rawJournal: journalValue,
+        };
+      } catch (error) {
+        lastError = error;
+        const consistencyError = [
+          "STOCK_CHECKPOINT_REQUIRED",
+          "STOCK_ARCHIVE_EPOCH_MISMATCH",
+          "STOCK_ARCHIVE_LATE_OPERATION_UNSTAMPED",
+        ].includes(error?.message);
+        if (!consistencyError || attempt + 1 >= attempts) throw error;
+        await new Promise(resolve => setTimeout(resolve, 150 * (attempt + 1)));
+      }
+    }
+    throw lastError || new Error("STOCK_ARCHIVE_PAIR_UNAVAILABLE");
+  }
+  function prepareStockOutbox(items) {
+    const outbox = Array.isArray(items) ? items : [];
+    const checkpoint = stockCheckpointRef.current;
+    if (!checkpoint) return outbox;
+    const late = classifyLateStockOps(checkpoint, outbox);
+    const safeIds = new Set(late.safe.map(op => op?.opId).filter(Boolean));
+    let changed = false;
+    const prepared = outbox.map(op => {
+      if (!safeIds.has(op?.opId) || Number(op.archiveEpoch) === checkpoint.epoch) return op;
+      changed = true;
+      return { ...op, archiveEpoch: checkpoint.epoch };
+    });
+    if (changed) setStockOutbox(prepared);
+    return prepared;
+  }
   const [stock, setStock] = useState({ main: {}, ws: { SMART: {}, Бегемот: {} } });
   const stockMain = stock.main || {};
   const stockWS = stock.ws || { SMART: {}, Бегемот: {} };
@@ -2034,7 +2100,7 @@ export default function App(){
 
   function persistStockSnapshot(ops){
     try {
-      localStorage.setItem("stock_ops_local", JSON.stringify(ops));
+      localStorage.setItem("stock_ops_local", JSON.stringify(encodeStockJournal(ops)));
       return true;
     } catch (error) {
       // Event log нельзя обрезать. Освобождаем только воспроизводимые кеши.
@@ -2045,7 +2111,7 @@ export default function App(){
         }
       }
       try {
-        localStorage.setItem("stock_ops_local", JSON.stringify(ops));
+        localStorage.setItem("stock_ops_local", JSON.stringify(encodeStockJournal(ops)));
         return true;
       } catch (secondError) {
         console.error('[stock-ops] Не удалось сохранить полный журнал локально:', secondError.message);
@@ -2088,7 +2154,16 @@ export default function App(){
       ts: Number.isFinite(numericTs) ? numericTs : Date.now(),
       client: clientIdRef.current,
       opId: requestedOpId || makeOpId(),
+      ...(stockCheckpointRef.current ? { archiveEpoch: stockCheckpointRef.current.epoch } : {}),
     };
+
+    const late = classifyLateStockOps(stockCheckpointRef.current, [op]);
+    if (late.blocking.length > 0) {
+      const error = "STOCK_ARCHIVE_LATE_OPERATION_REQUIRES_REVIEW";
+      setLastSyncError("Часы устройства отстают от архивной точки. Изменение склада остановлено для безопасной проверки.");
+      alert("Изменение склада не сохранено: дата устройства старше контрольной точки архива. Проверьте дату и время на устройстве.");
+      return { ok:false, queued:false, error };
+    }
 
     try {
       addStockOutboxOp(op);
@@ -2105,7 +2180,7 @@ export default function App(){
     stockOpsRef.current = newOps;
     persistStockSnapshot(newOps);
     setStockOps(newOps);
-    const newStock = applyOpsToStock(newOps);
+    const newStock = calculateStock(newOps);
     stockRef.current = newStock;
     setStock(newStock);
     return { ok:true, queued:true, op };
@@ -2134,10 +2209,20 @@ export default function App(){
       return { ok: false, throttled: true };
     }
 
-    const outbox = getStockOutbox();
+    const outbox = prepareStockOutbox(getStockOutbox());
     if (outbox.length === 0) {
       unsyncedOpsRef.current.clear();
       const result = { ok: true, queued: false, value: stockOpsRef.current };
+      resolveStockWaiters(result);
+      return result;
+    }
+
+    const late = classifyLateStockOps(stockCheckpointRef.current, outbox);
+    if (late.blocking.length > 0) {
+      const error = "STOCK_ARCHIVE_LATE_OPERATION_REQUIRES_REVIEW";
+      setLastSyncError("В очереди есть старая неаддитивная складская операция. Автоматическая отправка остановлена, чтобы не исказить остатки.");
+      setSyncStatus("idle");
+      const result = { ok: true, queued: true, error, value: stockOpsRef.current };
       resolveStockWaiters(result);
       return result;
     }
@@ -2155,8 +2240,9 @@ export default function App(){
 
       let remote = [];
       try {
-        const loaded = await dbGet("stock-ops");
-        if (Array.isArray(loaded)) remote = loaded;
+        const stockPair = await readConsistentStockPair({ allowCache: false });
+        activateStockCheckpoint(stockPair.checkpoint);
+        remote = stockPair.journal.ops;
       } catch (error) {
         syncRetriesRef.current++;
         console.warn('[syncStockOps] Не удалось прочитать сервер:', error.message);
@@ -2166,11 +2252,15 @@ export default function App(){
 
       const localWithOutbox = mergeStockOps(stockOpsRef.current, outbox);
       const opsToSave = mergeStockOps(remote, localWithOutbox);
-      const result = await sSet("stock-ops", opsToSave, { durableQueue: false });
+      const result = await sSet("stock-ops", encodeStockJournal(opsToSave), {
+        durableQueue: false,
+        mergeFn: (remoteValue, localValue) =>
+          mergeStockJournals(remoteValue, localValue, stockCheckpointRef.current),
+      });
       finalResult = result;
 
-      if (result?.ok && !result.queued && Array.isArray(result.value)) {
-        const committedOps = result.value;
+      if (result?.ok && !result.queued) {
+        const committedOps = readStockJournal(result.value).ops;
         const committedIds = new Set(committedOps.map(op => op?.opId).filter(Boolean));
         const confirmedIds = new Set(outbox.filter(op => committedIds.has(op.opId)).map(op => op.opId));
         const remainingOutbox = removeStockOutboxIds(confirmedIds);
@@ -2178,7 +2268,7 @@ export default function App(){
 
         stockOpsRef.current = committedOps;
         persistStockSnapshot(committedOps);
-        const committedStock = applyOpsToStock(committedOps);
+        const committedStock = calculateStock(committedOps);
         stockRef.current = committedStock;
         setStockOps(committedOps);
         setStock(committedStock);
@@ -2214,13 +2304,14 @@ export default function App(){
 // REALTIME_STOCK_REFRESH_HOTFIX_V1
 // Быстрое обновление склада читает только stock-ops.json. Ошибка любого
 // другого файла приложения больше не блокирует получение нового остатка.
-function applyServerStockOps(serverOps) {
-  const outbox = getStockOutbox();
-  const normalizedServerOps = Array.isArray(serverOps) ? serverOps : [];
+function applyServerStockOps(serverValue, checkpoint = stockCheckpointRef.current) {
+  if (checkpoint !== stockCheckpointRef.current) activateStockCheckpoint(checkpoint);
+  const outbox = prepareStockOutbox(getStockOutbox());
+  const normalizedServerOps = readStockJournal(serverValue).ops;
   const mergedOps = mergeStockOps(normalizedServerOps, outbox);
   stockOpsRef.current = mergedOps;
   persistStockSnapshot(mergedOps);
-  const mergedStock = applyOpsToStock(mergedOps);
+  const mergedStock = calculateStock(mergedOps);
   stockRef.current = mergedStock;
   setStockOps(mergedOps);
   setStock(mergedStock);
@@ -2243,9 +2334,8 @@ async function refreshStockFromServer() {
 
   isStockRefreshingRef.current = true;
   try {
-    const serverOps = await sGet("stock-ops", { allowCache: false });
-    if (!Array.isArray(serverOps)) throw new Error("INVALID_STOCK_OPS_RESPONSE");
-    const mergedOps = applyServerStockOps(serverOps);
+    const stockPair = await readConsistentStockPair({ allowCache: false });
+    const mergedOps = applyServerStockOps(stockPair.rawJournal, stockPair.checkpoint);
     setSyncStatus(wsConnectedRef.current ? "ws" : "synced");
     return { ok: true, value: mergedOps };
   } catch (error) {
@@ -2328,12 +2418,18 @@ async function refreshStockFromServer() {
       "stock-ops": (ops) => {
         // Только сервер + явный durable outbox. Произвольный старый local snapshot
         // больше не может сам вернуться на сервер или остаться в UI.
-        const merged = mergeStockOps(Array.isArray(ops) ? ops : [], getStockOutbox());
+        const merged = mergeStockOps(readStockJournal(ops).ops, prepareStockOutbox(getStockOutbox()));
         stockOpsRef.current = merged;
         persistStockSnapshot(merged);
-        const recalculated = applyOpsToStock(merged);
+        const recalculated = calculateStock(merged);
         stockRef.current = recalculated;
         setStockOps(merged);
+        setStock(recalculated);
+      },
+      "stock-checkpoint": (value) => {
+        activateStockCheckpoint(value);
+        const recalculated = calculateStock(stockOpsRef.current);
+        stockRef.current = recalculated;
         setStock(recalculated);
       },
       "stock-moves": (value) => {
@@ -2379,7 +2475,7 @@ async function refreshStockFromServer() {
       if (msg.data?.from === clientIdRef.current) return;
       const changedKey = msg.data?.key || '';
       console.log('[ABLY] Server refresh signal:', msg.name, changedKey);
-      if (changedKey === "stock-ops") requestStockRefresh();
+      if (changedKey === "stock-ops" || changedKey === "stock-checkpoint") requestStockRefresh();
       else requestServerRefresh();
     });
 
@@ -2435,11 +2531,11 @@ async function refreshStockFromServer() {
       isPollingRef.current = true;
       setSyncStatus("syncing");
       try {
-        const [r,deletions,p,ops,sCfg,sm2,al,nt,sub,mvs,pwd] = await Promise.all([
+        const [r,deletions,p,stockPair,sCfg,sm2,al,nt,sub,mvs,pwd] = await Promise.all([
           sGet("records", {allowCache:false}),
           sGet("record-deletions", {allowCache:false}),
           sGet("prices", {allowCache:false}),
-          sGet("stock-ops", {allowCache:false}),
+          readConsistentStockPair({allowCache:false}),
           sGet("stock:cfg", {allowCache:false}),
           sGet("custom:markers", {allowCache:false}),
           sGet("marker-aliases", {allowCache:false}),
@@ -2473,7 +2569,7 @@ async function refreshStockFromServer() {
           try { localStorage.setItem("records_local", JSON.stringify(mergedRecords)); } catch {}
         }
 
-        if (Array.isArray(ops)) applyServerStockOps(ops);
+        applyServerStockOps(stockPair.rawJournal, stockPair.checkpoint);
 
         const nextPrices = mergePending("prices", ensureObj(p));
         pricesRef.current = ensureObj(nextPrices); setPrices(pricesRef.current);
@@ -2712,9 +2808,9 @@ async function refreshStockFromServer() {
       setPwdLoaded(true);
 
       // Загружаем остальные данные
-      const [r,deletions,p,ops,stk,sCfg,sm2,al,nt,sub,mvs] = await Promise.all([
+      const [r,deletions,p,stockPair,stk,sCfg,sm2,al,nt,sub,mvs] = await Promise.all([
         sGet("records"), sGet("record-deletions"), sGet("prices"),
-        sGet("stock-ops"),
+        readConsistentStockPair(),
         sGet("stock"),
         sGet("stock:cfg"), sGet("custom:markers"), sGet("marker-aliases"), sGet("marker-notes"), sGet("subcategories"),
         sGet("stock-moves"),
@@ -2725,6 +2821,8 @@ async function refreshStockFromServer() {
         recordDeletionsRef.current = deletions;
         setRecordDeletionIds(deletions);
       }
+      activateStockCheckpoint(stockPair.checkpoint);
+      const serverStockOps = stockPair.journal.ops;
       // Восстанавливаем только подтверждённые сервером записи + явную
       // локальную очередь. Для совместимости один раз подхватываем records_local,
       // созданный старой версией до появления durable queue.
@@ -2748,17 +2846,17 @@ async function refreshStockFromServer() {
       }
       
       // Event sourcing: серверный журнал + явный outbox локальных операций.
-      if(Array.isArray(ops) && ops.length > 0){
+      if(serverStockOps.length > 0 || stockCheckpointRef.current){
         let localCached = [];
         try { localCached = JSON.parse(localStorage.getItem("stock_ops_local") || "[]"); } catch {}
-        const serverIds = new Set(ops.map(op => op?.opId).filter(Boolean));
-        let outbox = getStockOutbox();
+        const serverIds = new Set(serverStockOps.map(op => op?.opId).filter(Boolean));
+        let outbox = prepareStockOutbox(getStockOutbox());
 
         // Одноразовая миграция со старой схемы: локальные операции, которых ещё
         // нет на сервере, превращаем в явный outbox. После этого произвольный
         // Ably/localStorage payload уже не может сам попасть в GitHub.
         try {
-          if (localStorage.getItem(STOCK_OUTBOX_MIGRATED_KEY) !== "1") {
+          if (!stockCheckpointRef.current && localStorage.getItem(STOCK_OUTBOX_MIGRATED_KEY) !== "1") {
             const outboxIds = new Set(outbox.map(op => op?.opId).filter(Boolean));
             const legacyMissing = localCached.filter(op => op?.opId && !serverIds.has(op.opId) && !outboxIds.has(op.opId));
             if (legacyMissing.length > 0) outbox = setStockOutbox([...outbox, ...legacyMissing]);
@@ -2770,16 +2868,16 @@ async function refreshStockFromServer() {
 
         const alreadyConfirmed = new Set(outbox.filter(op => serverIds.has(op.opId)).map(op => op.opId));
         outbox = removeStockOutboxIds(alreadyConfirmed);
-        const merged = mergeStockOps(ops, outbox);
+        const merged = mergeStockOps(serverStockOps, outbox);
         stockOpsRef.current = merged;
         persistStockSnapshot(merged);
-        const mergedStock = applyOpsToStock(merged);
+        const mergedStock = calculateStock(merged);
         stockRef.current = mergedStock;
         setStockOps(merged);
         setStock(mergedStock);
         unsyncedOpsRef.current = new Set(outbox.map(op => op?.opId).filter(Boolean));
         if(outbox.length > 0) scheduleStockSync(1_000);
-        console.log(`[STOCK] Сервер: ${ops.length}, outbox: ${outbox.length}, итог: ${merged.length}`);
+        console.log(`[STOCK] Сервер: ${serverStockOps.length}, outbox: ${outbox.length}, итог: ${merged.length}`);
       } else {
         // Миграция: читаем старые данные
         let oldStock = null;
@@ -2836,7 +2934,7 @@ async function refreshStockFromServer() {
           }
           // BUG-C: синхронно обновляем refs + персистим
           stockOpsRef.current = initOps;
-          const initStock = applyOpsToStock(initOps);
+          const initStock = calculateStock(initOps);
           stockRef.current = initStock;
           setStockOps(initOps);
           setStock(initStock);
@@ -3007,17 +3105,21 @@ async function refreshStockFromServer() {
   // ── Резервная копия всех данных (скачать JSON) ──
   async function downloadBackup(){
     try {
-      const [r, p, ops, sm2, al, nt, sub, mvs, cfg] = await Promise.all([
-        sGet("records"), sGet("prices"), sGet("stock-ops"),
+      const [r, p, stockPair, sm2, al, nt, sub, mvs, cfg] = await Promise.all([
+        sGet("records"), sGet("prices"), readConsistentStockPair(),
         sGet("custom:markers"), sGet("marker-aliases"), sGet("marker-notes"),
         sGet("subcategories"), sGet("stock-moves"), sGet("stock:cfg"),
       ]);
+      const normalizedCheckpoint = stockPair.checkpoint;
+      const normalizedJournal = stockPair.journal;
       const backup = {
-        version: 2,
+        version: 3,
         exportedAt: new Date().toISOString(),
         records: r || [],
         prices: p || {},
-        stockOps: ops || [],
+        stockOps: normalizedJournal.ops,
+        stockJournal: stockPair.rawJournal,
+        stockCheckpoint: normalizedCheckpoint,
         markers: sm2 || {},
         aliases: al || {},
         notes: nt || {},
@@ -3025,6 +3127,12 @@ async function refreshStockFromServer() {
         stockMoves: mvs || [],
         stockCfg: cfg || {},
       };
+      const archiveMonths = (backup.stockCheckpoint?.archive?.files || [])
+        .map(file => String(file?.month || ""))
+        .filter(month => /^\d{4}-\d{2}$/.test(month));
+      backup.stockArchives = Object.fromEntries(await Promise.all(
+        archiveMonths.map(async month => [month, await stockArchiveGet(month) || []])
+      ));
       const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");

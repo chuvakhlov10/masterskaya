@@ -89,7 +89,7 @@ test('diagnostic snapshot reports PWA, queues and masked device id', async () =>
   const cachesObj = { async keys() { return ['masterskaya-v5']; } };
   const health = {
     session: { clientId: 'web-device-secret-12345678', expiresAt: 1_900_000_000_000 },
-    storage: { ok: true, version: '1.3.1', protocolVersion: 3 },
+    storage: { ok: true, version: '1.3.1', protocolVersion: 3, storageProtocolVersion: 4, minimumStorageProtocol: 1, requiredStockEpoch: 0 },
     ably: { ok: true, version: '1.3.1', protocolVersion: 3 },
   };
   const backup = {
@@ -118,6 +118,9 @@ test('diagnostic snapshot reports PWA, queues and masked device id', async () =>
   assert.equal(snapshot.pwa.controlled, true);
   assert.equal(snapshot.pwa.workerState, 'activated');
   assert.deepEqual(snapshot.pwa.cacheNames, ['masterskaya-v5']);
+  assert.equal(snapshot.servers.storage.storageProtocolVersion, 4);
+  assert.equal(snapshot.servers.storage.minimumStorageProtocol, 1);
+  assert.equal(snapshot.servers.storage.requiredStockEpoch, 0);
 });
 
 test('copied report contains no session, secrets or working data', async () => {

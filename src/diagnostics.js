@@ -182,6 +182,9 @@ export async function collectClientDiagnostics({
         ok: health.storage?.ok === true,
         version: health.storage?.version || null,
         protocolVersion: health.storage?.protocolVersion ?? null,
+        storageProtocolVersion: health.storage?.storageProtocolVersion ?? null,
+        minimumStorageProtocol: health.storage?.minimumStorageProtocol ?? null,
+        requiredStockEpoch: health.storage?.requiredStockEpoch ?? null,
       },
       ably: {
         ok: health.ably?.ok === true,
@@ -224,6 +227,7 @@ export function buildDiagnosticReport(snapshot, appVersion = "unknown") {
     `Повторов всего на устройстве: ${data.storage?.totalStorageRetries ?? 0}`,
     `Последнее продление сессии: ${reportDate(data.storage?.lastSessionRenewedAt)}`,
     `Storage Gateway: ${data.servers?.storage?.ok ? "работает" : "ошибка"} · ${data.servers?.storage?.version || "нет версии"} · протокол ${data.servers?.storage?.protocolVersion ?? "—"}`,
+    `Протокол архива склада: клиент 4 · сервер ${data.servers?.storage?.storageProtocolVersion ?? "—"} · минимум ${data.servers?.storage?.minimumStorageProtocol ?? "—"} · эпоха ${data.servers?.storage?.requiredStockEpoch ?? "—"}`,
     `Ably Auth: ${data.servers?.ably?.ok ? "работает" : "ошибка"} · ${data.servers?.ably?.version || "нет версии"} · протокол ${data.servers?.ably?.protocolVersion ?? "—"}`,
     `Service Worker поддерживается: ${yesNo(data.pwa?.supported)}`,
     `Страница управляется Service Worker: ${yesNo(data.pwa?.controlled)}`,

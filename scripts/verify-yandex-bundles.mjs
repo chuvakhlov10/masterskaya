@@ -21,6 +21,11 @@ const manifestPath = path.join(DIST, 'manifest.json');
 assert(fs.existsSync(manifestPath), 'FUNCTION_MANIFEST_MISSING');
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 
+const EXPECTED = {
+  storage: { version: '1.5.0', protocol: 4 },
+  ably: { version: '1.4.1', protocol: 3 },
+};
+
 for (const targetName of ['storage', 'ably']) {
   const targetDir = path.join(DIST, targetName);
   const entries = fs.readdirSync(targetDir).sort();
@@ -36,8 +41,8 @@ for (const targetName of ['storage', 'ably']) {
   delete require.cache[require.resolve(outputPath)];
   const loaded = require(outputPath);
   assert(typeof loaded?.handler === 'function', `${targetName}: HANDLER_EXPORT_MISSING`);
-  assert(loaded.FUNCTION_VERSION === '1.4.1', `${targetName}: FUNCTION_VERSION_MISMATCH`);
-  assert(loaded.PROTOCOL_VERSION === 3, `${targetName}: PROTOCOL_VERSION_MISMATCH`);
+  assert(loaded.FUNCTION_VERSION === EXPECTED[targetName].version, `${targetName}: FUNCTION_VERSION_MISMATCH`);
+  assert(loaded.PROTOCOL_VERSION === EXPECTED[targetName].protocol, `${targetName}: PROTOCOL_VERSION_MISMATCH`);
 }
 
 console.log('Yandex function bundles verified: single index.js, metadata and handler exports are valid.');

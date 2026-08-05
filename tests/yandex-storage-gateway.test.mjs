@@ -188,6 +188,25 @@ test('path policy allows backup status only as read-only data-backups access', (
   assert.throws(() => normalizeRepoRequest({ method: 'GET', path: 'data/../secret.json' }), /PATH_DENIED/);
 });
 
+test('checkpoint and monthly archives are read-only through the device gateway', () => {
+  assert.equal(
+    normalizeRepoRequest({ method: 'GET', path: 'data/stock-checkpoint.json' }).kind,
+    'stock-checkpoint',
+  );
+  assert.equal(
+    normalizeRepoRequest({ method: 'GET', path: 'archives/stock-ops/2026-07.json' }).kind,
+    'stock-archive',
+  );
+  assert.throws(
+    () => normalizeRepoRequest({ method: 'PUT', path: 'data/stock-checkpoint.json', body: { message: 'x', content: 'W10=' } }),
+    /PATH_DENIED/,
+  );
+  assert.throws(
+    () => normalizeRepoRequest({ method: 'PUT', path: 'archives/stock-ops/2026-07.json', body: { message: 'x', content: 'W10=' } }),
+    /PATH_DENIED/,
+  );
+});
+
 test('missing server secrets fail closed without exposing configuration', async () => {
   const handler = createHandler({ env: {}, fetchImpl: async () => assert.fail('network not expected') });
   const response = await handler(event({ action: 'renew' }));
