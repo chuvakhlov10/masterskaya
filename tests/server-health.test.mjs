@@ -110,20 +110,20 @@ const ablyEnv = {
 
 test('authenticated Ably health verifies the storage gateway and device registry', async () => {
   let checks = 0;
+  const token = sessionToken();
   const handler = ablyHealth.createHandler({
     env: ablyEnv,
     now: () => NOW,
     fetchImpl: async (_url, options) => {
       checks++;
       assert.deepEqual(JSON.parse(options.body), { action: 'session-check' });
-      assert.equal(options.headers['X-Masterskaya-Session'], sessionToken());
+      assert.equal(options.headers['X-Masterskaya-Session'], token);
       return new Response(JSON.stringify({
         ok: true,
         device: { id: DEVICE_ID, name: 'Ноутбук', lastSeenAt: NOW },
       }), { status: 200, headers: { 'content-type': 'application/json' } });
     },
   });
-  const token = sessionToken();
   const response = await handler(ablyEvent({ action: 'health' }, token));
   const payload = JSON.parse(response.body);
   assert.equal(response.statusCode, 200);
