@@ -88,7 +88,7 @@ test('connected device creates a code using only its shared session', async () =
 
 test('recovery keeps the new session in memory until the owner confirms the replacement code', async () => {
   const client = await loadModule();
-  assert.equal(client.RECOVERY_REQUEST_TIMEOUT_MS, 40_000);
+  assert.equal(client.RECOVERY_REQUEST_TIMEOUT_MS, 75_000);
   const storage = new MemoryStorage();
   const expiresAt = Date.now() + 30 * 24 * 60 * 60 * 1000;
   const result = await client.redeemRecoveryCode({
