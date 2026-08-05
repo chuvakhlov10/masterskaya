@@ -4,6 +4,11 @@ const base = require('./index.js');
 const pairing = require('./pairing-index.js');
 const { createDeviceAuthService } = require('./device-auth.js');
 
+const FUNCTION_NAME = 'masterskaya-storage-gateway';
+const FUNCTION_VERSION = '1.3.1';
+const PROTOCOL_VERSION = 3;
+const BUILD_ID = '__MASTERSKAYA_BUILD_ID__';
+const BUILD_DATE = '__MASTERSKAYA_BUILD_DATE__';
 const SESSION_HEADER = 'x-masterskaya-session';
 const MAX_BODY_BYTES = 4_096;
 
@@ -57,6 +62,25 @@ function sessionVersion(env) {
   return Number.isInteger(value) && value > 0 ? value : 1;
 }
 
+function baseHealth(env, nowMs) {
+  return {
+    ok: true,
+    service: FUNCTION_NAME,
+    version: FUNCTION_VERSION,
+    protocolVersion: PROTOCOL_VERSION,
+    buildId: BUILD_ID,
+    buildDate: BUILD_DATE,
+    serverTime: new Date(nowMs).toISOString(),
+    checks: {
+      runtime: 'ok',
+      sessionAuth: base.parseSessionSecret(env.MASTERSKAYA_SESSION_SECRET) ? 'configured' : 'missing',
+      githubAppConfig: env.GITHUB_APP_ID && env.GITHUB_APP_PRIVATE_KEY_B64 ? 'configured' : 'missing',
+      deviceRegistry: 'not_checked',
+      githubApp: 'not_checked',
+    },
+  };
+}
+
 function createHandler({
   fetchImpl = globalThis.fetch,
   env = process.env,
@@ -74,11 +98,41 @@ function createHandler({
   let appClient = providedAppClient || null;
   let deviceAuthService = providedDeviceAuthService || null;
 
+  function getAppClient() {
+    if (!appClient) appClient = pairing.createAppClientWithInternalAccess({ fetchImpl, env, now });
+    return appClient;
+  }
+
   function getDeviceAuthService() {
     if (deviceAuthService) return deviceAuthService;
-    if (!appClient) appClient = pairing.createAppClientWithInternalAccess({ fetchImpl, env, now });
-    deviceAuthService = createDeviceAuthService({ appClient, now });
+    deviceAuthService = createDeviceAuthService({ appClient: getAppClient(), now });
     return deviceAuthService;
+  }
+
+  async function health(headers) {
+    const result = baseHealth(env, now());
+    const suppliedSession = String(headers[SESSION_HEADER] || '').trim();
+    if (!suppliedSession) return result;
+
+    const claims = base.verifySessionToken({
+      token: suppliedSession,
+      secret: env.MASTERSKAYA_SESSION_SECRET,
+      nowMs: now(),
+      version: sessionVersion(env),
+    });
+    const device = await getDeviceAuthService().authorize(claims);
+    result.authenticated = true;
+    result.device = { id: device.id, name: device.name };
+    result.checks.deviceRegistry = 'ok';
+
+    const client = getAppClient();
+    if (typeof client.installationToken === 'function') {
+      await client.installationToken();
+      result.checks.githubApp = 'ok';
+    } else {
+      result.checks.githubApp = 'unavailable';
+    }
+    return result;
   }
 
   return async function handler(event = {}) {
@@ -92,12 +146,15 @@ function createHandler({
       return delegatedHandler(event);
     }
 
-    if (String(body?.action || '').trim() !== 'session-check') return delegatedHandler(event);
+    const action = String(body?.action || '').trim();
+    if (action !== 'session-check' && action !== 'health') return delegatedHandler(event);
 
     if (origin !== base.ALLOWED_ORIGIN) return reply(403, { ok: false, error: 'ORIGIN_DENIED' }, origin);
     if (method !== 'POST') return reply(405, { ok: false, error: 'METHOD_NOT_ALLOWED' }, origin);
 
     try {
+      if (action === 'health') return reply(200, await health(headers), origin);
+
       const claims = base.verifySessionToken({
         token: headers[SESSION_HEADER],
         secret: env.MASTERSKAYA_SESSION_SECRET,
@@ -124,6 +181,11 @@ function createHandler({
 const handler = createHandler();
 
 module.exports = {
+  BUILD_DATE,
+  BUILD_ID,
+  FUNCTION_NAME,
+  FUNCTION_VERSION,
+  PROTOCOL_VERSION,
   createHandler,
   handler,
 };

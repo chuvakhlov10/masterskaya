@@ -2,6 +2,11 @@
 
 const base = require('./index.js');
 
+const FUNCTION_NAME = 'masterskaya-ably-auth';
+const FUNCTION_VERSION = '1.3.1';
+const PROTOCOL_VERSION = 3;
+const BUILD_ID = '__MASTERSKAYA_BUILD_ID__';
+const BUILD_DATE = '__MASTERSKAYA_BUILD_DATE__';
 const DEFAULT_STORAGE_GATEWAY_URL = 'https://functions.yandexcloud.net/d4ep5fmjtp6t09f06tvt';
 const SESSION_HEADER = 'x-masterskaya-session';
 const DEVICE_CHECK_TIMEOUT_MS = 8_000;
@@ -98,16 +103,12 @@ function createHandler({
   storageGatewayUrl = env.MASTERSKAYA_STORAGE_GATEWAY_URL || DEFAULT_STORAGE_GATEWAY_URL,
 } = {}) {
   const delegatedHandler = base.createHandler({ fetchImpl, env, now });
+  const sessionVersion = Number.parseInt(String(env.MASTERSKAYA_SESSION_VERSION || '1'), 10) || 1;
 
   return async function handler(event = {}) {
     const headers = normalizeHeaders(event.headers);
-    const suppliedSession = String(headers[SESSION_HEADER] || '').trim();
-    if (!suppliedSession) return delegatedHandler(event);
-
     const origin = headers.origin || '';
     const method = String(event.httpMethod || '').toUpperCase();
-    if (origin !== base.ALLOWED_ORIGIN) return reply(403, { ok: false, error: 'ORIGIN_DENIED' }, origin);
-    if (method !== 'POST') return reply(405, { ok: false, error: 'METHOD_NOT_ALLOWED' }, origin);
 
     let body;
     try {
@@ -115,6 +116,67 @@ function createHandler({
     } catch {
       return reply(400, { ok: false, error: 'INVALID_JSON_BODY' }, origin);
     }
+
+    const action = String(body?.action || '').trim();
+    const suppliedSession = String(headers[SESSION_HEADER] || '').trim();
+
+    if (action === 'health') {
+      if (origin !== base.ALLOWED_ORIGIN) return reply(403, { ok: false, error: 'ORIGIN_DENIED' }, origin);
+      if (method !== 'POST') return reply(405, { ok: false, error: 'METHOD_NOT_ALLOWED' }, origin);
+
+      const result = {
+        ok: true,
+        service: FUNCTION_NAME,
+        version: FUNCTION_VERSION,
+        protocolVersion: PROTOCOL_VERSION,
+        buildId: BUILD_ID,
+        buildDate: BUILD_DATE,
+        serverTime: new Date(now()).toISOString(),
+        checks: {
+          runtime: 'ok',
+          ablyConfig: env.ABLY_API_KEY ? 'configured' : 'missing',
+          sessionAuth: env.MASTERSKAYA_SESSION_SECRET ? 'configured' : 'missing',
+          storageGateway: 'not_checked',
+          deviceRegistry: 'not_checked',
+        },
+      };
+
+      if (!suppliedSession) return reply(200, result, origin);
+
+      try {
+        const claims = base.verifyStorageSession({
+          token: suppliedSession,
+          secret: env.MASTERSKAYA_SESSION_SECRET,
+          nowMs: now(),
+          version: sessionVersion,
+        });
+        const device = await verifyActiveDevice({
+          sessionToken: suppliedSession,
+          fetchImpl,
+          storageGatewayUrl,
+        });
+        result.authenticated = true;
+        result.device = { id: claims.clientId, name: device.name };
+        result.checks.storageGateway = 'ok';
+        result.checks.deviceRegistry = 'ok';
+        return reply(200, result, origin);
+      } catch (error) {
+        return reply(error.statusCode || 503, {
+          ...result,
+          ok: false,
+          error: error.code || 'DEVICE_AUTH_CHECK_FAILED',
+          checks: {
+            ...result.checks,
+            storageGateway: 'error',
+            deviceRegistry: 'error',
+          },
+        }, origin);
+      }
+    }
+
+    if (!suppliedSession) return delegatedHandler(event);
+    if (origin !== base.ALLOWED_ORIGIN) return reply(403, { ok: false, error: 'ORIGIN_DENIED' }, origin);
+    if (method !== 'POST') return reply(405, { ok: false, error: 'METHOD_NOT_ALLOWED' }, origin);
     if (!base.normalizeClientId(body?.clientId)) {
       return reply(400, { ok: false, error: 'CLIENT_ID_INVALID' }, origin);
     }
@@ -124,7 +186,7 @@ function createHandler({
         token: suppliedSession,
         secret: env.MASTERSKAYA_SESSION_SECRET,
         nowMs: now(),
-        version: Number.parseInt(String(env.MASTERSKAYA_SESSION_VERSION || '1'), 10) || 1,
+        version: sessionVersion,
       });
       await verifyActiveDevice({
         sessionToken: suppliedSession,
@@ -142,7 +204,12 @@ function createHandler({
 const handler = createHandler();
 
 module.exports = {
+  BUILD_DATE,
+  BUILD_ID,
   DEFAULT_STORAGE_GATEWAY_URL,
+  FUNCTION_NAME,
+  FUNCTION_VERSION,
+  PROTOCOL_VERSION,
   createHandler,
   handler,
   verifyActiveDevice,
