@@ -74,6 +74,8 @@ test('dbSet reads current remote value through the gateway and writes matching S
   assert.equal(put.options.headers['X-Masterskaya-Session'], 'header.payload.signature');
   assert.equal(put.options.headers['X-Masterskaya-GitHub-Token'], undefined);
   assert.equal(put.url.includes('api.github.com'), false);
+  assert.equal(globalThis.localStorage.getItem('github_token_v1'), null);
+  assert.ok(globalThis.localStorage.getItem('masterskaya_storage_session_v1'));
 });
 
 test('dbSet retries a gateway conflict by reading again and never uses a stale local snapshot', async () => {
@@ -134,6 +136,7 @@ test('dbGet distinguishes a gateway network failure from a missing file', async 
     throw new TypeError('network down');
   });
   await assert.rejects(() => storage.dbGet('records'), /GATEWAY_REQUEST_FAILED/);
+  assert.equal(globalThis.localStorage.getItem('github_token_v1'), 'temporary-bootstrap-token');
 });
 
 test('writes to one key remain serialized through the gateway', async () => {
