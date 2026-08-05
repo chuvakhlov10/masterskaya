@@ -1,8 +1,4 @@
 import {
-  SECURE_ABLY_AUTH_ENDPOINT,
-  requestSecureAblyToken as requestLegacyAblyToken,
-} from "./ably-auth.js";
-import {
   ensureStorageSession,
   invalidateStoredStorageSession,
   isTerminalSessionError,
@@ -11,6 +7,7 @@ import {
 
 const REQUEST_TIMEOUT_MS = 15_000;
 const RETRY_DELAYS_MS = [450, 1_400];
+export const SECURE_ABLY_AUTH_ENDPOINT = "https://functions.yandexcloud.net/d4en94jbo8opqbd4d0co";
 
 function makeError(code, cause, status) {
   const error = new Error(code);
@@ -147,14 +144,12 @@ async function requestWithFreshSession({
 
 let noticeShown = false;
 
-function showAuthNotice(mode) {
+function showAuthNotice() {
   if (noticeShown || typeof document === "undefined" || !document.body) return;
   noticeShown = true;
   const node = document.createElement("div");
   node.id = "masterskaya-session-auth-notice";
-  node.textContent = mode === "session"
-    ? "Ably через общую сессию готово"
-    : "Ably использует ручной аварийный доступ";
+  node.textContent = "Ably через общую сессию готово";
   Object.assign(node.style, {
     position: "fixed",
     right: "12px",
@@ -163,7 +158,7 @@ function showAuthNotice(mode) {
     maxWidth: "calc(100vw - 24px)",
     padding: "11px 14px",
     borderRadius: "8px",
-    background: mode === "session" ? "#166534" : "#9a3412",
+    background: "#166534",
     color: "#ffffff",
     fontFamily: "system-ui, sans-serif",
     fontSize: "13px",
@@ -171,7 +166,7 @@ function showAuthNotice(mode) {
     boxShadow: "0 8px 24px rgba(0,0,0,.28)",
   });
   document.body.appendChild(node);
-  setTimeout(() => node.remove(), mode === "session" ? 12_000 : 20_000);
+  setTimeout(() => node.remove(), 12_000);
 }
 
 export async function requestSessionAuthorizedAblyToken({
@@ -182,38 +177,22 @@ export async function requestSessionAuthorizedAblyToken({
   storage = globalThis.localStorage,
   eventTarget = globalThis,
   timeoutMs = REQUEST_TIMEOUT_MS,
-  allowLegacyFallback = false,
   waitImpl,
   random,
 } = {}) {
   if (typeof fetchImpl !== "function") throw makeError("FETCH_UNAVAILABLE");
 
-  try {
-    const details = await requestWithFreshSession({
-      clientId,
-      endpoint,
-      storageEndpoint,
-      fetchImpl,
-      storage,
-      eventTarget,
-      timeoutMs,
-      waitImpl,
-      random,
-    });
-    showAuthNotice("session");
-    return details;
-  } catch (sessionError) {
-    // PAT больше не используется автоматически. Параметр оставлен только для
-    // ручного аварийного сценария до полного удаления legacy-кода в 1.4.1.
-    if (!allowLegacyFallback) throw sessionError;
-    const details = await requestLegacyAblyToken({
-      clientId,
-      endpoint,
-      fetchImpl,
-      storage,
-      timeoutMs,
-    });
-    showAuthNotice("legacy");
-    return { ...details, authMode: "legacy" };
-  }
+  const details = await requestWithFreshSession({
+    clientId,
+    endpoint,
+    storageEndpoint,
+    fetchImpl,
+    storage,
+    eventTarget,
+    timeoutMs,
+    waitImpl,
+    random,
+  });
+  showAuthNotice();
+  return details;
 }

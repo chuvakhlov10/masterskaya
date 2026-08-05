@@ -4,11 +4,14 @@ const crypto = require('node:crypto');
 
 const DEVICE_REGISTRY_PATH = 'auth/devices.json';
 const PAIRINGS_PATH = 'auth/pairings.json';
+const RECOVERY_STATE_PATH = 'auth/recovery.json';
 const PAIRING_TTL_MS = 10 * 60 * 1000;
+const RECOVERY_RETRY_GRACE_MS = 10 * 60 * 1000;
 const REGISTRY_CACHE_TTL_MS = 30 * 1000;
 const LAST_SEEN_WRITE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const PAIRING_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const PAIRING_CODE_LENGTH = 12;
+const RECOVERY_CODE_LENGTH = 24;
 
 function makeError(code, statusCode = 500, cause) {
   const error = new Error(code);
@@ -57,6 +60,51 @@ function hashPairingCode(value) {
   return crypto.createHash('sha256').update(code, 'utf8').digest('hex');
 }
 
+function normalizeRecoveryCode(value) {
+  const normalized = String(value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  return new RegExp(`^[${PAIRING_ALPHABET}]{${RECOVERY_CODE_LENGTH}}$`).test(normalized) ? normalized : null;
+}
+
+function formatRecoveryCode(value) {
+  const code = normalizeRecoveryCode(value);
+  if (!code) return '';
+  return code.match(/.{1,4}/g).join('-');
+}
+
+function createRecoveryCode(randomInt = crypto.randomInt) {
+  let result = '';
+  for (let index = 0; index < RECOVERY_CODE_LENGTH; index++) {
+    result += PAIRING_ALPHABET[randomInt(0, PAIRING_ALPHABET.length)];
+  }
+  return result;
+}
+
+function hashRecoveryCode(value) {
+  const code = normalizeRecoveryCode(value);
+  if (!code) return null;
+  return crypto.createHash('sha256').update(code, 'utf8').digest('hex');
+}
+
+function deriveReplacementRecoveryCode({ code, clientId, generation, secret }) {
+  const normalized = normalizeRecoveryCode(code);
+  const id = normalizeClientId(clientId);
+  const key = Buffer.isBuffer(secret) ? secret : Buffer.from(String(secret || ''), 'utf8');
+  if (!normalized || !id || key.length < 32) throw makeError('RECOVERY_NOT_CONFIGURED', 503);
+  const digest = crypto.createHmac('sha256', key)
+    .update(`recovery:${generation}:${id}:${normalized}`, 'utf8')
+    .digest();
+  let result = '';
+  for (let index = 0; index < RECOVERY_CODE_LENGTH; index++) {
+    result += PAIRING_ALPHABET[digest[index] % PAIRING_ALPHABET.length];
+  }
+  return result;
+}
+
+function safeHashEquals(left, right) {
+  if (!/^[a-f0-9]{64}$/i.test(String(left || '')) || !/^[a-f0-9]{64}$/i.test(String(right || ''))) return false;
+  return crypto.timingSafeEqual(Buffer.from(String(left), 'hex'), Buffer.from(String(right), 'hex'));
+}
+
 function normalizeTimestamp(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 ? number : fallback;
@@ -73,11 +121,33 @@ function normalizeDevice(value) {
   return {
     id,
     name: normalizeDeviceName(value.name),
-    source: value.source === 'pairing' ? 'pairing' : 'legacy',
+    source: ['pairing', 'recovery'].includes(value.source) ? value.source : 'legacy',
     createdAt,
     lastSeenAt,
     revokedAt,
     pairedBy: normalizeClientId(value.pairedBy),
+  };
+}
+
+function normalizeRecoveryState(value) {
+  const currentHash = String(value?.currentHash || '').toLowerCase();
+  const last = value?.lastRedemption && typeof value.lastRedemption === 'object'
+    ? value.lastRedemption
+    : null;
+  return {
+    version: 1,
+    generation: Math.max(0, Math.trunc(normalizeTimestamp(value?.generation))),
+    updatedAt: normalizeTimestamp(value?.updatedAt),
+    currentHash: /^[a-f0-9]{64}$/.test(currentHash) ? currentHash : null,
+    createdBy: normalizeClientId(value?.createdBy),
+    lastRedemption: last && /^[a-f0-9]{64}$/i.test(String(last.previousHash || ''))
+      ? {
+          previousHash: String(last.previousHash).toLowerCase(),
+          clientId: normalizeClientId(last.clientId),
+          redeemedAt: normalizeTimestamp(last.redeemedAt),
+          nextGeneration: Math.max(1, Math.trunc(normalizeTimestamp(last.nextGeneration, 1))),
+        }
+      : null,
   };
 }
 
@@ -150,7 +220,12 @@ function publicDevice(device, currentClientId) {
   };
 }
 
-function createDeviceAuthService({ appClient, now = () => Date.now(), randomInt = crypto.randomInt } = {}) {
+function createDeviceAuthService({
+  appClient,
+  now = () => Date.now(),
+  randomInt = crypto.randomInt,
+  recoverySecret,
+} = {}) {
   if (!appClient || typeof appClient.requestInternal !== 'function') {
     throw makeError('AUTH_STORAGE_UNAVAILABLE', 503);
   }
@@ -222,47 +297,16 @@ function createDeviceAuthService({ appClient, now = () => Date.now(), randomInt 
     return response;
   }
 
-  async function registerLegacy({ clientId, subject, deviceName }) {
-    const id = normalizeClientId(clientId);
-    if (!id) throw makeError('CLIENT_ID_INVALID', 400);
-    const nowMs = now();
-    const response = await mutateRegistry('Register workshop device', registry => {
-      const existing = registry.devices.find(device => device.id === id);
-      if (existing) {
-        if (existing.revokedAt) throw makeError('DEVICE_REVOKED', 401);
-        existing.lastSeenAt = nowMs;
-        if (deviceName) existing.name = normalizeDeviceName(deviceName, existing.name);
-        return { next: registry, result: existing };
-      }
-      const device = {
-        id,
-        name: normalizeDeviceName(deviceName),
-        source: 'legacy',
-        createdAt: nowMs,
-        lastSeenAt: nowMs,
-        revokedAt: null,
-        pairedBy: null,
-      };
-      registry.devices.push(device);
-      return { next: registry, result: device };
-    });
-    return response.result;
-  }
-
   async function authorize(claims, deviceName) {
     const id = normalizeClientId(claims?.clientId);
     if (!id) throw makeError('SESSION_INVALID', 401);
     let registry = await loadRegistry();
     let device = registry.devices.find(item => item.id === id);
 
-    if (!device && String(claims?.sub || '').startsWith('device:')) {
+    if (!device) {
       registry = await loadRegistry({ fresh: true });
       device = registry.devices.find(item => item.id === id);
       if (!device) throw makeError('DEVICE_NOT_REGISTERED', 401);
-    }
-
-    if (!device) {
-      device = await registerLegacy({ clientId: id, subject: claims?.sub, deviceName });
     }
     if (device.revokedAt) throw makeError('DEVICE_REVOKED', 401);
 
@@ -369,6 +413,118 @@ function createDeviceAuthService({ appClient, now = () => Date.now(), randomInt 
     return response.result;
   }
 
+  async function rotateRecovery(claims, deviceName) {
+    const current = await authorize(claims, deviceName);
+    const code = createRecoveryCode(randomInt);
+    const hash = hashRecoveryCode(code);
+    const nowMs = now();
+    const response = await mutateJsonFile({
+      path: RECOVERY_STATE_PATH,
+      fallback: { version: 1, generation: 0 },
+      normalize: normalizeRecoveryState,
+      message: 'Rotate workshop recovery code',
+      mutate: state => ({
+        next: {
+          version: 1,
+          generation: state.generation + 1,
+          updatedAt: nowMs,
+          currentHash: hash,
+          createdBy: current.id,
+          lastRedemption: null,
+        },
+        result: { code: formatRecoveryCode(code), generation: state.generation + 1 },
+      }),
+    });
+    return response.result;
+  }
+
+  async function redeemRecovery({ code, clientId, deviceName }) {
+    const id = normalizeClientId(clientId);
+    const normalizedCode = normalizeRecoveryCode(code);
+    const suppliedHash = hashRecoveryCode(normalizedCode);
+    if (!id) throw makeError('CLIENT_ID_INVALID', 400);
+    if (!suppliedHash) throw makeError('RECOVERY_CODE_INVALID', 400);
+    const secret = Buffer.isBuffer(recoverySecret) ? recoverySecret : Buffer.from(String(recoverySecret || ''), 'utf8');
+    if (secret.length < 32) throw makeError('RECOVERY_NOT_CONFIGURED', 503);
+    const nowMs = now();
+
+    const consumed = await mutateJsonFile({
+      path: RECOVERY_STATE_PATH,
+      fallback: { version: 1, generation: 0 },
+      normalize: normalizeRecoveryState,
+      message: 'Consume and rotate workshop recovery code',
+      mutate: state => {
+        let nextGeneration;
+        let retry = false;
+        if (safeHashEquals(state.currentHash, suppliedHash)) {
+          nextGeneration = state.generation + 1;
+        } else if (
+          state.lastRedemption
+          && safeHashEquals(state.lastRedemption.previousHash, suppliedHash)
+          && state.lastRedemption.clientId === id
+          && nowMs - state.lastRedemption.redeemedAt <= RECOVERY_RETRY_GRACE_MS
+        ) {
+          nextGeneration = state.lastRedemption.nextGeneration;
+          retry = true;
+        } else {
+          throw makeError('RECOVERY_CODE_NOT_FOUND', 404);
+        }
+
+        const replacement = deriveReplacementRecoveryCode({
+          code: normalizedCode,
+          clientId: id,
+          generation: nextGeneration,
+          secret,
+        });
+        if (retry) {
+          return {
+            next: state,
+            result: { code: formatRecoveryCode(replacement), generation: nextGeneration, retry: true },
+          };
+        }
+        return {
+          next: {
+            version: 1,
+            generation: nextGeneration,
+            updatedAt: nowMs,
+            currentHash: hashRecoveryCode(replacement),
+            createdBy: id,
+            lastRedemption: {
+              previousHash: suppliedHash,
+              clientId: id,
+              redeemedAt: nowMs,
+              nextGeneration,
+            },
+          },
+          result: { code: formatRecoveryCode(replacement), generation: nextGeneration, retry: false },
+        };
+      },
+    });
+
+    const response = await mutateRegistry('Register recovered workshop device', registry => {
+      let device = registry.devices.find(item => item.id === id);
+      if (!device) {
+        device = {
+          id,
+          name: normalizeDeviceName(deviceName),
+          source: 'recovery',
+          createdAt: nowMs,
+          lastSeenAt: nowMs,
+          revokedAt: null,
+          pairedBy: null,
+        };
+        registry.devices.push(device);
+      } else {
+        device.name = normalizeDeviceName(deviceName, device.name);
+        device.source = 'recovery';
+        device.lastSeenAt = nowMs;
+        device.revokedAt = null;
+      }
+      return { next: registry, result: device };
+    });
+    return { device: response.result, replacementCode: consumed.result.code };
+  }
+
   async function listDevices(claims, deviceName) {
     const current = await authorize(claims, deviceName);
     const registry = await loadRegistry({ fresh: true });
@@ -415,9 +571,10 @@ function createDeviceAuthService({ appClient, now = () => Date.now(), randomInt 
     createPairing,
     listDevices,
     redeemPairing,
-    registerLegacy,
+    redeemRecovery,
     renameDevice,
     revokeDevice,
+    rotateRecovery,
   };
 }
 
@@ -425,10 +582,17 @@ module.exports = {
   DEVICE_REGISTRY_PATH,
   PAIRINGS_PATH,
   PAIRING_TTL_MS,
+  RECOVERY_CODE_LENGTH,
+  RECOVERY_STATE_PATH,
   createDeviceAuthService,
   createPairingCode,
+  createRecoveryCode,
+  deriveReplacementRecoveryCode,
   formatPairingCode,
+  formatRecoveryCode,
   hashPairingCode,
+  hashRecoveryCode,
   normalizeDeviceName,
   normalizePairingCode,
+  normalizeRecoveryCode,
 };

@@ -41,13 +41,13 @@ self.addEventListener('activate', (event) => {
 // Стратегия fetch:
 // - Для навигационных запросов (HTML) — network-first с fallback на cache
 // - Для статики (JS/CSS/иконки) — cache-first с обновлением из сети (stale-while-revalidate)
-// - Для API (api.github.com) — всегда network, не кешируем
+// - Для Live API — всегда network, не кешируем
 self.addEventListener('fetch', (event) => {
   const req = event.request;
   const url = new URL(req.url);
 
   // Никогда не кешируем GitHub API и Ably
-  if (url.hostname === 'api.github.com' || url.hostname.includes('ably')) {
+  if (url.hostname.includes('ably')) {
     return;
   }
 

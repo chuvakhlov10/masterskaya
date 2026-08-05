@@ -54,7 +54,7 @@ test('storage health exposes safe version metadata without requiring a session',
   assert.equal(response.statusCode, 200);
   assert.equal(payload.ok, true);
   assert.equal(payload.service, 'masterskaya-storage-gateway');
-  assert.equal(payload.version, '1.3.1');
+  assert.equal(payload.version, '1.4.1');
   assert.equal(payload.protocolVersion, 3);
   assert.equal(payload.checks.runtime, 'ok');
   assert.equal(payload.checks.deviceRegistry, 'not_checked');
@@ -129,7 +129,7 @@ test('authenticated Ably health verifies the storage gateway and device registry
   assert.equal(response.statusCode, 200);
   assert.equal(payload.ok, true);
   assert.equal(payload.service, 'masterskaya-ably-auth');
-  assert.equal(payload.version, '1.3.1');
+  assert.equal(payload.version, '1.4.1');
   assert.equal(payload.protocolVersion, 3);
   assert.equal(payload.checks.storageGateway, 'ok');
   assert.equal(payload.checks.deviceRegistry, 'ok');

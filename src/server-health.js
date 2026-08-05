@@ -1,4 +1,4 @@
-import { SECURE_ABLY_AUTH_ENDPOINT } from "./ably-auth.js";
+import { SECURE_ABLY_AUTH_ENDPOINT } from "./ably-session-auth.js";
 import {
   STORAGE_GATEWAY_ENDPOINT,
   readStoredStorageSession,

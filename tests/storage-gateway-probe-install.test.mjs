@@ -13,10 +13,6 @@ test("App keeps its stable storage API while the implementation uses the Yandex 
 
 test("working data requests do not construct direct GitHub Contents API URLs", () => {
   assert.equal(storageSource.includes('/contents/${encodePath(path)}'), false);
-  assert.equal(storageSource.includes('Authorization: `Bearer ${token}`'), true, "direct GitHub auth remains only for initial PAT verification");
-  const workingRequestStart = storageSource.indexOf("async function ghRequest");
-  const verifyStart = storageSource.indexOf("export async function verifyToken");
-  const workingRequestSource = storageSource.slice(workingRequestStart, verifyStart);
-  assert.equal(workingRequestSource.includes("api.github.com"), false);
-  assert.equal(workingRequestSource.includes("X-Masterskaya-GitHub-Token"), false);
+  assert.equal(storageSource.includes("github.com"), false);
+  assert.equal(storageSource.includes("Authorization"), false);
 });

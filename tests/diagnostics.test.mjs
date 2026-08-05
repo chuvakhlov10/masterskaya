@@ -30,7 +30,7 @@ function storageFixture() {
     pending_writes: JSON.stringify([{ key: 'records' }]),
     stock_ops_outbox_v1: JSON.stringify([{ opId: 'one' }, { opId: 'two' }]),
     last_successful_sync_v1: '1800000000000',
-    github_token_v1: 'github_pat_must_never_appear',
+    unrelated_secret_v1: 'must_never_appear',
   });
 }
 
@@ -120,7 +120,7 @@ test('diagnostic snapshot reports PWA, queues and masked device id', async () =>
   assert.deepEqual(snapshot.pwa.cacheNames, ['masterskaya-v5']);
 });
 
-test('copied report contains no session, PAT or working data', async () => {
+test('copied report contains no session, secrets or working data', async () => {
   const storage = storageFixture();
   const snapshot = await collectClientDiagnostics({
     storage,

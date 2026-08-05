@@ -3,7 +3,7 @@
 const base = require('./index.js');
 
 const FUNCTION_NAME = 'masterskaya-ably-auth';
-const FUNCTION_VERSION = '1.3.1';
+const FUNCTION_VERSION = '1.4.1';
 const PROTOCOL_VERSION = 3;
 const BUILD_ID = '__MASTERSKAYA_BUILD_ID__';
 const BUILD_DATE = '__MASTERSKAYA_BUILD_DATE__';

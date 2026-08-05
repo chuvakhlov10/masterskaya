@@ -9,8 +9,10 @@ const {
   DEVICE_REGISTRY_PATH,
   PAIRINGS_PATH,
   PAIRING_TTL_MS,
+  RECOVERY_STATE_PATH,
   createDeviceAuthService,
   hashPairingCode,
+  hashRecoveryCode,
   normalizePairingCode,
 } = require('../yandex-storage-function/device-auth.js');
 const { createHandler } = require('../yandex-storage-function/pairing-index.js');
@@ -44,15 +46,28 @@ class MemoryGitHubClient {
     if(!file) return null;
     return JSON.parse(Buffer.from(file.content, 'base64').toString('utf8'));
   }
+  setJson(path, value){
+    const sha = String(this.counter++).padStart(40, 'a').slice(-40);
+    this.files.set(path, { sha, content: Buffer.from(`${JSON.stringify(value)}\n`, 'utf8').toString('base64') });
+  }
 }
 
 function deterministicRandom(){ return 0; }
 
-test('legacy session auto-registers a device and lists it as current', async () => {
+function seedDevice(client, id = 'device-client-123', name = 'Ноутбук'){
+  client.setJson(DEVICE_REGISTRY_PATH, {
+    version: 1,
+    updatedAt: 1000,
+    devices: [{ id, name, source: 'pairing', createdAt: 1000, lastSeenAt: 1000, revokedAt: null, pairedBy: null }],
+  });
+}
+
+test('registered device session is authorized and listed as current', async () => {
   const client = new MemoryGitHubClient();
+  seedDevice(client);
   let now = 1000;
-  const auth = createDeviceAuthService({ appClient: client, now: () => now, randomInt: deterministicRandom });
-  const claims = { clientId: 'device-client-123', sub: 'github:123' };
+  const auth = createDeviceAuthService({ appClient: client, now: () => now, randomInt: deterministicRandom, recoverySecret: crypto.randomBytes(32) });
+  const claims = { clientId: 'device-client-123', sub: 'device:device-client-123' };
   const device = await auth.authorize(claims, 'Ноутбук');
   assert.equal(device.name, 'Ноутбук');
   const registry = client.json(DEVICE_REGISTRY_PATH);
@@ -64,9 +79,10 @@ test('legacy session auto-registers a device and lists it as current', async () 
 
 test('pairing code is one-time, lasts ten minutes, and raw code is never stored', async () => {
   const client = new MemoryGitHubClient();
+  seedDevice(client);
   let now = 10_000;
-  const auth = createDeviceAuthService({ appClient: client, now: () => now, randomInt: deterministicRandom });
-  const currentClaims = { clientId: 'device-client-123', sub: 'github:123' };
+  const auth = createDeviceAuthService({ appClient: client, now: () => now, randomInt: deterministicRandom, recoverySecret: crypto.randomBytes(32) });
+  const currentClaims = { clientId: 'device-client-123', sub: 'device:device-client-123' };
   await auth.authorize(currentClaims, 'Ноутбук');
   const pairing = await auth.createPairing(currentClaims);
   assert.match(pairing.code, /^[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$/);
@@ -91,9 +107,10 @@ test('pairing code is one-time, lasts ten minutes, and raw code is never stored'
 
 test('expired pairing code is consumed and rejected', async () => {
   const client = new MemoryGitHubClient();
+  seedDevice(client);
   let now = 20_000;
-  const auth = createDeviceAuthService({ appClient: client, now: () => now, randomInt: deterministicRandom });
-  const claims = { clientId: 'device-client-123', sub: 'github:123' };
+  const auth = createDeviceAuthService({ appClient: client, now: () => now, randomInt: deterministicRandom, recoverySecret: crypto.randomBytes(32) });
+  const claims = { clientId: 'device-client-123', sub: 'device:device-client-123' };
   await auth.authorize(claims);
   const pairing = await auth.createPairing(claims);
   now = pairing.expiresAt + 1;
@@ -105,9 +122,10 @@ test('expired pairing code is consumed and rejected', async () => {
 
 test('a paired device can be renamed and revoked, but current device cannot revoke itself', async () => {
   const client = new MemoryGitHubClient();
+  seedDevice(client);
   let now = 30_000;
-  const auth = createDeviceAuthService({ appClient: client, now: () => now, randomInt: deterministicRandom });
-  const claims = { clientId: 'device-client-123', sub: 'github:123' };
+  const auth = createDeviceAuthService({ appClient: client, now: () => now, randomInt: deterministicRandom, recoverySecret: crypto.randomBytes(32) });
+  const claims = { clientId: 'device-client-123', sub: 'device:device-client-123' };
   await auth.authorize(claims, 'Ноутбук');
   const pairing = await auth.createPairing(claims);
   await auth.redeemPairing({ code: pairing.code, clientId: 'device-phone-456', deviceName: 'Телефон' });
@@ -123,6 +141,40 @@ test('a paired device can be renamed and revoked, but current device cannot revo
   await assert.rejects(
     () => auth.revokeDevice(claims, 'device-client-123'),
     error => error.code === 'DEVICE_SELF_REVOKE_DENIED',
+  );
+});
+
+test('recovery code is stored only as a hash and rotates after one use', async () => {
+  const client = new MemoryGitHubClient();
+  seedDevice(client);
+  let now = 40_000;
+  const secret = crypto.randomBytes(32);
+  const auth = createDeviceAuthService({ appClient: client, now: () => now, randomInt: deterministicRandom, recoverySecret: secret });
+  const claims = { clientId: 'device-client-123', sub: 'device:device-client-123' };
+  const recovery = await auth.rotateRecovery(claims);
+  assert.match(recovery.code, /^(?:[A-Z2-9]{4}-){5}[A-Z2-9]{4}$/);
+  const storedBefore = client.json(RECOVERY_STATE_PATH);
+  assert.equal(JSON.stringify(storedBefore).includes(recovery.code.replaceAll('-', '')), false);
+  assert.equal(storedBefore.currentHash, hashRecoveryCode(recovery.code));
+
+  const redeemed = await auth.redeemRecovery({
+    code: recovery.code,
+    clientId: 'device-recovered-456',
+    deviceName: 'Новый ноутбук',
+  });
+  assert.notEqual(redeemed.replacementCode, recovery.code);
+  assert.equal(client.json(RECOVERY_STATE_PATH).currentHash, hashRecoveryCode(redeemed.replacementCode));
+  assert.equal(client.json(DEVICE_REGISTRY_PATH).devices.find(item => item.id === 'device-recovered-456').source, 'recovery');
+
+  const retry = await auth.redeemRecovery({
+    code: recovery.code,
+    clientId: 'device-recovered-456',
+    deviceName: 'Новый ноутбук',
+  });
+  assert.equal(retry.replacementCode, redeemed.replacementCode);
+  await assert.rejects(
+    () => auth.redeemRecovery({ code: recovery.code, clientId: 'device-attacker-789' }),
+    error => error.code === 'RECOVERY_CODE_NOT_FOUND',
   );
 });
 
@@ -150,7 +202,7 @@ function event(body, headers = {}){
 function fakeAuth(){
   return {
     async redeemPairing({clientId}){ return {id:clientId,name:'Телефон'}; },
-    async registerLegacy({clientId}){ return {id:clientId,name:'Устройство'}; },
+    async redeemRecovery({clientId}){ return {device:{id:clientId,name:'Восстановленное устройство'},replacementCode:'AAAA-BBBB-CCCC-DDDD-EEEE-FFFF'}; },
     async authorize(claims){
       if(claims.clientId === 'device-revoked-1'){
         const error = new Error('DEVICE_REVOKED');
@@ -162,6 +214,7 @@ function fakeAuth(){
     },
     async listDevices(claims){ return [{id:claims.clientId,current:true,name:'Ноутбук'}]; },
     async createPairing(){ return {code:'AAAA-AAAA-AAAA',expiresAt:NOW+600000,createdBy:'device-client-123'}; },
+    async rotateRecovery(){ return {code:'AAAA-BBBB-CCCC-DDDD-EEEE-FFFF',generation:2}; },
     async renameDevice(){ return {id:'device-phone-456',name:'Телефон'}; },
     async revokeDevice(){ return {id:'device-phone-456',revokedAt:NOW}; },
   };
@@ -172,7 +225,7 @@ const appClient = {
   async requestInternal(){ throw new Error('not used'); },
 };
 
-test('pairing redeem issues a normal shared session without a PAT', async () => {
+test('pairing redeem issues a normal shared session', async () => {
   const handler = createHandler({
     env: ENV,
     now: () => NOW,
@@ -196,6 +249,27 @@ test('pairing redeem issues a normal shared session without a PAT', async () => 
   });
   assert.equal(claims.clientId, 'device-phone-456');
   assert.equal(claims.sub, 'device:device-phone-456');
+});
+
+test('recovery redeem rotates the code and issues a device session', async () => {
+  const handler = createHandler({
+    env: ENV,
+    now: () => NOW,
+    appClient,
+    deviceAuthService: fakeAuth(),
+    fetchImpl: async () => { throw new Error('network not expected'); },
+  });
+  const response = await handler(event({
+    action:'recovery-redeem',
+    code:'AAAA-BBBB-CCCC-DDDD-EEEE-FFFF',
+    clientId:'device-recovered-456',
+    deviceName:'Новый ноутбук',
+  }));
+  assert.equal(response.statusCode, 200);
+  const payload = JSON.parse(response.body);
+  assert.equal(payload.replacementRecoveryCode, 'AAAA-BBBB-CCCC-DDDD-EEEE-FFFF');
+  const claims = base.verifySessionToken({ token:payload.sessionToken, secret:SESSION_SECRET, nowMs:NOW, version:2 });
+  assert.equal(claims.clientId, 'device-recovered-456');
 });
 
 test('devices and pairing-create use the active device session', async () => {

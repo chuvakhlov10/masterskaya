@@ -1,34 +1,31 @@
 # Yandex Cloud Function: Ably authentication
 
-This function issues short-lived Ably JWTs for the workshop application hosted at:
-
-`https://chuvakhlov10.github.io/masterskaya/`
+This function issues one-hour Ably JWTs for the workshop application. Every request must contain a valid signed device session, and the function confirms the device against the storage gateway before issuing a Live token.
 
 Security properties:
 
 - accepts browser requests only from `https://chuvakhlov10.github.io`;
-- verifies that the supplied GitHub token has write access to the private `masterskaya-data` repository;
-- reads the permanent Ably key only from the server-side `ABLY_API_KEY` environment variable;
-- issues a one-hour JWT limited to `publish` and `subscribe` on `masterskaya-sync`;
-- does not log or return the GitHub token or Ably key;
-- has no external npm dependencies.
+- accepts only `X-Masterskaya-Session` as the authorization credential;
+- reads the permanent Ably key only from server environment variables;
+- limits JWT capabilities to `publish` and `subscribe` on `masterskaya-sync`;
+- fails closed if the registry cannot be checked or the device is revoked;
+- does not log or return the session secret or Ably key.
 
 ## Yandex Cloud settings
 
 - Runtime: Node.js 22
-- Entry point: `index.handler`
+- Entry point: `index.handler` from the generated single-file bundle
 - Memory: 128 MB
 - Timeout: 10 seconds
-- Service account: not required
-- Environment variable: `ABLY_API_KEY=<full Ably API key>`
 - Public function: enabled
+- Upload: generated `dist/yandex-functions/ably/index.js`
+- Do not use `?integration=raw`
 
-Upload a ZIP archive with `index.js` at the archive root. Do not use `?integration=raw`; the function relies on the standard HTTPS event and response format.
+Environment variables:
 
-The client must send:
+- `ABLY_API_KEY`
+- `MASTERSKAYA_SESSION_SECRET` (the same value as in the storage gateway)
+- `MASTERSKAYA_SESSION_VERSION=2`
+- optional `MASTERSKAYA_STORAGE_GATEWAY_URL`
 
-- `Origin: https://chuvakhlov10.github.io` (set automatically by the browser);
-- `X-Masterskaya-GitHub-Token: <GitHub token>`;
-- JSON body: `{ "clientId": "<device client id>" }`.
-
-Yandex Cloud Functions removes the standard inbound `Authorization` header for direct HTTPS invocation, so the function deliberately uses a narrowly named custom header.
+The browser sends its normal `Origin`, `X-Masterskaya-Session`, and JSON body `{ "clientId": "<device client id>" }`.

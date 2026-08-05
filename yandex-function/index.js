@@ -3,12 +3,9 @@
 const crypto = require('node:crypto');
 
 const ALLOWED_ORIGIN = 'https://chuvakhlov10.github.io';
-const DATA_REPOSITORY_URL = 'https://api.github.com/repos/chuvakhlov10/masterskaya-data';
 const ABLY_CHANNEL = 'masterskaya-sync';
 const TOKEN_TTL_SECONDS = 60 * 60;
-const GITHUB_TIMEOUT_MS = 8_000;
 const MAX_BODY_BYTES = 2_048;
-const TOKEN_HEADER = 'x-masterskaya-github-token';
 const SESSION_HEADER = 'x-masterskaya-session';
 const SESSION_ISSUER = 'masterskaya-storage-gateway';
 const SESSION_AUDIENCE = 'masterskaya-web';
@@ -174,34 +171,6 @@ function createAblyJwt({ apiKey, clientId, nowMs = Date.now() }) {
   };
 }
 
-async function verifyGitHubPushAccess(token, fetchImpl) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), GITHUB_TIMEOUT_MS);
-  try {
-    const response = await fetchImpl(DATA_REPOSITORY_URL, {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28',
-        'User-Agent': 'masterskaya-yandex-ably-auth',
-      },
-      signal: controller.signal,
-      cache: 'no-store',
-    });
-
-    if ([401, 403, 404].includes(response.status)) return { ok: false, denied: true };
-    if (!response.ok) throw new Error(`GITHUB_HTTP_${response.status}`);
-    const repository = await response.json();
-    const permissions = repository?.permissions || {};
-    return {
-      ok: permissions.push === true || permissions.admin === true || permissions.maintain === true,
-    };
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
 function createHandler({ fetchImpl = globalThis.fetch, env = process.env, now = () => Date.now() } = {}) {
   if (typeof fetchImpl !== 'function') throw new Error('fetch implementation is required');
 
@@ -214,7 +183,7 @@ function createHandler({ fetchImpl = globalThis.fetch, env = process.env, now = 
       if (origin !== ALLOWED_ORIGIN) return reply(403, { ok: false, error: 'ORIGIN_DENIED' }, origin);
       return reply(204, null, origin, {
         'Access-Control-Allow-Methods': 'POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, X-Masterskaya-GitHub-Token, X-Masterskaya-Session',
+        'Access-Control-Allow-Headers': 'Content-Type, X-Masterskaya-Session',
         'Access-Control-Max-Age': '600',
       });
     }
@@ -237,30 +206,16 @@ function createHandler({ fetchImpl = globalThis.fetch, env = process.env, now = 
     if (!clientId) return reply(400, { ok: false, error: 'CLIENT_ID_INVALID' }, origin);
 
     const suppliedSession = String(headers[SESSION_HEADER] || '').trim();
-    if (suppliedSession) {
-      try {
-        verifyStorageSession({
-          token: suppliedSession,
-          secret: env.MASTERSKAYA_SESSION_SECRET,
-          nowMs: now(),
-          version: sessionVersion(env),
-        });
-      } catch (error) {
-        return reply(error.statusCode || 401, { ok: false, error: error.code || 'SESSION_INVALID' }, origin);
-      }
-    } else {
-      const githubToken = String(headers[TOKEN_HEADER] || '').trim();
-      if (!/^[^\s]{20,512}$/.test(githubToken)) {
-        return reply(401, { ok: false, error: 'GITHUB_TOKEN_REQUIRED' }, origin);
-      }
-
-      let access;
-      try {
-        access = await verifyGitHubPushAccess(githubToken, fetchImpl);
-      } catch {
-        return reply(503, { ok: false, error: 'GITHUB_ACCESS_CHECK_FAILED' }, origin);
-      }
-      if (!access.ok) return reply(403, { ok: false, error: 'GITHUB_ACCESS_DENIED' }, origin);
+    if (!suppliedSession) return reply(401, { ok: false, error: 'SESSION_REQUIRED' }, origin);
+    try {
+      verifyStorageSession({
+        token: suppliedSession,
+        secret: env.MASTERSKAYA_SESSION_SECRET,
+        nowMs: now(),
+        version: sessionVersion(env),
+      });
+    } catch (error) {
+      return reply(error.statusCode || 401, { ok: false, error: error.code || 'SESSION_INVALID' }, origin);
     }
 
     const apiKey = String(env.ABLY_API_KEY || '').trim();
@@ -295,6 +250,5 @@ module.exports = {
   parseAblyKey,
   parseBody,
   parseSessionSecret,
-  verifyGitHubPushAccess,
   verifyStorageSession,
 };

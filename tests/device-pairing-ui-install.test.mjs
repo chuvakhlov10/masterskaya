@@ -12,11 +12,13 @@ test('main application is wrapped by the device pairing gate', () => {
   assert.match(mainSource, /<DevicePairingGate>[\s\S]*<App \/>[\s\S]*<\/DevicePairingGate>/);
 });
 
-test('new-device screen uses one-time pairing and does not request a GitHub token', () => {
+test('new-device screen uses pairing and offline recovery codes', () => {
   assert.match(gateSource, /Подключить устройство/);
   assert.match(gateSource, /Одноразовый код/);
   assert.match(gateSource, /redeemPairingCode/);
-  assert.doesNotMatch(gateSource, /Personal Access Token|ghp_/);
+  assert.match(gateSource, /redeemRecoveryCode/);
+  assert.match(gateSource, /Я сохранил код/);
+  assert.doesNotMatch(gateSource, /Authorization|Bearer/);
 });
 
 test('connected-device manager can create and revoke device access', () => {
@@ -43,6 +45,6 @@ test('connected application exposes safe server health and diagnostics', () => {
   assert.match(healthSource, /Складские операции/);
 });
 
-test('diagnostics release is version 1.3.3', () => {
-  assert.match(statusSource, /APP_VERSION = "1\.3\.3"/);
+test('diagnostics release is version 1.4.1', () => {
+  assert.match(statusSource, /APP_VERSION = "1\.4\.1"/);
 });

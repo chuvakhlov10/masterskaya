@@ -22,11 +22,13 @@ test('rejected sessions dispatch the pairing event', () => {
   assert.match(gateSource, /addEventListener\?\.\(STORAGE_SESSION_EVENT/);
 });
 
-test('automatic Ably authorization defaults to no legacy fallback', () => {
-  assert.match(ablySource, /allowLegacyFallback = false/);
+test('automatic Ably authorization has only the shared-session path', () => {
+  assert.match(ablySource, /ensureStorageSession/);
+  assert.doesNotMatch(ablySource, /Fallback|Authorization/);
 });
 
-test('data storage does not bootstrap after an existing session is rejected', () => {
+test('data storage has only the shared-session gateway path', () => {
   assert.doesNotMatch(storageSource, /SESSION_AUTH_ERRORS/);
-  assert.match(storageSource, /if \(!readStoredStorageSession\(\) && getToken\(\)\)/);
+  assert.match(storageSource, /storageGatewayRequest\(\{/);
+  assert.doesNotMatch(storageSource, /Authorization|Bearer/);
 });

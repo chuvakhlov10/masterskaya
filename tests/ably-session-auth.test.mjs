@@ -7,7 +7,6 @@ import {
 
 const CLIENT_ID = "client-12345678";
 const DEVICE_ID = "web-device-12345678";
-const PAT = "github_pat_abcdefghijklmnopqrstuvwxyz012345";
 const SESSION = "shared.header.signature";
 const ABLY_TOKEN = "ably.header.signature";
 const ABLY_ENDPOINT = "https://function.example/ably";
@@ -46,11 +45,8 @@ function eventTarget(events) {
 const noWait = async () => {};
 const noRandom = () => 0;
 
-test("valid shared session authorizes Ably without sending the PAT", async () => {
-  const storage = makeStorage({
-    github_token_v1: PAT,
-    masterskaya_storage_session_v1: storedSession(),
-  });
+test("valid shared session authorizes Ably", async () => {
+  const storage = makeStorage({ masterskaya_storage_session_v1: storedSession() });
   const calls = [];
   const details = await requestSessionAuthorizedAblyToken({
     clientId: CLIENT_ID,
@@ -68,15 +64,11 @@ test("valid shared session authorizes Ably without sending the PAT", async () =>
   assert.equal(calls.length, 1);
   assert.equal(calls[0].url, ABLY_ENDPOINT);
   assert.equal(calls[0].options.headers["X-Masterskaya-Session"], SESSION);
-  assert.equal(calls[0].options.headers["X-Masterskaya-GitHub-Token"], undefined);
 });
 
 test("temporary Ably auth failure is retried and keeps the shared session", async () => {
   const originalSession = storedSession();
-  const storage = makeStorage({
-    github_token_v1: PAT,
-    masterskaya_storage_session_v1: originalSession,
-  });
+  const storage = makeStorage({ masterskaya_storage_session_v1: originalSession });
   let calls = 0;
   const details = await requestSessionAuthorizedAblyToken({
     clientId: CLIENT_ID,
@@ -100,10 +92,7 @@ test("temporary Ably auth failure is retried and keeps the shared session", asyn
 
 test("server-rejected session clears it and returns device to pairing", async () => {
   const events = [];
-  const storage = makeStorage({
-    github_token_v1: PAT,
-    masterskaya_storage_session_v1: storedSession(),
-  });
+  const storage = makeStorage({ masterskaya_storage_session_v1: storedSession() });
   let calls = 0;
   await assert.rejects(
     requestSessionAuthorizedAblyToken({
@@ -127,11 +116,8 @@ test("server-rejected session clears it and returns device to pairing", async ()
   assert.equal(events[0]?.detail?.code, "SESSION_INVALID");
 });
 
-test("automatic Ably authorization does not fall back to PAT", async () => {
-  const storage = makeStorage({
-    github_token_v1: PAT,
-    masterskaya_storage_session_v1: storedSession(),
-  });
+test("automatic Ably authorization does not use another credential path", async () => {
+  const storage = makeStorage({ masterskaya_storage_session_v1: storedSession() });
   const calls = [];
   await assert.rejects(
     requestSessionAuthorizedAblyToken({
@@ -149,34 +135,4 @@ test("automatic Ably authorization does not fall back to PAT", async () => {
     error => error.code === "SESSION_INVALID",
   );
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].headers["X-Masterskaya-GitHub-Token"], undefined);
-});
-
-test("legacy fallback remains available only when explicitly requested", async () => {
-  const storage = makeStorage({
-    github_token_v1: PAT,
-    masterskaya_device_id_v1: DEVICE_ID,
-    masterskaya_storage_session_v1: storedSession(),
-  });
-  const calls = [];
-  const details = await requestSessionAuthorizedAblyToken({
-    clientId: CLIENT_ID,
-    endpoint: ABLY_ENDPOINT,
-    storageEndpoint: STORAGE_ENDPOINT,
-    storage,
-    allowLegacyFallback: true,
-    fetchImpl: async (_url, options) => {
-      calls.push(options);
-      if (options.headers["X-Masterskaya-Session"]) {
-        return response({ ok: false, error: "SESSION_INVALID" }, 401);
-      }
-      assert.equal(options.headers["X-Masterskaya-GitHub-Token"], PAT);
-      return response({ ok: true, token: ABLY_TOKEN, clientId: CLIENT_ID, expiresAt: 1_900_000_000_000 });
-    },
-    waitImpl: noWait,
-    random: noRandom,
-  });
-
-  assert.equal(details.authMode, "legacy");
-  assert.equal(calls.length, 2);
 });

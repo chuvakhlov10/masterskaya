@@ -3,12 +3,11 @@
 const base = require('./index.js');
 const { createDeviceAuthService, normalizeDeviceName } = require('./device-auth.js');
 
-const LEGACY_TOKEN_HEADER = 'x-masterskaya-github-token';
 const SESSION_HEADER = 'x-masterskaya-session';
 const MAX_BODY_BYTES = 3_000_000;
 const GITHUB_API = 'https://api.github.com';
 const GITHUB_TIMEOUT_MS = 20_000;
-const INTERNAL_PATHS = new Set(['auth/devices.json', 'auth/pairings.json']);
+const INTERNAL_PATHS = new Set(['auth/devices.json', 'auth/pairings.json', 'auth/recovery.json']);
 
 function makeError(code, statusCode = 500, cause) {
   const error = new Error(code);
@@ -145,7 +144,13 @@ function createHandler({
   }
 
   function getDeviceAuthService() {
-    if (!deviceAuthService) deviceAuthService = createDeviceAuthService({ appClient: getAppClient(), now });
+    if (!deviceAuthService) {
+      deviceAuthService = createDeviceAuthService({
+        appClient: getAppClient(),
+        now,
+        recoverySecret: requireSecret(),
+      });
+    }
     return deviceAuthService;
   }
 
@@ -168,7 +173,7 @@ function createHandler({
       if (origin !== base.ALLOWED_ORIGIN) return reply(403, { ok: false, error: 'ORIGIN_DENIED' }, origin);
       return reply(204, null, origin, {
         'Access-Control-Allow-Methods': 'POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, X-Masterskaya-GitHub-Token, X-Masterskaya-Session',
+        'Access-Control-Allow-Headers': 'Content-Type, X-Masterskaya-Session',
         'Access-Control-Max-Age': '600',
       });
     }
@@ -202,22 +207,22 @@ function createHandler({
         }, origin);
       }
 
-      if (action === 'bootstrap') {
+      if (action === 'recovery-redeem') {
         const clientId = base.normalizeClientId(body.clientId);
         if (!clientId) throw makeError('CLIENT_ID_INVALID', 400);
-        const access = await base.verifyLegacyGitHubAccess(headers[LEGACY_TOKEN_HEADER], fetchImpl);
-        const device = await getDeviceAuthService().registerLegacy({
+        const recovered = await getDeviceAuthService().redeemRecovery({
+          code: body.code,
           clientId,
-          subject: access.subject,
           deviceName: body.deviceName,
         });
-        const session = createDeviceSession(device.id);
+        const session = createDeviceSession(recovered.device.id);
         return reply(200, {
           ok: true,
           sessionToken: session.token,
           expiresAt: session.expiresAt,
-          clientId: device.id,
-          device,
+          clientId: recovered.device.id,
+          device: recovered.device,
+          replacementRecoveryCode: recovered.replacementCode,
         }, origin);
       }
 
@@ -255,6 +260,11 @@ function createHandler({
       if (action === 'pairing-create') {
         const pairing = await auth.createPairing(claims, body.deviceName);
         return reply(200, { ok: true, ...pairing }, origin);
+      }
+
+      if (action === 'recovery-rotate') {
+        const recovery = await auth.rotateRecovery(claims, body.deviceName);
+        return reply(200, { ok: true, recoveryCode: recovery.code, generation: recovery.generation }, origin);
       }
 
       if (action === 'device-rename') {

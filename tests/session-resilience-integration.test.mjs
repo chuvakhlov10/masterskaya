@@ -15,9 +15,8 @@ function jsonResponse(value, status = 200) {
   });
 }
 
-test('rejected existing session is not recovered through a stored PAT', async () => {
+test('rejected existing session is cleared and requires device reconnection', async () => {
   const storage = new MemoryStorage({
-    github_token_v1: 'legacy-token-must-not-be-used',
     masterskaya_storage_session_v1: JSON.stringify({
       token: 'header.payload.signature',
       expiresAt: Date.now() + 10 * 24 * 60 * 60 * 1000,
@@ -29,7 +28,6 @@ test('rejected existing session is not recovered through a stored PAT', async ()
   globalThis.fetch = async (_url, options) => {
     calls++;
     assert.equal(options.headers['X-Masterskaya-Session'], 'header.payload.signature');
-    assert.equal(options.headers['X-Masterskaya-GitHub-Token'], undefined);
     return jsonResponse({ ok: false, error: 'SESSION_INVALID' }, 401);
   };
 
@@ -40,5 +38,4 @@ test('rejected existing session is not recovered through a stored PAT', async ()
   await assert.rejects(() => module.dbGet('records'), /SESSION_INVALID/);
   assert.equal(calls, 1);
   assert.equal(storage.getItem('masterskaya_storage_session_v1'), null);
-  assert.equal(storage.getItem('github_token_v1'), 'legacy-token-must-not-be-used');
 });

@@ -1,15 +1,19 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  acceptDeviceSession,
   createPairingCode,
   hasActivePairingSession,
   inferDeviceName,
   listDevices,
   normalizePairingCode,
+  normalizeRecoveryCode,
   pairingErrorText,
   readDeviceName,
   redeemPairingCode,
+  redeemRecoveryCode,
   renameDevice,
   revokeDevice,
+  rotateRecoveryCode,
 } from "./device-pairing-client.js";
 import { STORAGE_SESSION_EVENT } from "./storage-gateway.js";
 
@@ -63,33 +67,71 @@ function sessionProblemText(code) {
   }
 }
 
-function NewDeviceScreen({ onEmergency, reason }) {
+function NewDeviceScreen({ reason }) {
   const [deviceName, setDeviceName] = useState(() => readDeviceName());
   const [code, setCode] = useState("");
+  const [mode, setMode] = useState("pairing");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [recovered, setRecovered] = useState(null);
 
   async function connect() {
     if (busy) return;
     setBusy(true);
     setError("");
     try {
-      await redeemPairingCode({ code, deviceName });
-      globalThis.location?.reload?.();
+      if (mode === "recovery") {
+        setRecovered(await redeemRecoveryCode({ code, deviceName }));
+      } else {
+        await redeemPairingCode({ code, deviceName });
+        globalThis.location?.reload?.();
+      }
     } catch (cause) {
       setError(pairingErrorText(cause));
       setBusy(false);
     }
   }
 
+  async function copyRecoveryCode() {
+    if (!recovered?.replacementRecoveryCode) return;
+    try { await navigator.clipboard.writeText(recovered.replacementRecoveryCode); }
+    catch {}
+  }
+
+  function finishRecovery() {
+    if (!recovered?.pendingSession) return;
+    acceptDeviceSession(recovered.pendingSession);
+    globalThis.location?.reload?.();
+  }
+
+  if (recovered) return (
+    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: palette.bg, color: palette.text, fontFamily: "system-ui, sans-serif" }}>
+      <div style={{ width: "100%", maxWidth: 430, padding: 24 }}>
+        <div style={{ background: palette.panel, border: `1px solid ${palette.border}`, borderRadius: 12, padding: 18, textAlign: "center" }}>
+          <div style={{ fontSize: 21, fontWeight: 900 }}>Доступ восстановлен</div>
+          <div style={{ marginTop: 10, color: "#fde68a", fontSize: 13, lineHeight: 1.55 }}>
+            Старый recovery-код уже заменён. Сохраните новый код офлайн — после входа он больше не будет показан.
+          </div>
+          <div style={{ marginTop: 16, padding: 14, borderRadius: 10, background: "#10233f", border: "1px solid #24569a", fontSize: 20, fontWeight: 900, fontFamily: "ui-monospace, SFMono-Regular, Consolas, monospace", letterSpacing: "1px", overflowWrap: "anywhere" }}>
+            {recovered.replacementRecoveryCode}
+          </div>
+          <button onClick={copyRecoveryCode} style={{ ...buttonStyle, width: "100%", marginTop: 12, background: palette.panel2, color: palette.text }}>Копировать новый код</button>
+          <button onClick={finishRecovery} style={{ ...buttonStyle, width: "100%", marginTop: 10, padding: "14px 0", background: palette.success, color: "#fff" }}>Я сохранил код — войти</button>
+        </div>
+      </div>
+    </div>
+  );
+
   return (
     <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: palette.bg, color: palette.text, fontFamily: "system-ui, sans-serif" }}>
       <div style={{ width: "100%", maxWidth: 390, padding: 24 }}>
         <div style={{ textAlign: "center", marginBottom: 28 }}>
           <div style={{ width: 64, height: 64, borderRadius: 14, margin: "0 auto 16px", display: "grid", placeItems: "center", background: palette.accent, fontSize: 30 }}>⌁</div>
-          <div style={{ fontSize: 23, fontWeight: 900 }}>Подключить устройство</div>
+          <div style={{ fontSize: 23, fontWeight: 900 }}>{mode === "recovery" ? "Восстановить доступ" : "Подключить устройство"}</div>
           <div style={{ marginTop: 8, color: palette.sub, fontSize: 13, lineHeight: 1.5 }}>
-            Создайте одноразовый код на уже подключённом ноутбуке или телефоне.
+            {mode === "recovery"
+              ? "Используйте сохранённый офлайн recovery-код, если доступ потерян на всех устройствах."
+              : "Создайте одноразовый код на уже подключённом ноутбуке или телефоне."}
           </div>
         </div>
 
@@ -108,12 +150,12 @@ function NewDeviceScreen({ onEmergency, reason }) {
             style={{ width: "100%", boxSizing: "border-box", padding: "12px 13px", borderRadius: 8, border: `1px solid ${palette.border}`, background: palette.panel2, color: palette.text, fontSize: 15, outline: "none", marginBottom: 14 }}
           />
 
-          <label style={{ display: "block", fontSize: 11, fontWeight: 800, color: palette.sub, marginBottom: 7, textTransform: "uppercase", letterSpacing: ".6px" }}>Одноразовый код</label>
+          <label style={{ display: "block", fontSize: 11, fontWeight: 800, color: palette.sub, marginBottom: 7, textTransform: "uppercase", letterSpacing: ".6px" }}>{mode === "recovery" ? "Recovery-код" : "Одноразовый код"}</label>
           <input
             value={code}
-            onChange={event => setCode(normalizePairingCode(event.target.value))}
+            onChange={event => setCode(mode === "recovery" ? normalizeRecoveryCode(event.target.value) : normalizePairingCode(event.target.value))}
             onKeyDown={event => { if (event.key === "Enter") connect(); }}
-            placeholder="XXXX-XXXX-XXXX"
+            placeholder={mode === "recovery" ? "XXXX-XXXX-XXXX-XXXX-XXXX-XXXX" : "XXXX-XXXX-XXXX"}
             inputMode="text"
             autoCapitalize="characters"
             autoCorrect="off"
@@ -125,18 +167,18 @@ function NewDeviceScreen({ onEmergency, reason }) {
 
           <button
             onClick={connect}
-            disabled={busy || code.replaceAll("-", "").length !== 12}
-            style={{ ...buttonStyle, width: "100%", marginTop: 14, padding: "14px 0", color: "#fff", background: palette.accent, opacity: busy || code.replaceAll("-", "").length !== 12 ? .5 : 1 }}
+            disabled={busy || code.replaceAll("-", "").length !== (mode === "recovery" ? 24 : 12)}
+            style={{ ...buttonStyle, width: "100%", marginTop: 14, padding: "14px 0", color: "#fff", background: palette.accent, opacity: busy || code.replaceAll("-", "").length !== (mode === "recovery" ? 24 : 12) ? .5 : 1 }}
           >
             {busy ? "Подключение..." : "Подключить"}
           </button>
         </div>
 
-        <div style={{ marginTop: 16, color: palette.sub, fontSize: 12, lineHeight: 1.55 }}>
+        {mode === "pairing" && <div style={{ marginTop: 16, color: palette.sub, fontSize: 12, lineHeight: 1.55 }}>
           На подключённом устройстве откройте кнопку <b style={{ color: palette.text }}>«Устройства»</b> и нажмите <b style={{ color: palette.text }}>«Создать код»</b>. Код действует 10 минут и используется один раз.
-        </div>
-        <button onClick={onEmergency} style={{ border: 0, background: "transparent", color: palette.sub, fontSize: 11, textDecoration: "underline", cursor: "pointer", padding: "16px 0 0" }}>
-          Аварийное восстановление через GitHub
+        </div>}
+        <button onClick={() => { setMode(value => value === "pairing" ? "recovery" : "pairing"); setCode(""); setError(""); }} style={{ border: 0, background: "transparent", color: palette.sub, fontSize: 11, textDecoration: "underline", cursor: "pointer", padding: "16px 0 0" }}>
+          {mode === "recovery" ? "Вернуться к одноразовому коду" : "Нет доступных устройств — использовать recovery-код"}
         </button>
       </div>
     </div>
@@ -149,6 +191,8 @@ function DeviceManager({ open, onClose }) {
   const [error, setError] = useState("");
   const [pairing, setPairing] = useState(null);
   const [pairingBusy, setPairingBusy] = useState(false);
+  const [recovery, setRecovery] = useState(null);
+  const [recoveryBusy, setRecoveryBusy] = useState(false);
   const [now, setNow] = useState(Date.now());
 
   const current = useMemo(() => devices.find(device => device.current), [devices]);
@@ -202,6 +246,21 @@ function DeviceManager({ open, onClose }) {
     catch {}
   }
 
+  async function generateRecovery() {
+    if (!globalThis.confirm?.("Создать новый recovery-код? Предыдущий код сразу перестанет работать.")) return;
+    setRecoveryBusy(true);
+    setError("");
+    try { setRecovery(await rotateRecoveryCode()); }
+    catch (cause) { setError(pairingErrorText(cause)); }
+    finally { setRecoveryBusy(false); }
+  }
+
+  async function copyRecovery() {
+    if (!recovery?.recoveryCode) return;
+    try { await navigator.clipboard.writeText(recovery.recoveryCode); }
+    catch {}
+  }
+
   async function rename(item) {
     const next = globalThis.prompt?.("Название устройства", item.name || "Устройство");
     if (!next || next.trim() === item.name) return;
@@ -225,15 +284,20 @@ function DeviceManager({ open, onClose }) {
     }
   }
 
+  function closeManager() {
+    setRecovery(null);
+    onClose();
+  }
+
   return (
-    <div onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }} style={{ position: "fixed", inset: 0, zIndex: 100200, background: "rgba(0,0,0,.72)", display: "flex", alignItems: "center", justifyContent: "center", padding: 14, fontFamily: "system-ui, sans-serif" }}>
+    <div onMouseDown={event => { if (event.target === event.currentTarget) closeManager(); }} style={{ position: "fixed", inset: 0, zIndex: 100200, background: "rgba(0,0,0,.72)", display: "flex", alignItems: "center", justifyContent: "center", padding: 14, fontFamily: "system-ui, sans-serif" }}>
       <div style={{ width: "100%", maxWidth: 520, maxHeight: "calc(100vh - 28px)", overflow: "auto", background: palette.panel, color: palette.text, border: `1px solid ${palette.border}`, borderRadius: 14, boxShadow: "0 24px 70px rgba(0,0,0,.55)" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px 18px", borderBottom: `1px solid ${palette.border}` }}>
           <div>
             <div style={{ fontSize: 18, fontWeight: 900 }}>Устройства</div>
             <div style={{ color: palette.sub, fontSize: 11, marginTop: 3 }}>{current ? `Это устройство: ${current.name}` : "Управление доступом"}</div>
           </div>
-          <button onClick={onClose} style={{ border: 0, background: "transparent", color: palette.sub, fontSize: 25, cursor: "pointer", lineHeight: 1 }}>×</button>
+          <button onClick={closeManager} style={{ border: 0, background: "transparent", color: palette.sub, fontSize: 25, cursor: "pointer", lineHeight: 1 }}>×</button>
         </div>
 
         <div style={{ padding: 18 }}>
@@ -247,6 +311,18 @@ function DeviceManager({ open, onClose }) {
               <div style={{ marginTop: 7, fontSize: 25, fontWeight: 900, fontFamily: "ui-monospace, SFMono-Regular, Consolas, monospace", letterSpacing: "2px" }}>{pairing.code}</div>
               <div style={{ color: "#bfdbfe", fontSize: 12, marginTop: 7 }}>Действует ещё {remainingText(pairing.expiresAt, now)}</div>
               <button onClick={copyCode} style={{ ...buttonStyle, marginTop: 10, background: palette.panel2, color: palette.text }}>Копировать код</button>
+            </div>
+          )}
+
+          <button onClick={generateRecovery} disabled={recoveryBusy} style={{ ...buttonStyle, width: "100%", marginTop: 12, background: "#7c3aed", color: "#fff", opacity: recoveryBusy ? .6 : 1 }}>
+            {recoveryBusy ? "Создание recovery-кода..." : "Создать новый recovery-код"}
+          </button>
+          {recovery && (
+            <div style={{ marginTop: 12, padding: 15, borderRadius: 10, background: "#26153f", border: "1px solid #7c3aed", textAlign: "center" }}>
+              <div style={{ color: "#ddd6fe", fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: ".7px" }}>Сохраните офлайн</div>
+              <div style={{ marginTop: 7, fontSize: 19, fontWeight: 900, fontFamily: "ui-monospace, SFMono-Regular, Consolas, monospace", letterSpacing: "1px", overflowWrap: "anywhere" }}>{recovery.recoveryCode}</div>
+              <div style={{ color: "#ddd6fe", fontSize: 12, marginTop: 8, lineHeight: 1.5 }}>Код показывается только сейчас. Новый код отменяет предыдущий.</div>
+              <button onClick={copyRecovery} style={{ ...buttonStyle, marginTop: 10, background: palette.panel2, color: palette.text }}>Копировать recovery-код</button>
             </div>
           )}
 
@@ -280,7 +356,6 @@ function DeviceManager({ open, onClose }) {
 }
 
 export default function DevicePairingGate({ children }) {
-  const [emergency, setEmergency] = useState(false);
   const [managerOpen, setManagerOpen] = useState(false);
   const [sessionProblem, setSessionProblem] = useState("");
   const [, setSessionEpoch] = useState(0);
@@ -290,7 +365,6 @@ export default function DevicePairingGate({ children }) {
     const onSessionState = event => {
       const code = String(event?.detail?.code || "SESSION_INVALID");
       setSessionProblem(code);
-      setEmergency(false);
       setManagerOpen(false);
       setSessionEpoch(value => value + 1);
     };
@@ -304,8 +378,8 @@ export default function DevicePairingGate({ children }) {
 
   const connected = hasActivePairingSession();
 
-  if (!connected && !emergency) {
-    return <NewDeviceScreen reason={sessionProblemText(sessionProblem)} onEmergency={() => setEmergency(true)} />;
+  if (!connected) {
+    return <NewDeviceScreen reason={sessionProblemText(sessionProblem)} />;
   }
 
   return (

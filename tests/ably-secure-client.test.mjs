@@ -11,7 +11,6 @@ const SESSION_TOKEN = "session.header.signature";
 
 function storageWithSession() {
   const values = new Map([
-    ["github_token_v1", "github-token-abcdefghijklmnopqrstuvwxyz"],
     ["masterskaya_storage_session_v1", JSON.stringify({
       token: SESSION_TOKEN,
       expiresAt: Date.now() + 10 * 24 * 60 * 60 * 1000,
@@ -68,7 +67,6 @@ test("authCallback obtains a fresh Yandex JWT through the shared session wheneve
     fetchImpl: async (_url, options) => {
       requestCount += 1;
       assert.equal(options.headers["X-Masterskaya-Session"], SESSION_TOKEN);
-      assert.equal(options.headers["X-Masterskaya-GitHub-Token"], undefined);
       return response({
         ok: true,
         token: `header.payload.signature${requestCount}`,
@@ -83,9 +81,8 @@ test("authCallback obtains a fresh Yandex JWT through the shared session wheneve
   assert.equal(requestCount, 2);
 });
 
-test("authCallback propagates Yandex session authorization errors when fallback is unavailable", async () => {
+test("authCallback propagates Yandex session authorization errors", async () => {
   const storage = storageWithSession();
-  storage.removeItem("github_token_v1");
   const authCallback = createSecureAblyAuthCallback({
     clientId: CLIENT_ID,
     storage,
@@ -94,7 +91,7 @@ test("authCallback propagates Yandex session authorization errors when fallback 
 
   await assert.rejects(
     callAuth(authCallback),
-    error => ["SESSION_INVALID", "GITHUB_TOKEN_MISSING"].includes(error.code),
+    error => error.code === "SESSION_INVALID",
   );
 });
 
