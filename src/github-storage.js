@@ -15,12 +15,6 @@ const TOKEN_KEY = "github_token_v1";
 const DATA_PREFIX = "data/";
 const PHOTO_PREFIX = "photos/";
 const REQUEST_TIMEOUT_MS = 30_000;
-const SESSION_AUTH_ERRORS = new Set([
-  "SESSION_REQUIRED",
-  "SESSION_INVALID",
-  "SESSION_EXPIRED",
-  "SESSION_AUTH_NOT_CONFIGURED",
-]);
 
 function getToken() {
   try { return localStorage.getItem(TOKEN_KEY) || ""; }
@@ -79,33 +73,29 @@ function normalizeGatewayError(error) {
   return makeError(code, Number.isInteger(status) ? status : undefined, error);
 }
 
-// Обычные операции данных используют только подписанную сессию шлюза. PAT
-// применяется лишь один раз для восстановления сессии, если сервер отклонил
-// старую версию. Сам запрос данных PAT никогда не содержит.
+// Обычные операции используют только подписанную сессию. Legacy PAT допускается
+// лишь для явного аварийного входа: когда сессии ещё нет, но пользователь только
+// что вручную ввёл токен. Отклонённая, истёкшая или отозванная сессия никогда не
+// восстанавливается через PAT автоматически — устройство возвращается к pairing.
 async function ghRequest(method, path, body, options = {}) {
-  for (let attempt = 0; attempt < 2; attempt++) {
+  if (!readStoredStorageSession() && getToken()) {
     try {
-      return await storageGatewayRequest({
-        method,
-        path,
-        body,
-        ref: options.ref,
-      });
-    } catch (error) {
-      const normalized = normalizeGatewayError(error);
-      if (attempt === 0 && SESSION_AUTH_ERRORS.has(normalized.message)) {
-        clearStoredStorageSession();
-        try {
-          await bootstrapStorageSession();
-        } catch (bootstrapError) {
-          throw normalizeGatewayError(bootstrapError);
-        }
-        continue;
-      }
-      throw normalized;
+      await bootstrapStorageSession();
+    } catch (bootstrapError) {
+      throw normalizeGatewayError(bootstrapError);
     }
   }
-  throw makeError("GATEWAY_MAX_RETRIES_EXCEEDED");
+
+  try {
+    return await storageGatewayRequest({
+      method,
+      path,
+      body,
+      ref: options.ref,
+    });
+  } catch (error) {
+    throw normalizeGatewayError(error);
+  }
 }
 
 function encodeB64(text) {
