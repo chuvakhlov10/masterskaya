@@ -33,14 +33,16 @@ test('expired or revoked sessions return the device to pairing', () => {
   assert.match(gateSource, /setSessionEpoch/);
 });
 
-test('connected application exposes safe server health checks', () => {
+test('connected application exposes safe server health and diagnostics', () => {
   assert.match(mainSource, /import SystemHealthControl from ['"]\.\/SystemHealthControl\.jsx['"]/);
   assert.match(mainSource, /<SystemHealthControl \/>/);
   assert.match(healthSource, /checkServerHealth/);
-  assert.match(healthSource, /Хранилище/);
-  assert.match(healthSource, /Live-синхронизация/);
+  assert.match(healthSource, /collectClientDiagnostics/);
+  assert.match(healthSource, /Скопировать диагностику/);
+  assert.match(healthSource, /Операции данных/);
+  assert.match(healthSource, /Складские операции/);
 });
 
-test('session resilience release is version 1.3.2', () => {
-  assert.match(statusSource, /APP_VERSION = "1\.3\.2"/);
+test('diagnostics release is version 1.3.3', () => {
+  assert.match(statusSource, /APP_VERSION = "1\.3\.3"/);
 });
