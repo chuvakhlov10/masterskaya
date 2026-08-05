@@ -1,6 +1,13 @@
-// GitHub Storage — хранение JSON в приватном репозитории GitHub.
-// Важное ограничение: GitHub Contents API не является БД, поэтому каждая
-// конкурентная запись обязана выполнять read → merge → write с актуальным SHA.
+// Хранилище данных через Yandex Cloud Function и GitHub App.
+// GitHub Contents API не является БД, поэтому каждая конкурентная запись
+// выполняет read → merge → write с актуальным SHA и повтором при конфликте.
+
+import {
+  bootstrapStorageSession,
+  clearStoredStorageSession,
+  readStoredStorageSession,
+  storageGatewayRequest,
+} from "./storage-gateway.js";
 
 const OWNER = "chuvakhlov10";
 const REPO = "masterskaya-data";
@@ -8,6 +15,12 @@ const TOKEN_KEY = "github_token_v1";
 const DATA_PREFIX = "data/";
 const PHOTO_PREFIX = "photos/";
 const REQUEST_TIMEOUT_MS = 30_000;
+const SESSION_AUTH_ERRORS = new Set([
+  "SESSION_REQUIRED",
+  "SESSION_INVALID",
+  "SESSION_EXPIRED",
+  "SESSION_AUTH_NOT_CONFIGURED",
+]);
 
 function getToken() {
   try { return localStorage.getItem(TOKEN_KEY) || ""; }
@@ -17,11 +30,15 @@ function getToken() {
 export function setToken(token) {
   try { localStorage.setItem(TOKEN_KEY, String(token || "").trim()); } catch {}
 }
+
 export function clearToken() {
   try { localStorage.removeItem(TOKEN_KEY); } catch {}
+  clearStoredStorageSession();
 }
+
 export function hasToken() {
-  return !!getToken();
+  const session = readStoredStorageSession();
+  return !!getToken() || !!(session?.token && session.expiresAt > Date.now());
 }
 
 const shaCache = Object.create(null);
@@ -43,10 +60,6 @@ function assertSafeKey(key) {
   if (key.includes("/") || key.includes("\\") || key.includes("..")) throw new Error("INVALID_KEY");
 }
 
-function encodePath(path) {
-  return path.split("/").map(segment => encodeURIComponent(segment)).join("/");
-}
-
 function keyToFileName(key) {
   assertSafeKey(key);
   return key.replace(/:/g, "-");
@@ -59,46 +72,40 @@ function makeError(message, status, cause) {
   return error;
 }
 
+function normalizeGatewayError(error) {
+  const code = String(error?.code || error?.message || "GATEWAY_REQUEST_FAILED");
+  const statusMatch = /^GATEWAY_HTTP_(\d{3})$/.exec(code);
+  const status = statusMatch ? Number(statusMatch[1]) : error?.status;
+  return makeError(code, Number.isInteger(status) ? status : undefined, error);
+}
+
+// Обычные операции данных используют только подписанную сессию шлюза. PAT
+// применяется лишь один раз для восстановления сессии, если сервер отклонил
+// старую версию. Сам запрос данных PAT никогда не содержит.
 async function ghRequest(method, path, body, options = {}) {
-  const token = getToken();
-  if (!token) throw makeError("NO_TOKEN");
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  const query = new URLSearchParams();
-  if (options.ref) query.set("ref", String(options.ref));
-  const suffix = query.toString() ? `?${query.toString()}` : "";
-  const url = `https://api.github.com/repos/${OWNER}/${REPO}/contents/${encodePath(path)}${suffix}`;
-
-  try {
-    const response = await fetch(url, {
-      method,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-      },
-      body: body === undefined ? undefined : JSON.stringify(body),
-      signal: controller.signal,
-      cache: "no-store",
-    });
-
-    if (!response.ok) {
-      let message = `HTTP ${response.status}`;
-      try {
-        const payload = await response.json();
-        message = payload?.message || message;
-      } catch {}
-      throw makeError(message, response.status);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await storageGatewayRequest({
+        method,
+        path,
+        body,
+        ref: options.ref,
+      });
+    } catch (error) {
+      const normalized = normalizeGatewayError(error);
+      if (attempt === 0 && SESSION_AUTH_ERRORS.has(normalized.message)) {
+        clearStoredStorageSession();
+        try {
+          await bootstrapStorageSession();
+        } catch (bootstrapError) {
+          throw normalizeGatewayError(bootstrapError);
+        }
+        continue;
+      }
+      throw normalized;
     }
-    if (response.status === 204) return null;
-    return response.json();
-  } catch (error) {
-    if (error?.name === "AbortError") throw makeError("REQUEST_TIMEOUT", 408, error);
-    throw error;
-  } finally {
-    clearTimeout(timeout);
   }
+  throw makeError("GATEWAY_MAX_RETRIES_EXCEEDED");
 }
 
 function encodeB64(text) {
@@ -193,14 +200,14 @@ export async function dbSet(key, value, mergeFn) {
           finalValue = mergeFn(remoteValue, value);
         }
 
-        const body = {
+        const requestBody = {
           message: attempt === 1 ? `update ${key}` : `update ${key} (retry ${attempt - 1})`,
           content: encodeB64(JSON.stringify(finalValue)),
         };
         const sha = existing?.sha || (!mergeFn ? shaCache[key] : null);
-        if (sha) body.sha = sha;
+        if (sha) requestBody.sha = sha;
 
-        const result = await ghRequest("PUT", path, body);
+        const result = await ghRequest("PUT", path, requestBody);
         if (result?.content?.sha) shaCache[key] = result.content.sha;
         return {
           ok: true,
@@ -287,9 +294,9 @@ export async function photoSet(marker, base64data) {
       let existing = null;
       try { existing = await ghRequest("GET", path); }
       catch (error) { if (error.status !== 404) throw error; }
-      const body = { message: `photo: ${marker}`, content: encodeB64(base64data) };
-      if (existing?.sha) body.sha = existing.sha;
-      await ghRequest("PUT", path, body);
+      const requestBody = { message: `photo: ${marker}`, content: encodeB64(base64data) };
+      if (existing?.sha) requestBody.sha = existing.sha;
+      await ghRequest("PUT", path, requestBody);
       return { ok: true };
     } catch (error) {
       if ((error.status === 409 || error.status === 422) && attempt < 4) {
@@ -328,6 +335,8 @@ export async function photoDelete(marker) {
   return { ok: true, deleted };
 }
 
+// Первичная проверка введённого пользователем PAT. Она выполняется только при
+// настройке нового устройства; рабочие данные после этого идут через шлюз.
 export async function verifyToken(token) {
   try {
     const controller = new AbortController();
