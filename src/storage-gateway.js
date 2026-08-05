@@ -4,7 +4,6 @@ import {
 } from "./diagnostics.js";
 
 const DEFAULT_ENDPOINT = "https://functions.yandexcloud.net/d4ep5fmjtp6t09f06tvt";
-const LEGACY_TOKEN_KEY = "github_token_v1";
 const SESSION_KEY = "masterskaya_storage_session_v1";
 const DEVICE_ID_KEY = "masterskaya_device_id_v1";
 const PROBE_RESULT_KEY = "masterskaya_storage_probe_v1";
@@ -77,10 +76,6 @@ function safeSet(storage, key, value) {
 function safeRemove(storage, key) {
   try { storage?.removeItem?.(key); }
   catch {}
-}
-
-function clearLegacyGithubToken(storage) {
-  safeRemove(storage, LEGACY_TOKEN_KEY);
 }
 
 function randomId() {
@@ -213,26 +208,6 @@ async function postGateway({
   throw lastError || makeError("GATEWAY_REQUEST_FAILED");
 }
 
-export async function bootstrapStorageSession({
-  endpoint = DEFAULT_ENDPOINT,
-  fetchImpl = globalThis.fetch,
-  storage = globalThis.localStorage,
-  clientId = getOrCreateStorageDeviceId(storage),
-} = {}) {
-  if (typeof fetchImpl !== "function") throw makeError("FETCH_UNAVAILABLE");
-  const githubToken = String(safeGet(storage, LEGACY_TOKEN_KEY)).trim();
-  if (!githubToken) throw makeError("GITHUB_TOKEN_MISSING");
-
-  const payload = await postGateway({
-    endpoint,
-    fetchImpl,
-    headers: { "X-Masterskaya-GitHub-Token": githubToken },
-    body: { action: "bootstrap", clientId },
-  });
-  if (payload?.clientId !== clientId) throw makeError("SESSION_CLIENT_ID_MISMATCH");
-  return storeSession(payload, storage);
-}
-
 export async function renewStorageSession({
   endpoint = DEFAULT_ENDPOINT,
   fetchImpl = globalThis.fetch,
@@ -348,9 +323,6 @@ export async function storageGatewayRequest({
       random,
       onRetry,
     });
-    // Сессия доказала доступ к рабочему хранилищу. Долгоживущий PAT больше не
-    // нужен и удаляется только после успешного ответа, а не при сетевой ошибке.
-    clearLegacyGithubToken(storage);
     recordStorageRequestResult({ ok: true, operation, retries, storage });
     return payload;
   } catch (error) {
@@ -407,7 +379,7 @@ export function installStorageGatewayProbe(options = {}) {
   installed = true;
   setTimeout(async () => {
     const storage = options.storage || globalThis.localStorage;
-    if (!safeGet(storage, LEGACY_TOKEN_KEY) && !readStoredStorageSession(storage)) return;
+    if (!readStoredStorageSession(storage)) return;
     const checkedAt = Date.now();
     try {
       await verifyStorageGatewayRead({ ...options, storage });

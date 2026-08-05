@@ -12,7 +12,6 @@ const SESSION_AUDIENCE = 'masterskaya-web';
 const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
 const MAX_BODY_BYTES = 3_000_000;
 const GITHUB_TIMEOUT_MS = 20_000;
-const LEGACY_TOKEN_HEADER = 'x-masterskaya-github-token';
 const SESSION_HEADER = 'x-masterskaya-session';
 
 function normalizeHeaders(headers = {}) {
@@ -105,7 +104,7 @@ function sessionVersion(env) {
   return Number.isInteger(value) && value > 0 ? value : 1;
 }
 
-function createSessionToken({ secret, clientId, subject = 'legacy-bootstrap', nowMs = Date.now(), version = 1 }) {
+function createSessionToken({ secret, clientId, subject = 'device-session', nowMs = Date.now(), version = 1 }) {
   const key = Buffer.isBuffer(secret) ? secret : parseSessionSecret(secret);
   if (!key) throw makeError('SESSION_SECRET_INVALID', 503);
   const normalizedClientId = normalizeClientId(clientId);
@@ -117,7 +116,7 @@ function createSessionToken({ secret, clientId, subject = 'legacy-bootstrap', no
   const claims = {
     iss: SESSION_ISSUER,
     aud: SESSION_AUDIENCE,
-    sub: String(subject || 'legacy-bootstrap').slice(0, 160),
+    sub: String(subject || 'device-session').slice(0, 160),
     iat: issuedAt,
     exp: expiresAt,
     clientId: normalizedClientId,
@@ -215,36 +214,6 @@ async function readJsonSafe(response) {
   } catch {
     return null;
   }
-}
-
-async function verifyLegacyGitHubAccess(token, fetchImpl) {
-  const normalized = String(token || '').trim();
-  if (!/^[^\s]{20,512}$/.test(normalized)) throw makeError('GITHUB_TOKEN_REQUIRED', 401);
-
-  const repoResponse = await fetchWithTimeout(
-    fetchImpl,
-    `${GITHUB_API}/repos/${OWNER}/${REPO}`,
-    { method: 'GET', headers: githubHeaders(normalized, 'masterskaya-storage-bootstrap') },
-  );
-  if ([401, 403, 404].includes(repoResponse.status)) throw makeError('GITHUB_ACCESS_DENIED', 403);
-  if (!repoResponse.ok) throw makeError('GITHUB_ACCESS_CHECK_FAILED', 503);
-  const repo = await readJsonSafe(repoResponse);
-  const permissions = repo?.permissions || {};
-  if (!(permissions.push === true || permissions.admin === true || permissions.maintain === true)) {
-    throw makeError('GITHUB_ACCESS_DENIED', 403);
-  }
-
-  let subject = 'legacy-bootstrap';
-  const userResponse = await fetchWithTimeout(
-    fetchImpl,
-    `${GITHUB_API}/user`,
-    { method: 'GET', headers: githubHeaders(normalized, 'masterskaya-storage-bootstrap') },
-  );
-  if (userResponse.ok) {
-    const user = await readJsonSafe(userResponse);
-    if (user?.id || user?.login) subject = `github:${user?.id || user?.login}`;
-  }
-  return { ok: true, subject };
 }
 
 function encodeRepoPath(path) {
@@ -410,7 +379,7 @@ function createHandler({ fetchImpl = globalThis.fetch, env = process.env, now = 
       if (origin !== ALLOWED_ORIGIN) return reply(403, { ok: false, error: 'ORIGIN_DENIED' }, origin);
       return reply(204, null, origin, {
         'Access-Control-Allow-Methods': 'POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, X-Masterskaya-GitHub-Token, X-Masterskaya-Session',
+        'Access-Control-Allow-Headers': 'Content-Type, X-Masterskaya-Session',
         'Access-Control-Max-Age': '600',
       });
     }
@@ -427,26 +396,6 @@ function createHandler({ fetchImpl = globalThis.fetch, env = process.env, now = 
 
     const action = String(body?.action || '').trim();
     try {
-      if (action === 'bootstrap') {
-        const sessionSecret = requireSecret();
-        const clientId = normalizeClientId(body.clientId);
-        if (!clientId) throw makeError('CLIENT_ID_INVALID', 400);
-        const access = await verifyLegacyGitHubAccess(headers[LEGACY_TOKEN_HEADER], fetchImpl);
-        const session = createSessionToken({
-          secret: sessionSecret,
-          clientId,
-          subject: access.subject,
-          nowMs: now(),
-          version,
-        });
-        return reply(200, {
-          ok: true,
-          sessionToken: session.token,
-          expiresAt: session.expiresAt,
-          clientId,
-        }, origin);
-      }
-
       const claims = verifySessionToken({
         token: headers[SESSION_HEADER],
         secret: requireSecret(),
@@ -501,6 +450,5 @@ module.exports = {
   normalizeRepoRequest,
   parsePrivateKey,
   parseSessionSecret,
-  verifyLegacyGitHubAccess,
   verifySessionToken,
 };

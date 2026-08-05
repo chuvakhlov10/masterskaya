@@ -25,11 +25,12 @@ test('pairing code formatting is uppercase and grouped', async () => {
   const client = await loadModule();
   assert.equal(client.normalizePairingCode('abcd efgh-2345'), 'ABCD-EFGH-2345');
   assert.equal(client.normalizePairingCode('abc'), 'ABC');
+  assert.equal(client.normalizeRecoveryCode('aaaa bbbb cccc dddd eeee ffff'), 'AAAA-BBBB-CCCC-DDDD-EEEE-FFFF');
 });
 
-test('new device redeems a one-time code without sending a GitHub PAT', async () => {
+test('new device redeems a one-time pairing code', async () => {
   const client = await loadModule();
-  const storage = new MemoryStorage({ github_token_v1: 'stale-token' });
+  const storage = new MemoryStorage();
   const calls = [];
   const expiresAt = Date.now() + 30 * 24 * 60 * 60 * 1000;
   const fetchImpl = async (_url, options) => {
@@ -54,14 +55,12 @@ test('new device redeems a one-time code without sending a GitHub PAT', async ()
 
   assert.equal(result.device.name, 'Второй телефон');
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].headers['X-Masterskaya-GitHub-Token'], undefined);
   assert.equal(calls[0].headers['X-Masterskaya-Session'], undefined);
   const body = JSON.parse(calls[0].body);
   assert.equal(body.action, 'pairing-redeem');
   assert.equal(body.code, 'ABCDEFGH2345');
   assert.equal(body.deviceName, 'Второй телефон');
   assert.match(body.clientId, /^web-/);
-  assert.equal(storage.getItem('github_token_v1'), null);
   assert.equal(JSON.parse(storage.getItem('masterskaya_storage_session_v1')).token, 'header.payload.signature');
 });
 
@@ -84,8 +83,37 @@ test('connected device creates a code using only its shared session', async () =
   const result = await client.createPairingCode({ storage, fetchImpl, endpoint: 'https://example.test/gateway' });
   assert.equal(result.code, 'ABCD-EFGH-2345');
   assert.equal(calls[0].headers['X-Masterskaya-Session'], 'existing.session.token');
-  assert.equal(calls[0].headers['X-Masterskaya-GitHub-Token'], undefined);
   assert.deepEqual(JSON.parse(calls[0].body), { action: 'pairing-create', deviceName: 'Ноутбук' });
+});
+
+test('recovery keeps the new session in memory until the owner confirms the replacement code', async () => {
+  const client = await loadModule();
+  const storage = new MemoryStorage();
+  const expiresAt = Date.now() + 30 * 24 * 60 * 60 * 1000;
+  const result = await client.redeemRecoveryCode({
+    code: 'AAAA-BBBB-CCCC-DDDD-EEEE-FFFF',
+    deviceName: 'Новый ноутбук',
+    storage,
+    endpoint: 'https://example.test/gateway',
+    fetchImpl: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      assert.equal(body.action, 'recovery-redeem');
+      return jsonResponse({
+        ok: true,
+        sessionToken: 'recovered.session.signature',
+        expiresAt,
+        clientId: body.clientId,
+        device: { id: body.clientId, name: body.deviceName },
+        replacementRecoveryCode: '2222-3333-4444-5555-6666-7777',
+      });
+    },
+  });
+
+  assert.equal(storage.getItem('masterskaya_storage_session_v1'), null);
+  assert.equal(result.replacementRecoveryCode, '2222-3333-4444-5555-6666-7777');
+  client.acceptDeviceSession(result.pendingSession, storage);
+  assert.equal(JSON.parse(storage.getItem('masterskaya_storage_session_v1')).token, 'recovered.session.signature');
+  assert.equal([...storage.values.values()].some(value => String(value).includes('2222-3333')), false);
 });
 
 test('server pairing errors are preserved and translated for the UI', async () => {

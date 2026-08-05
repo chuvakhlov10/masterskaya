@@ -59,47 +59,9 @@ test('storage gateway CORS preflight is limited to the GitHub Pages origin', asy
   const ok = await handler({ httpMethod: 'OPTIONS', headers: { origin: ALLOWED_ORIGIN }, body: '' });
   assert.equal(ok.statusCode, 204);
   assert.match(ok.headers['Access-Control-Allow-Headers'], /X-Masterskaya-Session/);
+  assert.doesNotMatch(ok.headers['Access-Control-Allow-Headers'], /GitHub/i);
   const denied = await handler({ httpMethod: 'OPTIONS', headers: { origin: 'https://evil.example' }, body: '' });
   assert.equal(denied.statusCode, 403);
-});
-
-test('bootstrap verifies legacy push access and issues a 30-day device session', async () => {
-  const calls = [];
-  const handler = createHandler({
-    env: ENV,
-    now: () => NOW,
-    fetchImpl: async (url, options) => {
-      calls.push({ url, options });
-      if (url.endsWith(`/repos/chuvakhlov10/${REPO}`)) return jsonResponse({ permissions: { push: true } });
-      if (url.endsWith('/user')) return jsonResponse({ id: 123, login: 'owner' });
-      assert.fail(`unexpected ${url}`);
-    },
-  });
-  const response = await handler(event(
-    { action: 'bootstrap', clientId: 'device-client-123' },
-    { 'x-masterskaya-github-token': 'github_pat_abcdefghijklmnopqrstuvwxyz012345' },
-  ));
-  assert.equal(response.statusCode, 200);
-  const payload = JSON.parse(response.body);
-  const claims = verifySessionToken({ token: payload.sessionToken, secret: SESSION_SECRET, nowMs: NOW, version: 1 });
-  assert.equal(claims.clientId, 'device-client-123');
-  assert.equal(claims.sub, 'github:123');
-  assert.equal(claims.exp - claims.iat, SESSION_TTL_SECONDS);
-  assert.equal(response.body.includes('github_pat_'), false);
-  assert.equal(calls[0].options.headers.Authorization, 'Bearer github_pat_abcdefghijklmnopqrstuvwxyz012345');
-});
-
-test('bootstrap denies a read-only legacy token', async () => {
-  const handler = createHandler({
-    env: ENV,
-    fetchImpl: async () => jsonResponse({ permissions: { pull: true, push: false } }),
-  });
-  const response = await handler(event(
-    { action: 'bootstrap', clientId: 'device-client-123' },
-    { 'x-masterskaya-github-token': 'github_pat_abcdefghijklmnopqrstuvwxyz012345' },
-  ));
-  assert.equal(response.statusCode, 403);
-  assert.equal(JSON.parse(response.body).error, 'GITHUB_ACCESS_DENIED');
 });
 
 test('session renewal preserves the device identity and rotates the token', async () => {
@@ -228,10 +190,7 @@ test('path policy allows backup status only as read-only data-backups access', (
 
 test('missing server secrets fail closed without exposing configuration', async () => {
   const handler = createHandler({ env: {}, fetchImpl: async () => assert.fail('network not expected') });
-  const response = await handler(event(
-    { action: 'bootstrap', clientId: 'device-client-123' },
-    { 'x-masterskaya-github-token': 'github_pat_abcdefghijklmnopqrstuvwxyz012345' },
-  ));
+  const response = await handler(event({ action: 'renew' }));
   assert.equal(response.statusCode, 503);
   assert.deepEqual(JSON.parse(response.body), { ok: false, error: 'SESSION_AUTH_NOT_CONFIGURED' });
 });

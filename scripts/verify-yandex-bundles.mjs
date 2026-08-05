@@ -36,7 +36,7 @@ for (const targetName of ['storage', 'ably']) {
   delete require.cache[require.resolve(outputPath)];
   const loaded = require(outputPath);
   assert(typeof loaded?.handler === 'function', `${targetName}: HANDLER_EXPORT_MISSING`);
-  assert(loaded.FUNCTION_VERSION === '1.3.1', `${targetName}: FUNCTION_VERSION_MISMATCH`);
+  assert(loaded.FUNCTION_VERSION === '1.4.1', `${targetName}: FUNCTION_VERSION_MISMATCH`);
   assert(loaded.PROTOCOL_VERSION === 3, `${targetName}: PROTOCOL_VERSION_MISMATCH`);
 }
 

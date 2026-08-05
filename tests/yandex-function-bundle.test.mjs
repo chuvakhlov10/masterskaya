@@ -35,7 +35,7 @@ test('function builder creates executable single-file bundles with injected meta
       delete require.cache[require.resolve(outputPath)];
       const bundle = require(outputPath);
       assert.equal(typeof bundle.handler, 'function');
-      assert.equal(bundle.FUNCTION_VERSION, '1.3.1');
+      assert.equal(bundle.FUNCTION_VERSION, '1.4.1');
       assert.equal(bundle.PROTOCOL_VERSION, 3);
       assert.equal(bundle.BUILD_ID, 'testbuild123');
     }

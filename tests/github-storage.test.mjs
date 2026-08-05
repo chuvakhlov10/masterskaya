@@ -32,7 +32,6 @@ function jsonResponse(value, status = 200){
 
 async function loadStorage(fetchImpl){
   globalThis.localStorage = new MemoryStorage();
-  globalThis.localStorage.setItem('github_token_v1', 'temporary-bootstrap-token');
   globalThis.localStorage.setItem('masterskaya_storage_session_v1', JSON.stringify({
     token: 'header.payload.signature',
     expiresAt: Date.now() + 10 * 24 * 60 * 60 * 1000,
@@ -72,9 +71,7 @@ test('dbSet reads current remote value through the gateway and writes matching S
   assert.deepEqual(decodeWrittenValue(put.options), [{ opId: 'remote' }, { opId: 'local' }]);
   assert.match(put.url, /^https:\/\/functions\.yandexcloud\.net\//);
   assert.equal(put.options.headers['X-Masterskaya-Session'], 'header.payload.signature');
-  assert.equal(put.options.headers['X-Masterskaya-GitHub-Token'], undefined);
-  assert.equal(put.url.includes('api.github.com'), false);
-  assert.equal(globalThis.localStorage.getItem('github_token_v1'), null);
+  assert.equal(put.url.includes('github.com'), false);
   assert.ok(globalThis.localStorage.getItem('masterskaya_storage_session_v1'));
 });
 
@@ -136,7 +133,6 @@ test('dbGet distinguishes a gateway network failure from a missing file', async 
     throw new TypeError('network down');
   });
   await assert.rejects(() => storage.dbGet('records'), /GATEWAY_REQUEST_FAILED/);
-  assert.equal(globalThis.localStorage.getItem('github_token_v1'), 'temporary-bootstrap-token');
 });
 
 test('writes to one key remain serialized through the gateway', async () => {
@@ -186,8 +182,7 @@ test('backup status is requested through the gateway from data-backups', async (
   });
 });
 
-test('hasToken accepts an active device session even after the PAT is removed', async () => {
+test('hasStorageAccess accepts an active device session', async () => {
   const storage = await loadStorage(async () => jsonResponse({}));
-  globalThis.localStorage.removeItem('github_token_v1');
-  assert.equal(storage.hasToken(), true);
+  assert.equal(storage.hasStorageAccess(), true);
 });

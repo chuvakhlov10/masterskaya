@@ -1,63 +1,53 @@
-# Yandex Cloud Function: GitHub App storage gateway
+# Yandex Cloud Function: storage gateway
 
-This standalone function removes the permanent GitHub PAT from the workshop browser application and supports one-time pairing of new devices.
+The storage gateway is the only component that communicates with the private data repository. Browsers use signed device sessions and cannot send repository credentials.
 
 Security properties:
 
 - accepts browser requests only from `https://chuvakhlov10.github.io`;
 - uses a GitHub App installed only on `masterskaya-data`;
-- requests one-hour installation tokens limited to repository `masterskaya-data` and `contents: write`;
-- permits browser data access only to `data/*.json`, `photos/**/*.txt`, and read-only `status.json` on `data-backups`;
-- stores the device registry and hashed one-time pairing records in internal `auth/*.json` files that browser data requests cannot address;
-- issues signed 30-day device sessions;
-- creates 12-character pairing codes with about 60 bits of entropy, valid for ten minutes and consumed once;
-- checks the device registry before renewal and every data request; revoked devices are denied;
-- exposes an authenticated `session-check` action so the separate Ably function can deny revoked devices before issuing a Live token;
-- keeps the legacy PAT bootstrap action only as a temporary rollback path during migration;
-- never returns or logs the GitHub App private key, installation token, session secret, bootstrap PAT, or raw pairing code after creation;
-- has no external npm dependencies.
+- requests short-lived installation tokens limited to repository contents;
+- permits application data access only to `data/*.json`, `photos/**/*.txt`, and read-only `status.json` on `data-backups`;
+- keeps device, pairing and recovery state in protected `auth/*.json` files;
+- stores only hashes of pairing and recovery codes;
+- verifies the device registry before renewal and every data request;
+- rotates a recovery code after every successful redemption;
+- never returns or logs the GitHub App private key, installation token or session secret.
 
 ## Yandex Cloud settings
 
-Use the existing function named `masterskaya-storage-gateway`.
-
 - Runtime: Node.js 22
-- Entry point: `device-index.handler`
+- Entry point: `index.handler` from the generated single-file bundle
 - Memory: 128 MB
 - Timeout: 30 seconds
-- Service account: not required
 - Public function: enabled
-- Upload: ZIP archive with `index.js`, `pairing-index.js`, `device-index.js`, and `device-auth.js` at the archive root
+- Upload: generated `dist/yandex-functions/storage/index.js`
 - Do not use `?integration=raw`
 
-## Environment variables
+Environment variables:
 
-Keep the existing four variables unchanged:
-
-- `GITHUB_APP_ID=4488480`
-- `GITHUB_APP_PRIVATE_KEY_B64=<base64 of the downloaded .pem file>`
-- `MASTERSKAYA_SESSION_SECRET=<the same shared secret used by the Ably function>`
+- `GITHUB_APP_ID`
+- `GITHUB_APP_PRIVATE_KEY_B64`
+- `MASTERSKAYA_SESSION_SECRET` (the same value as in the Ably function)
 - `MASTERSKAYA_SESSION_VERSION=2`
 
-Do not send secret values in chat and do not commit them to GitHub.
+Do not send secret values in chat or commit them to the repository.
 
 ## Browser protocol
 
-All calls use `POST` with standard Yandex HTTPS integration.
+Unauthenticated actions:
 
-Unauthenticated new-device request:
+- `pairing-redeem` — exchange a ten-minute pairing code for a device session;
+- `recovery-redeem` — restore access and atomically receive a replacement recovery code.
 
-- action `pairing-redeem`;
-- body includes the one-time `code`, new `clientId`, and device name.
-
-Authenticated requests use header `X-Masterskaya-Session` and support:
+Authenticated actions use `X-Masterskaya-Session`:
 
 - `renew` — rotate the 30-day session;
 - `github` — restricted data read/write;
-- `session-check` — confirm that the device is still active;
-- `devices` — list connected and revoked devices;
-- `pairing-create` — create a ten-minute one-time pairing code;
-- `device-rename` — rename a device;
-- `device-revoke` — revoke another device.
+- `session-check` — verify that the device remains active;
+- `devices` — list devices;
+- `pairing-create` — create a one-time pairing code;
+- `recovery-rotate` — create or replace the offline recovery code;
+- `device-rename` and `device-revoke` — manage registered devices.
 
-The transitional `bootstrap` action still accepts `X-Masterskaya-GitHub-Token`, but the final browser client does not need a PAT. The function URL is public by design; CORS is an additional boundary, not authentication.
+The function URL is public by design. Authentication is enforced by signed sessions or one-time codes; CORS is an additional browser boundary.

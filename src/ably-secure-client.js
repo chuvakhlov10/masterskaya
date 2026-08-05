@@ -1,7 +1,5 @@
 import {
   SECURE_ABLY_AUTH_ENDPOINT,
-} from "./ably-auth.js";
-import {
   requestSessionAuthorizedAblyToken,
 } from "./ably-session-auth.js";
 

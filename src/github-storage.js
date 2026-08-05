@@ -3,36 +3,21 @@
 // выполняет read → merge → write с актуальным SHA и повтором при конфликте.
 
 import {
-  bootstrapStorageSession,
   clearStoredStorageSession,
   readStoredStorageSession,
   storageGatewayRequest,
 } from "./storage-gateway.js";
 
-const OWNER = "chuvakhlov10";
-const REPO = "masterskaya-data";
-const TOKEN_KEY = "github_token_v1";
 const DATA_PREFIX = "data/";
 const PHOTO_PREFIX = "photos/";
-const REQUEST_TIMEOUT_MS = 30_000;
 
-function getToken() {
-  try { return localStorage.getItem(TOKEN_KEY) || ""; }
-  catch { return ""; }
-}
-
-export function setToken(token) {
-  try { localStorage.setItem(TOKEN_KEY, String(token || "").trim()); } catch {}
-}
-
-export function clearToken() {
-  try { localStorage.removeItem(TOKEN_KEY); } catch {}
+export function disconnectStorage() {
   clearStoredStorageSession();
 }
 
-export function hasToken() {
+export function hasStorageAccess() {
   const session = readStoredStorageSession();
-  return !!getToken() || !!(session?.token && session.expiresAt > Date.now());
+  return !!(session?.token && session.expiresAt > Date.now());
 }
 
 const shaCache = Object.create(null);
@@ -73,19 +58,8 @@ function normalizeGatewayError(error) {
   return makeError(code, Number.isInteger(status) ? status : undefined, error);
 }
 
-// Обычные операции используют только подписанную сессию. Legacy PAT допускается
-// лишь для явного аварийного входа: когда сессии ещё нет, но пользователь только
-// что вручную ввёл токен. Отклонённая, истёкшая или отозванная сессия никогда не
-// восстанавливается через PAT автоматически — устройство возвращается к pairing.
+// Все операции используют только подписанную сессию устройства.
 async function ghRequest(method, path, body, options = {}) {
-  if (!readStoredStorageSession() && getToken()) {
-    try {
-      await bootstrapStorageSession();
-    } catch (bootstrapError) {
-      throw normalizeGatewayError(bootstrapError);
-    }
-  }
-
   try {
     return await storageGatewayRequest({
       method,
@@ -323,37 +297,4 @@ export async function photoDelete(marker) {
     }
   }
   return { ok: true, deleted };
-}
-
-// Первичная проверка введённого пользователем PAT. Она выполняется только при
-// настройке нового устройства; рабочие данные после этого идут через шлюз.
-export async function verifyToken(token) {
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-    try {
-      const response = await fetch(`https://api.github.com/repos/${OWNER}/${REPO}`, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          Accept: "application/vnd.github+json",
-          "X-GitHub-Api-Version": "2022-11-28",
-        },
-        signal: controller.signal,
-        cache: "no-store",
-      });
-      if (!response.ok) {
-        const payload = await response.json().catch(() => ({}));
-        return { ok: false, error: payload?.message || `HTTP ${response.status}` };
-      }
-      const repository = await response.json();
-      if (!repository?.permissions?.push) {
-        return { ok: false, error: "Токен не имеет права записи в репозиторий данных" };
-      }
-      return { ok: true };
-    } finally {
-      clearTimeout(timeout);
-    }
-  } catch (error) {
-    return { ok: false, error: error?.name === "AbortError" ? "REQUEST_TIMEOUT" : error.message };
-  }
 }

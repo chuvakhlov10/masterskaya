@@ -6,7 +6,6 @@ import {
 } from "./storage-gateway.js";
 
 const SESSION_KEY = "masterskaya_storage_session_v1";
-const LEGACY_TOKEN_KEY = "github_token_v1";
 const DEVICE_NAME_KEY = "masterskaya_device_name_v1";
 const REQUEST_TIMEOUT_MS = 20_000;
 
@@ -27,14 +26,14 @@ function safeSet(storage, key, value) {
   catch {}
 }
 
-function safeRemove(storage, key) {
-  try { storage?.removeItem?.(key); }
-  catch {}
+export function normalizePairingCode(value) {
+  const raw = String(value || "").toUpperCase().replace(/[^ABCDEFGHJKLMNPQRSTUVWXYZ2-9]/g, "").slice(0, 12);
+  return [raw.slice(0, 4), raw.slice(4, 8), raw.slice(8, 12)].filter(Boolean).join("-");
 }
 
-export function normalizePairingCode(value) {
-  const raw = String(value || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 12);
-  return [raw.slice(0, 4), raw.slice(4, 8), raw.slice(8, 12)].filter(Boolean).join("-");
+export function normalizeRecoveryCode(value) {
+  const raw = String(value || "").toUpperCase().replace(/[^ABCDEFGHJKLMNPQRSTUVWXYZ2-9]/g, "").slice(0, 24);
+  return raw.match(/.{1,4}/g)?.join("-") || "";
 }
 
 export function inferDeviceName(userAgent = globalThis.navigator?.userAgent || "") {
@@ -57,7 +56,7 @@ export function hasActivePairingSession(storage = globalThis.localStorage, now =
   return !!(session?.token && session.expiresAt > now);
 }
 
-function storeSession(payload, storage) {
+export function acceptDeviceSession(payload, storage = globalThis.localStorage) {
   const session = {
     token: String(payload?.sessionToken || ""),
     expiresAt: Number(payload?.expiresAt),
@@ -67,7 +66,6 @@ function storeSession(payload, storage) {
   if (!Number.isFinite(session.expiresAt) || session.expiresAt <= Date.now()) throw makeError("SESSION_EXPIRY_INVALID");
   if (!/^[A-Za-z0-9._:-]{8,128}$/.test(session.clientId)) throw makeError("SESSION_CLIENT_ID_INVALID");
   safeSet(storage, SESSION_KEY, JSON.stringify(session));
-  safeRemove(storage, LEGACY_TOKEN_KEY);
   return session;
 }
 
@@ -137,7 +135,34 @@ export async function redeemPairingCode({ code, deviceName, ...options } = {}) {
     },
   });
   if (payload?.clientId !== clientId) throw makeError("SESSION_CLIENT_ID_MISMATCH");
-  return { session: storeSession(payload, storage), device: payload.device || null };
+  return { session: acceptDeviceSession(payload, storage), device: payload.device || null };
+}
+
+export async function redeemRecoveryCode({ code, deviceName, ...options } = {}) {
+  const storage = options.storage || globalThis.localStorage;
+  const clientId = getOrCreateStorageDeviceId(storage);
+  const normalizedCode = normalizeRecoveryCode(code).replaceAll("-", "");
+  if (normalizedCode.length !== 24) throw makeError("RECOVERY_CODE_INVALID");
+  const name = saveDeviceName(deviceName, storage);
+  const payload = await postGateway({
+    ...options,
+    body: {
+      action: "recovery-redeem",
+      code: normalizedCode,
+      clientId,
+      deviceName: name,
+    },
+  });
+  if (payload?.clientId !== clientId) throw makeError("SESSION_CLIENT_ID_MISMATCH");
+  const replacementRecoveryCode = normalizeRecoveryCode(payload?.replacementRecoveryCode);
+  if (replacementRecoveryCode.replaceAll("-", "").length !== 24) {
+    throw makeError("RECOVERY_RESPONSE_INVALID");
+  }
+  return {
+    pendingSession: payload,
+    device: payload.device || null,
+    replacementRecoveryCode,
+  };
 }
 
 export async function listDevices(options = {}) {
@@ -154,6 +179,14 @@ export async function createPairingCode(options = {}) {
     throw makeError("PAIRING_RESPONSE_INVALID");
   }
   return { code: normalizePairingCode(payload.code), expiresAt: Number(payload.expiresAt) };
+}
+
+export async function rotateRecoveryCode(options = {}) {
+  const storage = options.storage || globalThis.localStorage;
+  const payload = await authorizedAction("recovery-rotate", { deviceName: readDeviceName(storage) }, options);
+  const recoveryCode = normalizeRecoveryCode(payload?.recoveryCode);
+  if (recoveryCode.replaceAll("-", "").length !== 24) throw makeError("RECOVERY_RESPONSE_INVALID");
+  return { recoveryCode, generation: Number(payload?.generation) || null };
 }
 
 export async function renameDevice(targetClientId, deviceName, options = {}) {
@@ -177,6 +210,10 @@ export function pairingErrorText(error) {
     PAIRING_CODE_INVALID: "Введите полный 12-символьный код",
     PAIRING_CODE_NOT_FOUND: "Код не найден или уже использован",
     PAIRING_CODE_EXPIRED: "Срок действия кода истёк. Создайте новый код",
+    RECOVERY_CODE_INVALID: "Введите полный recovery-код",
+    RECOVERY_CODE_NOT_FOUND: "Recovery-код недействителен или уже заменён",
+    RECOVERY_NOT_CONFIGURED: "Серверное восстановление ещё не настроено",
+    RECOVERY_RESPONSE_INVALID: "Сервер вернул некорректный recovery-код",
     SESSION_REQUIRED: "Сессия устройства отсутствует. Перезапустите приложение",
     SESSION_INVALID: "Сессия устройства недействительна",
     SESSION_EXPIRED: "Сессия устройства истекла",

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, Component } from "react";
-import { dbGet, dbSet, backupStatusGet, hasToken, setToken, clearToken, verifyToken, photoGet, photoSet, photoDelete } from "./github-storage.js";
+import { dbGet, dbSet, backupStatusGet, disconnectStorage, hasStorageAccess, photoGet, photoSet, photoDelete } from "./github-storage.js";
 import Ably from "ably";
 import { createSecureAblyRealtimeOptions } from "./ably-secure-client.js";
 import { installStorageGatewayProbe } from "./storage-gateway.js";
@@ -21,7 +21,7 @@ import { APP_VERSION, deriveSyncView, normalizeBackupStatus } from "./status-cor
 const CLIENT_ID = String(Date.now()) + '-' + Math.random().toString(36).slice(2, 8);
 const ably = new Ably.Realtime(createSecureAblyRealtimeOptions({
   clientId: CLIENT_ID,
-  autoConnect: hasToken(),
+  autoConnect: hasStorageAccess(),
 }));
 installStorageGatewayProbe();
 
@@ -1620,12 +1620,6 @@ function StockControls({ search, setSearch, onExpandAll, onCollapseAll }){
 //  ГЛАВНЫЙ КОМПОНЕНТ
 // ──────────────────────────────────────────────────────────────
 export default function App(){
-  // ── GitHub токен ──
-  const [tokenOk, setTokenOk] = useState(hasToken());
-  const [tokenInput, setTokenInput] = useState("");
-  const [tokenError, setTokenError] = useState("");
-  const [tokenChecking, setTokenChecking] = useState(false);
-
   // ── авторизация ──
   const [authed, setAuthed] = useState(false);
   const [passwordInput, setPasswordInput] = useState("");
@@ -2953,31 +2947,15 @@ async function refreshStockFromServer() {
     }catch{}
   }
 
-  // ── GitHub токен: вход / выход ──
-  async function handleTokenSubmit(){
-    setTokenError("");
-    setTokenChecking(true);
-    const result = await verifyToken(tokenInput.trim());
-    setTokenChecking(false);
-    if(result.ok){
-      setToken(tokenInput.trim());
-      setTokenOk(true);
-      setTokenInput("");
-      // Перезагружаем чтобы инициализация прошла с токеном
-      window.location.reload();
-    } else {
-      setTokenError(result.error || "Неверный токен");
-    }
-  }
-  function handleTokenLogout(){
-    clearToken();
-    setTokenOk(false);
+  function handleFullLogout(){
+    disconnectStorage();
     setAuthed(false);
     setWorkshop(null);
     try{
       localStorage.removeItem(LOCAL_WS_KEY);
       localStorage.removeItem(LOCAL_AUTH_KEY);
     }catch{}
+    globalThis.location?.reload?.();
   }
 
   async function loadBackupStatus(){
@@ -4358,40 +4336,6 @@ async function refreshStockFromServer() {
   }
 
   // ── экраны ──
-  // Экран ввода GitHub токена (если токена нет)
-  if(!tokenOk) return (
-    <div style={{...s.app,display:"flex",alignItems:"center",justifyContent:"center",minHeight:"100vh"}}>
-      <div style={{width:"100%",maxWidth:380,padding:24}}>
-        <div style={{textAlign:"center",marginBottom:32}}>
-          <div style={{width:64,height:64,background:C.brand,borderRadius:12,display:"flex",alignItems:"center",justifyContent:"center",fontSize:32,margin:"0 auto 16px"}}>🔑</div>
-          <div style={{fontSize:22,fontWeight:800,letterSpacing:"-0.3px"}}>Мастерская</div>
-          <div style={{fontSize:10,fontWeight:700,color:C.brand,letterSpacing:"1px",textTransform:"uppercase",marginTop:4}}>Простое Решение</div>
-          <div style={{fontSize:13,color:C.textSub,marginTop:8}}>Подключение к хранилищу</div>
-        </div>
-        <div style={{background:C.brandDim,border:`1px solid ${C.brand}44`,padding:"10px 12px",marginBottom:16,fontSize:11,color:C.textSub,lineHeight:1.5}}>
-          📦 Данные хранятся в GitHub (приватный репозиторий).<br/>
-          Введите Personal Access Token от вашего GitHub.
-        </div>
-        <label style={s.label}>GitHub Personal Access Token</label>
-        <input type="password" value={tokenInput}
-          onChange={e=>setTokenInput(e.target.value)}
-          onKeyDown={e=>{if(e.key==="Enter"&&!tokenChecking)handleTokenSubmit();}}
-          placeholder="ghp_xxxxxxxxxxxx"
-          style={{...s.input,marginBottom:10,fontSize:13}}/>
-        {tokenError&&<div style={{fontSize:12,color:C.danger,marginBottom:10,fontWeight:700}}>{tokenError}</div>}
-        <button onClick={handleTokenSubmit} disabled={tokenChecking}
-          style={{...s.btn("accent"),width:"100%",padding:"14px 0",fontSize:14,opacity:tokenChecking?.6:1}}>
-          {tokenChecking ? "Проверка..." : "Подключиться"}
-        </button>
-        <div style={{fontSize:11,color:C.textDim,marginTop:16,lineHeight:1.6}}>
-          Токен создаётся в:<br/>
-          GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic) → Generate new token (classic)<br/>
-          Нужны права: <b style={{color:C.textSub}}>repo</b> (полный доступ к репозиториям).
-        </div>
-      </div>
-    </div>
-  );
-
   if(loading || !pwdLoaded) return (
     <div style={{...s.app,display:"flex",alignItems:"center",justifyContent:"center",minHeight:"100vh"}}>
       <div style={{textAlign:"center"}}>
@@ -4653,7 +4597,7 @@ async function refreshStockFromServer() {
             <button onClick={handleLogout} title="Переключиться на другую мастерскую" style={{background:"transparent",color:C.textSub,border:`1px solid ${C.border}`,padding:"6px 10px",fontSize:10,cursor:"pointer",borderRadius:0,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.5px"}}>
               🔄 → {workshop==="SMART" ? "Бегемот" : "SMART"}
             </button>
-            <button onClick={handleTokenLogout} title="Полный выход из приложения" style={{background:"transparent",color:C.danger,border:`1px solid ${C.danger}`,padding:"6px 10px",fontSize:10,cursor:"pointer",borderRadius:0,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.5px"}}>🚪 Выйти</button>
+            <button onClick={handleFullLogout} title="Отключить это устройство" style={{background:"transparent",color:C.danger,border:`1px solid ${C.danger}`,padding:"6px 10px",fontSize:10,cursor:"pointer",borderRadius:0,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.5px"}}>🚪 Выйти</button>
           </div>
         </div>
         {/* Строка с мастерской + датой + статусом */}

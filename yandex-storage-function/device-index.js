@@ -5,7 +5,7 @@ const pairing = require('./pairing-index.js');
 const { createDeviceAuthService } = require('./device-auth.js');
 
 const FUNCTION_NAME = 'masterskaya-storage-gateway';
-const FUNCTION_VERSION = '1.3.1';
+const FUNCTION_VERSION = '1.4.1';
 const PROTOCOL_VERSION = 3;
 const BUILD_ID = '__MASTERSKAYA_BUILD_ID__';
 const BUILD_DATE = '__MASTERSKAYA_BUILD_DATE__';
@@ -105,7 +105,11 @@ function createHandler({
 
   function getDeviceAuthService() {
     if (deviceAuthService) return deviceAuthService;
-    deviceAuthService = createDeviceAuthService({ appClient: getAppClient(), now });
+    deviceAuthService = createDeviceAuthService({
+      appClient: getAppClient(),
+      now,
+      recoverySecret: base.parseSessionSecret(env.MASTERSKAYA_SESSION_SECRET),
+    });
     return deviceAuthService;
   }
 
