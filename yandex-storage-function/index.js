@@ -236,6 +236,12 @@ function normalizeRepoRequest(input = {}) {
   if (path === 'status.json') {
     kind = 'backup-status';
     if (method !== 'GET' || ref !== 'data-backups') throw makeError('PATH_DENIED', 403);
+  } else if (path === 'data/stock-checkpoint.json') {
+    kind = 'stock-checkpoint';
+    if (method !== 'GET' || ref) throw makeError('PATH_DENIED', 403);
+  } else if (/^archives\/stock-ops\/\d{4}-\d{2}\.json$/.test(path)) {
+    kind = 'stock-archive';
+    if (method !== 'GET' || ref) throw makeError('PATH_DENIED', 403);
   } else if (/^data\/[A-Za-z0-9_-]{1,120}\.json$/.test(path)) {
     kind = 'data';
     if (ref) throw makeError('PATH_DENIED', 403);

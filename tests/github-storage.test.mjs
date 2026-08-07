@@ -176,10 +176,29 @@ test('backup status is requested through the gateway from data-backups', async (
   assert.match(request.url, /^https:\/\/functions\.yandexcloud\.net\//);
   assert.deepEqual(gatewayBody(request.options), {
     action: 'github',
+    storageProtocolVersion: 4,
     method: 'GET',
     path: 'status.json',
     ref: 'data-backups',
   });
+});
+
+test('monthly stock archive is read through its read-only gateway path', async () => {
+  let request;
+  const storage = await loadStorage(async (url, options) => {
+    request = { url: String(url), options };
+    return jsonResponse({ sha: 'archive-sha', content: encodeJson([{ opId: 'archived' }]) });
+  });
+
+  const result = await storage.stockArchiveGet('2026-07');
+  assert.deepEqual(result, [{ opId: 'archived' }]);
+  assert.deepEqual(gatewayBody(request.options), {
+    action: 'github',
+    storageProtocolVersion: 4,
+    method: 'GET',
+    path: 'archives/stock-ops/2026-07.json',
+  });
+  await assert.rejects(storage.stockArchiveGet('../secret'), /INVALID_ARCHIVE_MONTH/);
 });
 
 test('hasStorageAccess accepts an active device session', async () => {

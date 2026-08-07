@@ -3,7 +3,11 @@ import assert from 'node:assert/strict';
 import {
   applyObjectPatch,
   applyOpsToStock,
+  applyStockCheckpoint,
+  classifyLateStockOps,
+  createStockJournal,
   createObjectPatch,
+  createStockArchivePlan,
   findRecordIndex,
   legacyRecordFingerprint,
   recordRevision,
@@ -12,7 +16,9 @@ import {
   mergeById,
   mergeObjectPatches,
   mergeRecords,
+  mergeStockJournals,
   mergeStockOps,
+  normalizeStockJournal,
   stockOpIdentity,
 } from '../src/sync-core.js';
 
@@ -86,6 +92,115 @@ test('movement remains atomic in one event', () => {
   ]);
   assert.equal(stock.main.TEST, 6);
   assert.equal(stock.ws.SMART.TEST, 4);
+});
+
+test('checkpoint plus hot journal reproduces the full stock and keeps rename aliases', () => {
+  const cutoff = 1_800_000_000_100;
+  const operations = [
+    op({ type: 'init', opId: 'init-old', marker: 'OLD', value: 10, delta: undefined, ts: cutoff - 30 }),
+    op({ type: 'rename', opId: 'rename-old', marker: undefined, oldMarker: 'OLD', newMarker: 'NEW', delta: undefined, ts: cutoff - 20 }),
+    op({ opId: 'before-cutoff', marker: 'OLD', delta: -2, ts: cutoff - 10 }),
+    op({ opId: 'after-cutoff', marker: 'NEW', delta: 4, ts: cutoff + 10 }),
+  ];
+  const plan = createStockArchivePlan(operations, cutoff, {
+    epoch: 1,
+    createdAt: '2026-08-05T18:00:00Z',
+  });
+
+  assert.equal(plan.archivedOps.length, 3);
+  assert.equal(plan.hotOps.length, 1);
+  assert.equal(plan.checkpoint.renameAliases.OLD, 'NEW');
+  assert.deepEqual(
+    applyStockCheckpoint(plan.checkpoint, plan.hotOps),
+    applyOpsToStock(operations),
+  );
+  assert.equal(applyStockCheckpoint(plan.checkpoint, plan.hotOps).main.NEW, 12);
+});
+
+test('late additive operation is applied after checkpoint under the canonical marker', () => {
+  const cutoff = 1_800_000_000_100;
+  const plan = createStockArchivePlan([
+    op({ type: 'init', opId: 'init-old', marker: 'OLD', value: 10, delta: undefined, ts: cutoff - 30 }),
+    op({ type: 'rename', opId: 'rename-old', marker: undefined, oldMarker: 'OLD', newMarker: 'NEW', delta: undefined, ts: cutoff - 20 }),
+  ], cutoff);
+  const late = op({ opId: 'late-offline', marker: 'OLD', delta: -3, ts: cutoff - 10 });
+
+  const stock = applyStockCheckpoint(plan.checkpoint, [late]);
+  const classification = classifyLateStockOps(plan.checkpoint, [late]);
+  assert.equal(stock.main.NEW, 7);
+  assert.equal(stock.main.OLD, undefined);
+  assert.deepEqual(classification.safe.map(item => item.opId), ['late-offline']);
+  assert.deepEqual(classification.blocking, []);
+});
+
+test('late set is quarantined because applying it after a checkpoint changes history order', () => {
+  const cutoff = 1_800_000_000_100;
+  const plan = createStockArchivePlan([
+    op({ type: 'init', opId: 'init', value: 10, delta: undefined, ts: cutoff - 20 }),
+  ], cutoff);
+  const lateSet = op({ type: 'set', opId: 'late-set', value: 4, delta: undefined, ts: cutoff - 10 });
+  const classification = classifyLateStockOps(plan.checkpoint, [lateSet]);
+  assert.deepEqual(classification.safe, []);
+  assert.deepEqual(classification.blocking.map(item => item.opId), ['late-set']);
+});
+
+test('record-effect anchor lets a post-cutoff edit continue an archived mutation chain', () => {
+  const cutoff = 1_800_000_000_100;
+  const created = op({
+    type: 'record-effect', opId: 'record-effect:create', recordId: 'record-1',
+    mutationId: 'create', baseMutationId: null, baseRevision: 0, revision: 1,
+    mutationKind: 'create', before: null,
+    after: { location: 'main', marker: 'TEST', qty: 2 },
+    delta: undefined, ts: cutoff - 10,
+  });
+  const edited = op({
+    type: 'record-effect', opId: 'record-effect:edit', recordId: 'record-1',
+    mutationId: 'edit', baseMutationId: 'create', baseRevision: 1, revision: 2,
+    mutationKind: 'edit',
+    before: { location: 'main', marker: 'TEST', qty: 2 },
+    after: { location: 'main', marker: 'TEST', qty: 4 },
+    delta: undefined, ts: cutoff + 10,
+  });
+  const plan = createStockArchivePlan([created, edited], cutoff);
+
+  assert.equal(plan.checkpoint.recordEffectAnchors.length, 1);
+  assert.equal(plan.checkpoint.recordEffectAnchors[0].mutationId, 'create');
+  assert.deepEqual(
+    applyStockCheckpoint(plan.checkpoint, plan.hotOps),
+    applyOpsToStock([created, edited]),
+  );
+  assert.equal(applyStockCheckpoint(plan.checkpoint, plan.hotOps).main.TEST, -4);
+});
+
+test('checkpoint and hot journal must have the same archive epoch', () => {
+  const cutoff = 1_800_000_000_100;
+  const plan = createStockArchivePlan([
+    op({ type: 'init', opId: 'init', value: 10, delta: undefined, ts: cutoff - 10 }),
+    op({ opId: 'hot', ts: cutoff + 10 }),
+  ], cutoff);
+  const journal = createStockJournal(plan.hotOps, plan.checkpoint);
+  assert.equal(journal.schemaVersion, 4);
+  assert.equal(journal.epoch, plan.checkpoint.epoch);
+  assert.deepEqual(normalizeStockJournal(journal, plan.checkpoint).ops.map(item => item.opId), ['hot']);
+  assert.throws(() => normalizeStockJournal(plan.hotOps, plan.checkpoint), /STOCK_ARCHIVE_EPOCH_MISMATCH/);
+  assert.throws(() => normalizeStockJournal(journal, null), /STOCK_CHECKPOINT_REQUIRED/);
+});
+
+test('journal merge keeps archive envelope and rejects unstamped late operations', () => {
+  const cutoff = 1_800_000_000_100;
+  const plan = createStockArchivePlan([
+    op({ type: 'init', opId: 'init', value: 10, delta: undefined, ts: cutoff - 10 }),
+  ], cutoff);
+  const remote = createStockJournal([op({ opId: 'remote', ts: cutoff + 10 })], plan.checkpoint);
+  const local = createStockJournal([op({ opId: 'local', ts: cutoff + 20 })], plan.checkpoint);
+  const merged = mergeStockJournals(remote, local, plan.checkpoint);
+  assert.equal(merged.epoch, 1);
+  assert.deepEqual(merged.ops.map(item => item.opId), ['remote', 'local']);
+
+  const unstampedLate = createStockJournal([op({ opId: 'late', ts: cutoff - 1 })], plan.checkpoint);
+  assert.throws(() => normalizeStockJournal(unstampedLate, plan.checkpoint), /STOCK_ARCHIVE_LATE_OPERATION_UNSTAMPED/);
+  const stampedLate = createStockJournal([op({ opId: 'late', ts: cutoff - 1, archiveEpoch: 1 })], plan.checkpoint);
+  assert.equal(normalizeStockJournal(stampedLate, plan.checkpoint).ops[0].archiveEpoch, 1);
 });
 
 test('mergeRecords chooses newest edit and respects tombstones', () => {

@@ -21,6 +21,10 @@ test('function builder creates executable single-file bundles with injected meta
       buildDate: '2026-08-05T10:30:00Z',
     });
 
+    const expected = {
+      storage: { version: '1.5.0', protocol: 4 },
+      ably: { version: '1.4.1', protocol: 3 },
+    };
     for (const targetName of ['storage', 'ably']) {
       const targetDir = path.join(outputDir, targetName);
       assert.deepEqual(fs.readdirSync(targetDir), ['index.js']);
@@ -35,8 +39,8 @@ test('function builder creates executable single-file bundles with injected meta
       delete require.cache[require.resolve(outputPath)];
       const bundle = require(outputPath);
       assert.equal(typeof bundle.handler, 'function');
-      assert.equal(bundle.FUNCTION_VERSION, '1.4.1');
-      assert.equal(bundle.PROTOCOL_VERSION, 3);
+      assert.equal(bundle.FUNCTION_VERSION, expected[targetName].version);
+      assert.equal(bundle.PROTOCOL_VERSION, expected[targetName].protocol);
       assert.equal(bundle.BUILD_ID, 'testbuild123');
     }
 

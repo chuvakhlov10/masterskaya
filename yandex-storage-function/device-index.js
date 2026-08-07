@@ -5,8 +5,8 @@ const pairing = require('./pairing-index.js');
 const { createDeviceAuthService } = require('./device-auth.js');
 
 const FUNCTION_NAME = 'masterskaya-storage-gateway';
-const FUNCTION_VERSION = '1.4.1';
-const PROTOCOL_VERSION = 3;
+const FUNCTION_VERSION = '1.5.0';
+const PROTOCOL_VERSION = 4;
 const BUILD_ID = '__MASTERSKAYA_BUILD_ID__';
 const BUILD_DATE = '__MASTERSKAYA_BUILD_DATE__';
 const SESSION_HEADER = 'x-masterskaya-session';
@@ -68,6 +68,9 @@ function baseHealth(env, nowMs) {
     service: FUNCTION_NAME,
     version: FUNCTION_VERSION,
     protocolVersion: PROTOCOL_VERSION,
+    storageProtocolVersion: 4,
+    minimumStorageProtocol: pairing.minimumStorageProtocol(env),
+    requiredStockEpoch: pairing.requiredStockEpoch(env),
     buildId: BUILD_ID,
     buildDate: BUILD_DATE,
     serverTime: new Date(nowMs).toISOString(),
