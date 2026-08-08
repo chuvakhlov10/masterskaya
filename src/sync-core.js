@@ -600,6 +600,40 @@ export function classifyLateStockOps(checkpoint, hotOps, options = {}) {
   return { safe, blocking };
 }
 
+// Reconcile a durable device outbox against the complete confirmed history.
+// Matching opId values are already committed and may be removed. An unknown
+// operation older than the checkpoint is never replayed automatically: even an
+// additive delta could be a stale copy whose original effect is already folded
+// into the checkpoint under a different or damaged local state.
+export function reconcileStockOutboxWithHistory(outbox, confirmedOps, checkpoint, options = {}) {
+  const normalizedOutbox = mergeStockOps([], Array.isArray(outbox) ? outbox : []);
+  const confirmedIds = new Set(
+    (Array.isArray(confirmedOps) ? confirmedOps : [])
+      .map(op => typeof op?.opId === "string" ? op.opId : "")
+      .filter(Boolean),
+  );
+  const confirmed = [];
+  const remaining = [];
+  for (const op of normalizedOutbox) {
+    if (typeof op?.opId === "string" && confirmedIds.has(op.opId)) confirmed.push(op);
+    else remaining.push(op);
+  }
+
+  const normalizedCheckpoint = normalizeStockCheckpoint(checkpoint, options);
+  if (!normalizedCheckpoint) {
+    return { confirmed, remaining, sendable: remaining, blocked: [] };
+  }
+
+  const sendable = [];
+  const blocked = [];
+  for (const op of remaining) {
+    const ts = Number(op?.ts);
+    if (Number.isFinite(ts) && ts >= normalizedCheckpoint.cutoffTs) sendable.push(op);
+    else blocked.push(op);
+  }
+  return { confirmed, remaining, sendable, blocked };
+}
+
 function itemVersion(item) {
   if (!item || typeof item !== "object") return 0;
   for (const key of ["updatedAt", "deletedAt", "timestamp", "ts"]) {

@@ -37,3 +37,18 @@ test('client repairs a missing create effect after startup, remote merge and rec
   assert.match(appSource, /repairMissingCreateRecordEffects\(merged, "remote-records"\)/);
   assert.match(appSource, /repairMissingCreateRecordEffects\(\[committed\], "record-commit"\)/);
 });
+
+test('client reconciles the durable stock outbox against every archive before sending', () => {
+  assert.match(appSource, /normalized\.archive\?\.files/);
+  assert.match(appSource, /await stockArchiveGet\(month\)/);
+  assert.match(appSource, /reconcileStockOutboxAgainstHistory\(serverStockOps, stockPair\.checkpoint\)/);
+  assert.match(appSource, /await reconcileStockOutboxAgainstHistory\(stockPair\.journal\.ops, stockPair\.checkpoint\)/);
+  assert.match(appSource, /const opsToSave = mergeStockOps\(remote, outbox\)/);
+});
+
+test('unknown pre-checkpoint outbox operations remain local and blocked for review', () => {
+  assert.match(appSource, /stockOutboxHistoryEpochRef\.current !== checkpoint\.epoch\) return \[\]/);
+  assert.match(appSource, /reconcileStockOutboxWithHistory\(outbox, \[\], checkpoint\)\.sendable/);
+  assert.match(appSource, /STOCK_ARCHIVE_OUTBOX_REVIEW_REQUIRED/);
+  assert.match(appSource, /автоматическая отправка заблокирована до проверки/);
+});

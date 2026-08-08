@@ -12,6 +12,7 @@ import {
   findRecordIndex,
   legacyRecordFingerprint,
   recordRevision,
+  reconcileStockOutboxWithHistory,
   sameRecordVersion,
   selectRecordEffectOps,
   mergeById,
@@ -143,6 +144,51 @@ test('late set is quarantined because applying it after a checkpoint changes his
   const classification = classifyLateStockOps(plan.checkpoint, [lateSet]);
   assert.deepEqual(classification.safe, []);
   assert.deepEqual(classification.blocking.map(item => item.opId), ['late-set']);
+});
+
+test('outbox reconciliation removes only ids confirmed by hot or archived history', () => {
+  const cutoff = 1_800_000_000_100;
+  const checkpoint = createStockArchivePlan([
+    op({ opId: 'archived', ts: cutoff - 20 }),
+    op({ opId: 'hot', ts: cutoff + 20 }),
+  ], cutoff).checkpoint;
+  const outbox = [
+    op({ opId: 'archived', ts: cutoff - 20 }),
+    op({ opId: 'hot', ts: cutoff + 20 }),
+    op({ opId: 'new-local', ts: cutoff + 30 }),
+  ];
+
+  const result = reconcileStockOutboxWithHistory(outbox, [
+    op({ opId: 'hot', ts: cutoff + 20 }),
+    op({ opId: 'archived', ts: cutoff - 20 }),
+  ], checkpoint);
+
+  assert.deepEqual(result.confirmed.map(item => item.opId), ['archived', 'hot']);
+  assert.deepEqual(result.remaining.map(item => item.opId), ['new-local']);
+  assert.deepEqual(result.sendable.map(item => item.opId), ['new-local']);
+  assert.deepEqual(result.blocked, []);
+});
+
+test('unknown pre-checkpoint outbox operations stay blocked regardless of type or epoch stamp', () => {
+  const cutoff = 1_800_000_000_100;
+  const checkpoint = createStockArchivePlan([], cutoff, { epoch: 2 }).checkpoint;
+  const lateDelta = op({ opId: 'late-delta', ts: cutoff - 30, archiveEpoch: 2 });
+  const lateMove = op({
+    type: 'move', opId: 'late-move', ts: cutoff - 20, archiveEpoch: 2,
+    from: 'main', to: 'ws:SMART', qty: 1, delta: undefined,
+  });
+  const invalidTimestamp = op({ opId: 'invalid-ts', ts: undefined });
+  const current = op({ opId: 'current', ts: cutoff + 10 });
+
+  const result = reconcileStockOutboxWithHistory(
+    [lateDelta, lateMove, invalidTimestamp, current],
+    [],
+    checkpoint,
+  );
+
+  assert.deepEqual(result.blocked.map(item => item.opId).sort(), ['invalid-ts', 'late-delta', 'late-move']);
+  assert.deepEqual(result.sendable.map(item => item.opId), ['current']);
+  assert.deepEqual(result.remaining.map(item => item.opId).sort(), ['current', 'invalid-ts', 'late-delta', 'late-move']);
 });
 
 test('record-effect anchor lets a post-cutoff edit continue an archived mutation chain', () => {

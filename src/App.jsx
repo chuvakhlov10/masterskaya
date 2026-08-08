@@ -21,6 +21,7 @@ import {
   mergeStockOps,
   normalizeStockCheckpoint,
   normalizeStockJournal,
+  reconcileStockOutboxWithHistory,
 } from "./sync-core.js";
 import { APP_VERSION, deriveSyncView, normalizeBackupStatus } from "./status-core.js";
 
@@ -1657,9 +1658,23 @@ export default function App(){
   useEffect(() => { stockOpsRef.current = stockOps; }, [stockOps]);
   const [, setStockCheckpoint] = useState(null);
   const stockCheckpointRef = useRef(null);
+  const stockArchiveHistoryRef = useRef({ epoch: 0, ops: [] });
+  const stockArchiveLoadRef = useRef(null);
+  const stockOutboxHistoryEpochRef = useRef(0);
+  const stockOutboxBlockedIdsRef = useRef(new Set());
+  const stockOutboxBlockedCountRef = useRef(0);
   const stockReadyRef = useRef(false);
   function activateStockCheckpoint(value) {
     const normalized = normalizeStockCheckpoint(value);
+    const previousEpoch = Number(stockCheckpointRef.current?.epoch) || 0;
+    const nextEpoch = Number(normalized?.epoch) || 0;
+    if (previousEpoch !== nextEpoch) {
+      stockArchiveHistoryRef.current = { epoch: 0, ops: [] };
+      stockArchiveLoadRef.current = null;
+      stockOutboxHistoryEpochRef.current = 0;
+      stockOutboxBlockedIdsRef.current = new Set();
+      stockOutboxBlockedCountRef.current = 0;
+    }
     stockCheckpointRef.current = normalized;
     setStockCheckpoint(normalized);
     return normalized;
@@ -1702,20 +1717,91 @@ export default function App(){
     }
     throw lastError || new Error("STOCK_ARCHIVE_PAIR_UNAVAILABLE");
   }
+
+  async function loadStockArchiveHistory(checkpoint) {
+    const normalized = normalizeStockCheckpoint(checkpoint);
+    if (!normalized) return [];
+    if (stockArchiveHistoryRef.current.epoch === normalized.epoch) {
+      return stockArchiveHistoryRef.current.ops;
+    }
+    if (stockArchiveLoadRef.current?.epoch === normalized.epoch) {
+      return stockArchiveLoadRef.current.promise;
+    }
+
+    const promise = (async () => {
+      const files = Array.isArray(normalized.archive?.files) ? normalized.archive.files : [];
+      const expectedTotal = Number(normalized.archive?.opCount);
+      if (Number.isFinite(expectedTotal) && expectedTotal > 0 && files.length === 0) {
+        throw new Error("STOCK_ARCHIVE_MANIFEST_MISSING");
+      }
+
+      const seenMonths = new Set();
+      const archiveParts = await Promise.all(files.map(async file => {
+        const month = String(file?.month || "");
+        if (!/^\d{4}-\d{2}$/.test(month) || seenMonths.has(month)) {
+          throw new Error("STOCK_ARCHIVE_MANIFEST_INVALID");
+        }
+        seenMonths.add(month);
+        const operations = await stockArchiveGet(month);
+        if (!Array.isArray(operations)) throw new Error(`STOCK_ARCHIVE_UNAVAILABLE:${month}`);
+        const expectedFileCount = Number(file?.opCount);
+        if (Number.isFinite(expectedFileCount) && operations.length !== expectedFileCount) {
+          throw new Error(`STOCK_ARCHIVE_COUNT_MISMATCH:${month}`);
+        }
+        return operations;
+      }));
+      const archiveOps = archiveParts.flat();
+      if (Number.isFinite(expectedTotal) && archiveOps.length !== expectedTotal) {
+        throw new Error("STOCK_ARCHIVE_TOTAL_MISMATCH");
+      }
+      const uniqueOps = mergeStockOps([], archiveOps);
+      if (uniqueOps.length !== archiveOps.length) throw new Error("STOCK_ARCHIVE_DUPLICATE_OP_ID");
+      stockArchiveHistoryRef.current = { epoch: normalized.epoch, ops: uniqueOps };
+      return uniqueOps;
+    })();
+
+    stockArchiveLoadRef.current = { epoch: normalized.epoch, promise };
+    try {
+      return await promise;
+    } finally {
+      if (stockArchiveLoadRef.current?.promise === promise) stockArchiveLoadRef.current = null;
+    }
+  }
+
+  async function reconcileStockOutboxAgainstHistory(serverOps, checkpoint) {
+    const normalized = normalizeStockCheckpoint(checkpoint);
+    const archiveOps = await loadStockArchiveHistory(normalized);
+    const knownOps = [
+      ...(Array.isArray(serverOps) ? serverOps : []),
+      ...archiveOps,
+    ];
+    const result = reconcileStockOutboxWithHistory(
+      getStockOutbox(),
+      knownOps,
+      normalized,
+    );
+    if (result.confirmed.length > 0) {
+      removeStockOutboxIds(new Set(result.confirmed.map(op => op.opId).filter(Boolean)));
+    }
+    stockOutboxHistoryEpochRef.current = Number(normalized?.epoch) || 0;
+    const remaining = getStockOutbox();
+    const pendingResult = reconcileStockOutboxWithHistory(remaining, [], normalized);
+    stockOutboxBlockedIdsRef.current = new Set(pendingResult.blocked.map(op => op?.opId).filter(Boolean));
+    stockOutboxBlockedCountRef.current = pendingResult.blocked.length;
+    unsyncedOpsRef.current = new Set(remaining.map(op => op?.opId).filter(Boolean));
+    setPendingCount(getQueue().length + remaining.length);
+    if (pendingResult.blocked.length > 0) {
+      setLastSyncError(`В очереди ${pendingResult.blocked.length} старых складских операций. Их автоматическая отправка заблокирована до проверки.`);
+    }
+    return pendingResult;
+  }
+
   function prepareStockOutbox(items) {
     const outbox = Array.isArray(items) ? items : [];
     const checkpoint = stockCheckpointRef.current;
     if (!checkpoint) return outbox;
-    const late = classifyLateStockOps(checkpoint, outbox);
-    const safeIds = new Set(late.safe.map(op => op?.opId).filter(Boolean));
-    let changed = false;
-    const prepared = outbox.map(op => {
-      if (!safeIds.has(op?.opId) || Number(op.archiveEpoch) === checkpoint.epoch) return op;
-      changed = true;
-      return { ...op, archiveEpoch: checkpoint.epoch };
-    });
-    if (changed) setStockOutbox(prepared);
-    return prepared;
+    if (stockOutboxHistoryEpochRef.current !== checkpoint.epoch) return [];
+    return reconcileStockOutboxWithHistory(outbox, [], checkpoint).sendable;
   }
   const [stock, setStock] = useState({ main: {}, ws: { SMART: {}, Бегемот: {} } });
   const stockMain = stock.main || {};
@@ -2211,20 +2297,10 @@ export default function App(){
       return { ok: false, throttled: true };
     }
 
-    const outbox = prepareStockOutbox(getStockOutbox());
-    if (outbox.length === 0) {
+    const initialOutbox = getStockOutbox();
+    if (initialOutbox.length === 0) {
       unsyncedOpsRef.current.clear();
       const result = { ok: true, queued: false, value: stockOpsRef.current };
-      resolveStockWaiters(result);
-      return result;
-    }
-
-    const late = classifyLateStockOps(stockCheckpointRef.current, outbox);
-    if (late.blocking.length > 0) {
-      const error = "STOCK_ARCHIVE_LATE_OPERATION_REQUIRES_REVIEW";
-      setLastSyncError("В очереди есть старая неаддитивная складская операция. Автоматическая отправка остановлена, чтобы не исказить остатки.");
-      setSyncStatus("idle");
-      const result = { ok: true, queued: true, error, value: stockOpsRef.current };
       resolveStockWaiters(result);
       return result;
     }
@@ -2239,21 +2315,35 @@ export default function App(){
         scheduleStockRetry();
         return finalResult;
       }
-
       let remote = [];
+      let outbox = [];
       try {
         const stockPair = await readConsistentStockPair({ allowCache: false });
         activateStockCheckpoint(stockPair.checkpoint);
         remote = stockPair.journal.ops;
+        await reconcileStockOutboxAgainstHistory(remote, stockPair.checkpoint);
+        outbox = prepareStockOutbox(getStockOutbox());
       } catch (error) {
         syncRetriesRef.current++;
-        console.warn('[syncStockOps] Не удалось прочитать сервер:', error.message);
+        console.warn('[syncStockOps] Не удалось сверить серверную историю:', error.message);
         scheduleStockRetry();
         return { ok: true, queued: true, error: error.message };
       }
 
-      const localWithOutbox = mergeStockOps(stockOpsRef.current, outbox);
-      const opsToSave = mergeStockOps(remote, localWithOutbox);
+      if (outbox.length === 0) {
+        const blockedCount = stockOutboxBlockedCountRef.current;
+        const error = blockedCount > 0 ? "STOCK_ARCHIVE_OUTBOX_REVIEW_REQUIRED" : null;
+        if (blockedCount > 0) {
+          setLastSyncError(`В очереди ${blockedCount} старых складских операций. Их автоматическая отправка заблокирована до проверки.`);
+          setSyncStatus("idle");
+        } else {
+          setSyncStatus(wsConnectedRef.current ? "ws" : "synced");
+        }
+        finalResult = { ok: true, queued: blockedCount > 0, error, value: stockOpsRef.current };
+        return finalResult;
+      }
+
+      const opsToSave = mergeStockOps(remote, outbox);
       const result = await sSet("stock-ops", encodeStockJournal(opsToSave), {
         durableQueue: false,
         mergeFn: (remoteValue, localValue) =>
@@ -2263,24 +2353,30 @@ export default function App(){
 
       if (result?.ok && !result.queued) {
         const committedOps = readStockJournal(result.value).ops;
-        const committedIds = new Set(committedOps.map(op => op?.opId).filter(Boolean));
-        const confirmedIds = new Set(outbox.filter(op => committedIds.has(op.opId)).map(op => op.opId));
-        const remainingOutbox = removeStockOutboxIds(confirmedIds);
+        await reconcileStockOutboxAgainstHistory(committedOps, stockCheckpointRef.current);
+        const remainingOutbox = getStockOutbox();
         unsyncedOpsRef.current = new Set(remainingOutbox.map(op => op.opId).filter(Boolean));
+        const sendableRemaining = prepareStockOutbox(remainingOutbox);
+        const projectedOps = mergeStockOps(committedOps, sendableRemaining);
 
-        stockOpsRef.current = committedOps;
-        persistStockSnapshot(committedOps);
-        const committedStock = calculateStock(committedOps);
+        stockOpsRef.current = projectedOps;
+        persistStockSnapshot(projectedOps);
+        const committedStock = calculateStock(projectedOps);
         stockRef.current = committedStock;
-        setStockOps(committedOps);
+        setStockOps(projectedOps);
         setStock(committedStock);
         syncRetriesRef.current = 0;
         publishCommittedChange("stock-ops");
-        setSyncStatus(wsConnectedRef.current ? "ws" : "synced");
 
-        if (remainingOutbox.length > 0) {
+        if (sendableRemaining.length > 0) {
           syncRetriesRef.current++;
           scheduleStockRetry();
+        }
+        if (stockOutboxBlockedCountRef.current > 0) {
+          setLastSyncError(`В очереди ${stockOutboxBlockedCountRef.current} старых складских операций. Их автоматическая отправка заблокирована до проверки.`);
+          setSyncStatus("idle");
+        } else {
+          setSyncStatus(wsConnectedRef.current ? "ws" : "synced");
         }
       } else {
         syncRetriesRef.current++;
@@ -2308,8 +2404,21 @@ export default function App(){
 // другого файла приложения больше не блокирует получение нового остатка.
 function applyServerStockOps(serverValue, checkpoint = stockCheckpointRef.current) {
   if (checkpoint !== stockCheckpointRef.current) activateStockCheckpoint(checkpoint);
-  const outbox = prepareStockOutbox(getStockOutbox());
   const normalizedServerOps = readStockJournal(serverValue).ops;
+  const rawOutbox = getStockOutbox();
+  const serverIds = new Set(normalizedServerOps.map(op => op?.opId).filter(Boolean));
+  const confirmed = new Set(rawOutbox.filter(op => serverIds.has(op.opId)).map(op => op.opId));
+  const remainingOutbox = removeStockOutboxIds(confirmed);
+  const remainingIds = new Set(remainingOutbox.map(op => op?.opId).filter(Boolean));
+  stockOutboxBlockedIdsRef.current = new Set(
+    [...stockOutboxBlockedIdsRef.current].filter(opId => remainingIds.has(opId)),
+  );
+  if (stockOutboxHistoryEpochRef.current === Number(stockCheckpointRef.current?.epoch)) {
+    stockOutboxBlockedCountRef.current = reconcileStockOutboxWithHistory(
+      remainingOutbox, [], stockCheckpointRef.current,
+    ).blocked.length;
+  }
+  const outbox = prepareStockOutbox(remainingOutbox);
   const mergedOps = mergeStockOps(normalizedServerOps, outbox);
   stockOpsRef.current = mergedOps;
   persistStockSnapshot(mergedOps);
@@ -2318,12 +2427,9 @@ function applyServerStockOps(serverValue, checkpoint = stockCheckpointRef.curren
   setStockOps(mergedOps);
   setStock(mergedStock);
 
-  const serverIds = new Set(normalizedServerOps.map(op => op?.opId).filter(Boolean));
-  const confirmed = new Set(outbox.filter(op => serverIds.has(op.opId)).map(op => op.opId));
-  const remainingOutbox = removeStockOutboxIds(confirmed);
   unsyncedOpsRef.current = new Set(remainingOutbox.map(op => op.opId).filter(Boolean));
   setPendingCount(getQueue().length + remainingOutbox.length);
-  if (remainingOutbox.length > 0) scheduleStockSync(250, false);
+  if (prepareStockOutbox(remainingOutbox).length > 0) scheduleStockSync(250, false);
   return mergedOps;
 }
 
@@ -2337,8 +2443,10 @@ async function refreshStockFromServer() {
   isStockRefreshingRef.current = true;
   try {
     const stockPair = await readConsistentStockPair({ allowCache: false });
+    activateStockCheckpoint(stockPair.checkpoint);
+    await reconcileStockOutboxAgainstHistory(stockPair.journal.ops, stockPair.checkpoint);
     const mergedOps = applyServerStockOps(stockPair.rawJournal, stockPair.checkpoint);
-    setSyncStatus(wsConnectedRef.current ? "ws" : "synced");
+    setSyncStatus(stockOutboxBlockedCountRef.current > 0 ? "idle" : (wsConnectedRef.current ? "ws" : "synced"));
     return { ok: true, value: mergedOps };
   } catch (error) {
     setLastSyncError(error.message || "Ошибка обновления склада");
@@ -2572,6 +2680,8 @@ async function refreshStockFromServer() {
           try { localStorage.setItem("records_local", JSON.stringify(mergedRecords)); } catch {}
         }
 
+        activateStockCheckpoint(stockPair.checkpoint);
+        await reconcileStockOutboxAgainstHistory(stockPair.journal.ops, stockPair.checkpoint);
         applyServerStockOps(stockPair.rawJournal, stockPair.checkpoint);
 
         const nextPrices = mergePending("prices", ensureObj(p));
@@ -2826,6 +2936,7 @@ async function refreshStockFromServer() {
       }
       activateStockCheckpoint(stockPair.checkpoint);
       const serverStockOps = stockPair.journal.ops;
+      await reconcileStockOutboxAgainstHistory(serverStockOps, stockPair.checkpoint);
       // Восстанавливаем только подтверждённые сервером записи + явную
       // локальную очередь. Для совместимости один раз подхватываем records_local,
       // созданный старой версией до появления durable queue.
@@ -2870,7 +2981,8 @@ async function refreshStockFromServer() {
         }
 
         const alreadyConfirmed = new Set(outbox.filter(op => serverIds.has(op.opId)).map(op => op.opId));
-        outbox = removeStockOutboxIds(alreadyConfirmed);
+        removeStockOutboxIds(alreadyConfirmed);
+        outbox = prepareStockOutbox(getStockOutbox());
         const merged = mergeStockOps(serverStockOps, outbox);
         stockOpsRef.current = merged;
         persistStockSnapshot(merged);
@@ -2878,9 +2990,9 @@ async function refreshStockFromServer() {
         stockRef.current = mergedStock;
         setStockOps(merged);
         setStock(mergedStock);
-        unsyncedOpsRef.current = new Set(outbox.map(op => op?.opId).filter(Boolean));
+        unsyncedOpsRef.current = new Set(getStockOutbox().map(op => op?.opId).filter(Boolean));
         if(outbox.length > 0) scheduleStockSync(1_000);
-        console.log(`[STOCK] Сервер: ${serverStockOps.length}, outbox: ${outbox.length}, итог: ${merged.length}`);
+        console.log(`[STOCK] Сервер: ${serverStockOps.length}, к отправке: ${outbox.length}, заблокировано: ${stockOutboxBlockedCountRef.current}, итог: ${merged.length}`);
       } else {
         // Миграция: читаем старые данные
         let oldStock = null;
@@ -3092,6 +3204,9 @@ async function refreshStockFromServer() {
       await loadBackupStatus();
       const remaining = getQueue().length + getStockOutbox().length;
       setPendingCount(remaining);
+      if (stockOutboxBlockedCountRef.current > 0) {
+        throw new Error(`В очереди ${stockOutboxBlockedCountRef.current} старых складских операций. Автоматическая отправка заблокирована до проверки.`);
+      }
       if (remaining > 0) throw new Error(`Осталось операций в очереди: ${remaining}`);
       setSyncStatus(wsConnectedRef.current ? "ws" : "synced");
     } catch(error) {
