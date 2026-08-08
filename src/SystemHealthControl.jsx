@@ -5,6 +5,7 @@ import { checkServerHealth, healthErrorText } from "./server-health.js";
 import {
   buildDiagnosticReport,
   collectClientDiagnostics,
+  deriveStorageRequestState,
 } from "./diagnostics.js";
 
 const palette = {
@@ -47,6 +48,14 @@ function serviceState(service) {
     return { label: "Требует внимания", color: palette.warning };
   }
   return { label: "Работает", color: palette.success };
+}
+
+function conflictStateLabel(value) {
+  if (value === "pending") return "Выполняется повтор записи";
+  if (value === "resolved") return "Автоматически разрешён";
+  if (value === "failed") return "Не удалось разрешить";
+  if (value === "historical") return "Старая запись в истории";
+  return "нет";
 }
 
 function Card({ title, status, statusColor, children }) {
@@ -178,6 +187,12 @@ export default function SystemHealthControl() {
     : backup?.available
       ? { label: "Требует внимания", color: palette.warning }
       : { label: "Нет данных", color: palette.sub };
+  const storageRequestState = deriveStorageRequestState(client?.storage);
+  const storageRequestColor = storageRequestState.kind === "error"
+    ? palette.danger
+    : storageRequestState.kind === "warning" || storageRequestState.kind === "history"
+      ? palette.warning
+      : palette.success;
 
   return (
     <>
@@ -229,13 +244,20 @@ export default function SystemHealthControl() {
               )}
 
               {client && (
-                <Card title="Запросы к хранилищу" status={client.storage.lastStorageErrorCode ? "Есть журнал ошибки" : "Без ошибок"} statusColor={client.storage.lastStorageErrorCode ? palette.warning : palette.success}>
+                <Card title="Запросы к хранилищу" status={storageRequestState.label} statusColor={storageRequestColor}>
                   <Row label="Последний успешный запрос" value={formatDate(client.storage.lastStorageSuccessAt)} />
-                  <Row label="Последняя операция" value={client.storage.lastStorageOperation || "нет данных"} />
-                  <Row label="Последняя ошибка" value={client.storage.lastStorageErrorCode || "нет"} valueColor={client.storage.lastStorageErrorCode ? "#fca5a5" : palette.text} />
-                  <Row label="Время ошибки" value={formatDate(client.storage.lastStorageErrorAt)} />
-                  <Row label="Повторов в последнем запросе" value={client.storage.lastStorageRetries} />
-                  <Row label="Повторов всего" value={client.storage.totalStorageRetries} />
+                  <Row label="Успешная операция" value={client.storage.lastStorageSuccessOperation || "нет данных"} />
+                  <Row label="Активная ошибка" value={client.storage.activeStorageErrorCode || "нет"} valueColor={client.storage.activeStorageErrorCode ? "#fca5a5" : palette.text} />
+                  <Row label="Последовательных окончательных ошибок" value={client.storage.consecutiveStorageFailures} valueColor={client.storage.consecutiveStorageFailures ? "#fca5a5" : palette.text} />
+                  <Row label="Последняя ошибка в истории" value={client.storage.lastStorageErrorCode || "нет"} />
+                  <Row label="Операция с ошибкой" value={client.storage.lastStorageErrorOperation || "нет данных"} />
+                  <Row label="Время последней ошибки" value={formatDate(client.storage.lastStorageErrorAt)} />
+                  <Row label="Состояние последнего конфликта" value={conflictStateLabel(client.storage.lastStorageConflictState)} valueColor={client.storage.lastStorageConflictState === "failed" ? "#fca5a5" : palette.text} />
+                  <Row label="Операция конфликта" value={client.storage.lastStorageConflictOperation || "нет данных"} />
+                  <Row label="Время конфликта" value={formatDate(client.storage.lastStorageConflictAt)} />
+                  <Row label="Разрешённых конфликтов за всё время" value={client.storage.totalResolvedStorageConflicts} />
+                  <Row label="Сетевых автоповторов в последнем запросе" value={client.storage.lastStorageRetries} />
+                  <Row label="Сетевых автоповторов за всё время" value={client.storage.totalStorageRetries} />
                 </Card>
               )}
 
