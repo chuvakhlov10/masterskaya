@@ -9,6 +9,7 @@ import {
   classifyLateStockOps,
   createObjectPatch,
   createStockJournal,
+  findRecordsMissingCreateEffect,
   findRecordIndex,
   recordRevision,
   sameRecordVersion,
@@ -1656,6 +1657,7 @@ export default function App(){
   useEffect(() => { stockOpsRef.current = stockOps; }, [stockOps]);
   const [, setStockCheckpoint] = useState(null);
   const stockCheckpointRef = useRef(null);
+  const stockReadyRef = useRef(false);
   function activateStockCheckpoint(value) {
     const normalized = normalizeStockCheckpoint(value);
     stockCheckpointRef.current = normalized;
@@ -2413,6 +2415,7 @@ async function refreshStockFromServer() {
         recordsRef.current = merged;
         setRecords(merged);
         try { localStorage.setItem("records_local", JSON.stringify(merged)); } catch {}
+        repairMissingCreateRecordEffects(merged, "remote-records");
       },
       "prices": (value) => { pricesRef.current = ensureObj(mergeServerWithPending("prices", value)); setPrices(pricesRef.current); },
       "stock-ops": (ops) => {
@@ -2947,6 +2950,8 @@ async function refreshStockFromServer() {
           setStock({ main: {}, ws: { SMART: {}, Бегемот: {} } });
         }
       }
+      stockReadyRef.current = true;
+      repairMissingCreateRecordEffects(recordsRef.current, "startup");
       
       if(Array.isArray(mvs)) setStockMoves(mvs);
       if(sCfg && typeof sCfg === "object" && !Array.isArray(sCfg)) setStockCfg(sCfg);
@@ -3235,12 +3240,45 @@ async function refreshStockFromServer() {
     });
   }
 
+  function repairMissingCreateRecordEffects(candidateRecords, reason){
+    if(!stockReadyRef.current) return 0;
+    const checkpointAnchors = stockCheckpointRef.current?.recordEffectAnchors || [];
+    const knownOps = mergeStockOps(stockOpsRef.current, prepareStockOutbox(getStockOutbox()));
+    const missing = findRecordsMissingCreateEffect(candidateRecords, knownOps, checkpointAnchors);
+    if(missing.length === 0) return 0;
+    if(missing.length > 25){
+      console.error(`[record-effect-repair] Остановлено массовое восстановление (${missing.length}), причина: ${reason}`);
+      setLastSyncError("Найдены несогласованные продажи. Автоматическое восстановление остановлено для безопасной проверки.");
+      return 0;
+    }
+
+    let repaired = 0;
+    for(const record of missing){
+      const staged = stageRecordEffect({
+        kind: "create",
+        beforeRecord: null,
+        afterRecord: record,
+        mutationId: record.lastMutationId,
+        revision: 1,
+        now: Number(record.updatedAt || record.timestamp || Date.now()),
+      });
+      if(staged.ok) repaired++;
+    }
+    if(repaired > 0){
+      console.warn(`[record-effect-repair] Восстановлено: ${repaired}, причина: ${reason}`);
+      scheduleStockSync(0);
+    }
+    return repaired;
+  }
+
   function checkCommittedRecordMutation(result, recordId, mutationId){
     if(!result || result.queued || !Array.isArray(result.value)) return;
     const committed = result.value.find(record => record?.id === recordId);
     if(committed && committed.lastMutationId !== mutationId){
       alert("Эта запись одновременно менялась на другом устройстве. Применён более новый вариант; откройте запись заново.");
+      return;
     }
+    if(committed) repairMissingCreateRecordEffects([committed], "record-commit");
   }
 
   // ── добавление записи ──

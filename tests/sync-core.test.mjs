@@ -8,6 +8,7 @@ import {
   createStockJournal,
   createObjectPatch,
   createStockArchivePlan,
+  findRecordsMissingCreateEffect,
   findRecordIndex,
   legacyRecordFingerprint,
   recordRevision,
@@ -277,6 +278,37 @@ test('record-effect retry is idempotent by deterministic opId', () => {
   const merged = mergeStockOps([effect], [{ ...effect }]);
   assert.equal(merged.length, 1);
   assert.equal(applyOpsToStock(merged).main.TEST, -2);
+});
+
+test('missing first-revision record effect is detected for automatic recovery', () => {
+  const record = {
+    id: 'rec-1786174483531-awbq6o', workshop: 'Бегемот', category: 'Вертикальные',
+    marker: 'Apex-02', qty: 2, defect: 0, amount: 700, recordType: 'sale',
+    timestamp: 1786174483531, updatedAt: 1786174483531, revision: 1,
+    lastMutationId: 'mut-rec-1786174483531-awbq6o-1786174483531-c4vatk',
+  };
+
+  assert.deepEqual(findRecordsMissingCreateEffect([record], [], []), [record]);
+});
+
+test('existing hot operation or checkpoint anchor prevents create-effect repair', () => {
+  const record = {
+    id: 'rec-1', revision: 1, timestamp: 10, updatedAt: 10,
+    lastMutationId: 'mut-rec-1-10-abc123',
+  };
+  const effect = op({
+    type: 'record-effect', opId: 'record-effect:mut-rec-1-10-abc123',
+    recordId: 'rec-1', mutationId: 'mut-rec-1-10-abc123',
+  });
+
+  assert.deepEqual(findRecordsMissingCreateEffect([record], [effect], []), []);
+  assert.deepEqual(findRecordsMissingCreateEffect([record], [], [effect]), []);
+});
+
+test('automatic repair ignores edits and records with untrusted mutation ids', () => {
+  const edit = { id: 'rec-edit', revision: 2, lastMutationId: 'mut-rec-edit-20-edit' };
+  const malformed = { id: 'rec-bad', revision: 1, lastMutationId: 'some-other-record' };
+  assert.deepEqual(findRecordsMissingCreateEffect([edit, malformed], [], []), []);
 });
 
 test('one record edit atomically returns old effect and applies new effect', () => {

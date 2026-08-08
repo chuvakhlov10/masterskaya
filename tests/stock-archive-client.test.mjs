@@ -30,3 +30,10 @@ test('checkpoint disables the one-time legacy cache promotion', () => {
 test('every storage request advertises archive-aware protocol 4', () => {
   assert.match(gatewaySource, /storageProtocolVersion: 4/);
 });
+
+test('client repairs a missing create effect after startup, remote merge and record commit', () => {
+  assert.match(appSource, /findRecordsMissingCreateEffect\(candidateRecords, knownOps, checkpointAnchors\)/);
+  assert.match(appSource, /repairMissingCreateRecordEffects\(recordsRef\.current, "startup"\)/);
+  assert.match(appSource, /repairMissingCreateRecordEffects\(merged, "remote-records"\)/);
+  assert.match(appSource, /repairMissingCreateRecordEffects\(\[committed\], "record-commit"\)/);
+});

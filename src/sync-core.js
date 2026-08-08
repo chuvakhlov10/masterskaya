@@ -70,6 +70,30 @@ export function recordRevision(record) {
   return record.id ? 1 : 0;
 }
 
+export function findRecordsMissingCreateEffect(records, stockOps, recordEffectAnchors = []) {
+  const knownOpIds = new Set(
+    [...(Array.isArray(stockOps) ? stockOps : []),
+      ...(Array.isArray(recordEffectAnchors) ? recordEffectAnchors : [])]
+      .map(op => typeof op?.opId === "string" ? op.opId : "")
+      .filter(Boolean),
+  );
+  const seenRecordIds = new Set();
+  const missing = [];
+
+  for (const record of Array.isArray(records) ? records : []) {
+    if (!record || typeof record !== "object" || typeof record.id !== "string" || !record.id) continue;
+    if (seenRecordIds.has(record.id) || recordRevision(record) !== 1) continue;
+    seenRecordIds.add(record.id);
+
+    const mutationId = typeof record.lastMutationId === "string" ? record.lastMutationId.trim() : "";
+    if (!mutationId || !mutationId.startsWith(`mut-${record.id}-`)) continue;
+    if (knownOpIds.has(`record-effect:${mutationId}`)) continue;
+    missing.push(record);
+  }
+
+  return missing;
+}
+
 export function sameRecordVersion(current, opened) {
   if (!current || !opened || typeof current !== "object" || typeof opened !== "object") return false;
   if (current.id || opened.id) {
