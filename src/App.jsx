@@ -618,7 +618,7 @@ function MarkerPicker({ markers, value, onChange, extraLabel }){
             const isCollapsed = !search ? (collapsed[cat] !== false) : false;
             return (
             <div key={cat}>
-              <div onClick={()=>setCollapsed(p=>({...p,[cat]:!p[cat]}))}
+              <div onClick={()=>setCollapsed(p=>({...p,[cat]:p[cat]===false}))}
                 style={{padding:"6px 12px",fontSize:11,fontWeight:800,color:C.text,background:C.bgSection,
                 borderBottom:`1px solid ${C.border}`,textTransform:"uppercase",letterSpacing:"1px",cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                 <span>{cat}</span>
@@ -626,11 +626,11 @@ function MarkerPicker({ markers, value, onChange, extraLabel }){
               </div>
               {!isCollapsed && ms.map(m=>(
                 <div key={m} onClick={()=>{onChange(m);setSearch("");}}
-                  style={{padding:"8px 14px",fontSize:13,cursor:"pointer",display:"flex",justifyContent:"space-between",
+                  style={{padding:"8px 14px",fontSize:13,cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,
                     background:value===m?C.brandDim:"transparent",color:value===m?C.brand:C.text,
                     borderBottom:`1px solid ${C.border}22`}}>
-                  <span>{m}</span>
-                  {extraLabel&&<span style={{color:C.text,fontSize:12,fontWeight:600}}>{extraLabel(m)}</span>}
+                  <span style={{flex:1,minWidth:0,overflowWrap:"anywhere"}}>{m}</span>
+                  {extraLabel&&<span style={{color:C.text,fontSize:12,fontWeight:600,flexShrink:0,whiteSpace:"nowrap"}}>{extraLabel(m)}</span>}
                 </div>
               ))}
             </div>
@@ -1904,9 +1904,9 @@ export default function App(){
   const [statsDate, setStatsDate] = useState(todayStr());
 
   // склад
-  const [stockTab, setStockTab] = useState("ws");
+  const [stockTab, setStockTab] = useState("ws:SMART");
   // Запоминаем позицию скролла для каждой вкладки склада
-  const stockScrollRef = useRef({}); // {ws: 0, main: 0, move: 0}
+  const stockScrollRef = useRef({}); // {"ws:SMART": 0, "ws:Бегемот": 0, main: 0, move: 0}
   const switchStockTab = (newTab) => {
     // Сохраняем позицию текущей вкладки
     stockScrollRef.current[stockTab] = window.scrollY;
@@ -3101,10 +3101,7 @@ async function refreshStockFromServer() {
       try{
         const savedAuth = localStorage.getItem(LOCAL_AUTH_KEY);
         const savedWs = localStorage.getItem(LOCAL_WS_KEY);
-        if(savedAuth==="1" && savedWs && WORKSHOPS.includes(savedWs)){
-          setWorkshop(savedWs);
-          setAuthed(true);
-        }
+        if(savedAuth==="1" && savedWs && WORKSHOPS.includes(savedWs)) selectWorkshop(savedWs);
       }catch{}
       } catch (e) {
         console.error('[INIT] Ошибка при загрузке:', e);
@@ -3160,31 +3157,33 @@ async function refreshStockFromServer() {
   },[marker]);
 
   // ── авторизация ──
+  function selectWorkshop(ws){
+    if(!WORKSHOPS.includes(ws)) return;
+    setWorkshop(ws);
+    setStockTab(`ws:${ws}`);
+    setAuthed(true);
+    try{
+      localStorage.setItem(LOCAL_WS_KEY, ws);
+      localStorage.setItem(LOCAL_AUTH_KEY, "1");
+    }catch{}
+  }
+
   async function handleLogin(){
     setAuthError("");
     if(!passwordInput){ setAuthError("Введите пароль"); return; }
     const hash = await sha256(passwordInput);
     for(const ws of WORKSHOPS){
       if(passwords[ws] === hash){
-        setWorkshop(ws);
-        setAuthed(true);
-        try{
-          localStorage.setItem(LOCAL_WS_KEY, ws);
-          localStorage.setItem(LOCAL_AUTH_KEY, "1");
-        }catch{}
+        selectWorkshop(ws);
         setPasswordInput("");
         return;
       }
     }
     setAuthError("Неверный пароль");
   }
-  function handleLogout(){
-    setAuthed(false);
-    setWorkshop(null);
-    try{
-      localStorage.removeItem(LOCAL_WS_KEY);
-      localStorage.removeItem(LOCAL_AUTH_KEY);
-    }catch{}
+  function handleSwitchWorkshop(){
+    const nextWorkshop = workshop === "SMART" ? "Бегемот" : "SMART";
+    selectWorkshop(nextWorkshop);
   }
 
   function handleFullLogout(){
@@ -3983,7 +3982,7 @@ async function refreshStockFromServer() {
     );
   }
 
-  function renderStockCategory(cat, stockObj, isWS){
+  function renderStockCategory(cat, stockObj, location){
     // «Прочие услуги» — не показываем в складах (это услуги, не заготовки)
     if(cat === "Прочие услуги") return null;
     const ms = (markers[cat]||[]).filter(m => !isServiceMarker(m, cat));
@@ -4076,7 +4075,7 @@ async function refreshStockFromServer() {
                     // Кнопки +/- → delta (не конфликтует, складывается с действиями отца)
                     silentSaveDelta={async (delta) => {
                       appendStockOp("delta", {
-                        location: isWS ? `ws:${workshop}` : "main",
+                        location,
                         marker: m,
                         delta,
                       });
@@ -4646,7 +4645,7 @@ async function refreshStockFromServer() {
         {WORKSHOPS.map(ws=>{
           const wsCol = ws==="SMART"?C.smart:C.begemot;
           return (
-            <button key={ws} onClick={()=>{setWorkshop(ws);setAuthed(true);try{localStorage.setItem(LOCAL_WS_KEY,ws);localStorage.setItem(LOCAL_AUTH_KEY,"1");}catch{}}}
+            <button key={ws} onClick={()=>selectWorkshop(ws)}
               style={{
                 width:"100%",padding:"16px 0",fontSize:18,fontWeight:800,cursor:"pointer",
                 background:wsCol,color:"#fff",border:"none",borderRadius:0,marginBottom:10,
@@ -4880,7 +4879,7 @@ async function refreshStockFromServer() {
           </div>
           <div style={{display:"flex",gap:6,alignItems:"center"}}>
             <button onClick={downloadBackup} title="Скачать резервную копию всех данных" style={{background:"transparent",color:C.textSub,border:`1px solid ${C.border}`,padding:"6px 10px",fontSize:10,cursor:"pointer",borderRadius:0,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.5px"}}>💾</button>
-            <button onClick={handleLogout} title="Переключиться на другую мастерскую" style={{background:"transparent",color:C.textSub,border:`1px solid ${C.border}`,padding:"6px 10px",fontSize:10,cursor:"pointer",borderRadius:0,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.5px"}}>
+            <button onClick={handleSwitchWorkshop} title="Сразу переключиться на другую мастерскую" style={{background:"transparent",color:C.textSub,border:`1px solid ${C.border}`,padding:"6px 10px",fontSize:10,cursor:"pointer",borderRadius:0,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.5px"}}>
               🔄 → {workshop==="SMART" ? "Бегемот" : "SMART"}
             </button>
             <button onClick={handleFullLogout} title="Отключить это устройство" style={{background:"transparent",color:C.danger,border:`1px solid ${C.danger}`,padding:"6px 10px",fontSize:10,cursor:"pointer",borderRadius:0,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.5px"}}>🚪 Выйти</button>
@@ -5238,7 +5237,7 @@ async function refreshStockFromServer() {
         {tab==="stock"&&(
           <div>
             <div style={{display:"flex",gap:1,marginBottom:16,background:C.border,padding:1,position:"sticky",top:0,zIndex:10}}>
-              {[["ws",workshop],["main","Общий склад"],["move","Перемещение"]].map(([id,label])=>(
+              {[...WORKSHOPS.map(ws=>[`ws:${ws}`,ws]),["main","Общий склад"],["move","Перемещение"]].map(([id,label])=>(
                 <button key={id} onClick={()=>switchStockTab(id)} style={{
                   flex:1,padding:"12px 4px",fontSize:12,fontWeight:800,border:"none",cursor:"pointer",
                   background:stockTab===id?C.bgCard:C.bgSection,
@@ -5248,23 +5247,23 @@ async function refreshStockFromServer() {
                 }}>{label}</button>
               ))}
             </div>
-            {stockTab==="ws"&&(
-              <div>
-                <div style={{fontSize:13,color:C.textSub,marginBottom:10}}>Остатки · <b style={{color:wsColor}}>{workshop}</b></div>
+            {WORKSHOPS.map(ws=>stockTab===`ws:${ws}`&&(
+              <div key={ws}>
+                <div style={{fontSize:13,color:C.textSub,marginBottom:10}}>Остатки · <b style={{color:ws==="SMART"?C.smart:C.begemot}}>{ws}</b></div>
                 <StockControls search={stockSearch} setSearch={setStockSearch}
                   onExpandAll={()=>{const all={};sortedCategories(safeMarkers).forEach(c=>all[c]=true);setExpandedCats(all);}}
                   onCollapseAll={()=>setExpandedCats({})}/>
-                {sortedCategories(safeMarkers).map(cat=>renderStockCategory(cat,wsStock,true))}
+                {sortedCategories(safeMarkers).map(cat=>renderStockCategory(cat,ensureObj(safeStockWS[ws]),`ws:${ws}`))}
                 <div style={{fontSize:11,color:C.textDim,marginTop:4}}>«Прочие услуги» в складе не отображаются</div>
               </div>
-            )}
+            ))}
             {stockTab==="main"&&(
               <div>
                 <div style={{fontSize:13,color:C.textSub,marginBottom:10}}>Общий склад</div>
                 <StockControls search={stockSearch} setSearch={setStockSearch}
                   onExpandAll={()=>{const all={};sortedCategories(safeMarkers).forEach(c=>all[c]=true);setExpandedCats(all);}}
                   onCollapseAll={()=>setExpandedCats({})}/>
-                {sortedCategories(safeMarkers).map(cat=>renderStockCategory(cat,stockMain,false))}
+                {sortedCategories(safeMarkers).map(cat=>renderStockCategory(cat,stockMain,"main"))}
               </div>
             )}
             {stockTab==="move"&&(
@@ -5272,7 +5271,8 @@ async function refreshStockFromServer() {
                 <div style={{...s.card,marginBottom:16}}>
                   <div style={{fontSize:13,fontWeight:700,marginBottom:12}}>Поступление на общий склад</div>
                   <label style={s.label}>Маркировка</label>
-                  <MarkerPicker markers={safeMarkers} value={moveMarker} onChange={setMoveMarker}/>
+                  <MarkerPicker markers={safeMarkers} value={moveMarker} onChange={setMoveMarker}
+                    extraLabel={m=>`общий: ${safeStockMain[m]||0}`}/>
                   <label style={{...s.label,marginTop:10}}>Количество</label>
                   <StepperInput value={moveQty} onChange={setMoveQty} min={1} style={{marginBottom:10}}/>
                   <button onClick={async()=>{
@@ -5290,7 +5290,8 @@ async function refreshStockFromServer() {
                 <div style={s.card}>
                   <div style={{fontSize:13,fontWeight:700,marginBottom:12}}>Общий склад → Мастерская</div>
                   <label style={s.label}>Маркировка</label>
-                  <MarkerPicker markers={safeMarkers} value={moveMarker} onChange={setMoveMarker} extraLabel={m=>`склад: ${safeStockMain[m]||0}`}/>
+                  <MarkerPicker markers={safeMarkers} value={moveMarker} onChange={setMoveMarker}
+                    extraLabel={m=>`общий: ${safeStockMain[m]||0} · ${moveTo}: ${ensureObj(safeStockWS[moveTo])[m]||0}`}/>
                   <label style={{...s.label,marginTop:10}}>В мастерскую</label>
                   <select value={moveTo} onChange={e=>setMoveTo(e.target.value)} style={{...s.input,marginBottom:10}}>
                     {WORKSHOPS.map(w=><option key={w}>{w}</option>)}
