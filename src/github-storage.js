@@ -7,6 +7,10 @@ import {
   readStoredStorageSession,
   storageGatewayRequest,
 } from "./storage-gateway.js";
+import {
+  recordStorageConflictFailed,
+  recordStorageConflictResolved,
+} from "./diagnostics.js";
 
 const DATA_PREFIX = "data/";
 const PHOTO_PREFIX = "photos/";
@@ -56,6 +60,28 @@ function normalizeGatewayError(error) {
   const statusMatch = /^GATEWAY_HTTP_(\d{3})$/.exec(code);
   const status = statusMatch ? Number(statusMatch[1]) : error?.status;
   return makeError(code, Number.isInteger(status) ? status : undefined, error);
+}
+
+function isWriteConflict(error) {
+  return error?.status === 409 || error?.status === 422;
+}
+
+function conflictCode(error) {
+  return String(error?.code || error?.message || `GATEWAY_HTTP_${error?.status || 409}`);
+}
+
+function markConflictResolved(operation, attempts) {
+  if (attempts > 0) recordStorageConflictResolved({ operation, attempts });
+}
+
+function markConflictFailed(operation, attempts, lastConflictError, finalError) {
+  if (attempts <= 0) return;
+  recordStorageConflictFailed({
+    operation,
+    attempts,
+    code: conflictCode(lastConflictError),
+    activeCode: conflictCode(finalError),
+  });
 }
 
 // Все операции используют только подписанную сессию устройства.
@@ -148,7 +174,10 @@ function retryDelay(attempt) {
 export async function dbSet(key, value, mergeFn) {
   return withWriteQueue(key, async () => {
     const path = `${DATA_PREFIX}${keyToFileName(key)}.json`;
+    const operation = `PUT ${path}`;
     const maxAttempts = 6;
+    let conflictAttempts = 0;
+    let lastConflictError = null;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       if (attempt > 1) {
@@ -187,6 +216,7 @@ export async function dbSet(key, value, mergeFn) {
 
         const result = await ghRequest("PUT", path, requestBody);
         if (result?.content?.sha) shaCache[key] = result.content.sha;
+        markConflictResolved(operation, conflictAttempts);
         return {
           ok: true,
           merged: !!mergeFn,
@@ -194,10 +224,13 @@ export async function dbSet(key, value, mergeFn) {
           sha: result?.content?.sha || null,
         };
       } catch (error) {
-        if (error.status === 409 || error.status === 422) {
+        if (isWriteConflict(error)) {
+          conflictAttempts += 1;
+          lastConflictError = error;
           delete shaCache[key];
           if (attempt < maxAttempts) continue;
         }
+        markConflictFailed(operation, conflictAttempts, lastConflictError, error);
         console.error(`[dbSet] "${key}":`, error.message);
         return { ok: false, error: error.message, status: error.status };
       }
@@ -210,24 +243,42 @@ export async function dbSet(key, value, mergeFn) {
 export async function dbDelete(key) {
   return withWriteQueue(key, async () => {
     const path = `${DATA_PREFIX}${keyToFileName(key)}.json`;
+    const operation = `DELETE ${path}`;
+    let conflictAttempts = 0;
+    let lastConflictError = null;
     for (let attempt = 1; attempt <= 4; attempt++) {
       try {
         let existing;
         try { existing = await ghRequest("GET", path); }
         catch (error) {
-          if (error.status === 404) return { ok: true };
+          if (error.status === 404) {
+            markConflictResolved(operation, conflictAttempts);
+            return { ok: true };
+          }
           throw error;
         }
-        if (!existing?.sha) return { ok: true };
+        if (!existing?.sha) {
+          markConflictResolved(operation, conflictAttempts);
+          return { ok: true };
+        }
         await ghRequest("DELETE", path, { message: `delete ${key}`, sha: existing.sha });
         delete shaCache[key];
+        markConflictResolved(operation, conflictAttempts);
         return { ok: true };
       } catch (error) {
-        if ((error.status === 409 || error.status === 422) && attempt < 4) {
-          await wait(300 * attempt + Math.random() * 500);
-          continue;
+        if (isWriteConflict(error)) {
+          conflictAttempts += 1;
+          lastConflictError = error;
+          if (attempt < 4) {
+            await wait(300 * attempt + Math.random() * 500);
+            continue;
+          }
         }
-        if (error.status === 404) return { ok: true };
+        if (error.status === 404) {
+          markConflictResolved(operation, conflictAttempts);
+          return { ok: true };
+        }
+        markConflictFailed(operation, conflictAttempts, lastConflictError, error);
         console.warn(`[dbDelete] "${key}":`, error.message);
         return { ok: false, error: error.message };
       }
@@ -267,6 +318,9 @@ export async function photoGet(marker) {
 
 export async function photoSet(marker, base64data) {
   const path = photoPath(marker);
+  const operation = `PUT ${path}`;
+  let conflictAttempts = 0;
+  let lastConflictError = null;
   for (let attempt = 1; attempt <= 4; attempt++) {
     try {
       let existing = null;
@@ -275,12 +329,18 @@ export async function photoSet(marker, base64data) {
       const requestBody = { message: `photo: ${marker}`, content: encodeB64(base64data) };
       if (existing?.sha) requestBody.sha = existing.sha;
       await ghRequest("PUT", path, requestBody);
+      markConflictResolved(operation, conflictAttempts);
       return { ok: true };
     } catch (error) {
-      if ((error.status === 409 || error.status === 422) && attempt < 4) {
-        await wait(300 * attempt + Math.random() * 700);
-        continue;
+      if (isWriteConflict(error)) {
+        conflictAttempts += 1;
+        lastConflictError = error;
+        if (attempt < 4) {
+          await wait(300 * attempt + Math.random() * 700);
+          continue;
+        }
       }
+      markConflictFailed(operation, conflictAttempts, lastConflictError, error);
       console.error(`[photoSet] "${marker}":`, error.message);
       return { ok: false, error: error.message };
     }
@@ -292,19 +352,34 @@ export async function photoDelete(marker) {
   const paths = [...new Set([photoPath(marker), legacyPhotoPath(marker)])];
   let deleted = false;
   for (const path of paths) {
+    const operation = `DELETE ${path}`;
+    let conflictAttempts = 0;
+    let lastConflictError = null;
     for (let attempt = 1; attempt <= 4; attempt++) {
       try {
         const existing = await ghRequest("GET", path);
-        if (!existing?.sha) break;
+        if (!existing?.sha) {
+          markConflictResolved(operation, conflictAttempts);
+          break;
+        }
         await ghRequest("DELETE", path, { message: `delete photo: ${marker}`, sha: existing.sha });
         deleted = true;
+        markConflictResolved(operation, conflictAttempts);
         break;
       } catch (error) {
-        if (error.status === 404) break;
-        if ((error.status === 409 || error.status === 422) && attempt < 4) {
-          await wait(300 * attempt + Math.random() * 700);
-          continue;
+        if (error.status === 404) {
+          markConflictResolved(operation, conflictAttempts);
+          break;
         }
+        if (isWriteConflict(error)) {
+          conflictAttempts += 1;
+          lastConflictError = error;
+          if (attempt < 4) {
+            await wait(300 * attempt + Math.random() * 700);
+            continue;
+          }
+        }
+        markConflictFailed(operation, conflictAttempts, lastConflictError, error);
         console.warn(`[photoDelete] "${marker}":`, error.message);
         return { ok: false, error: error.message };
       }
