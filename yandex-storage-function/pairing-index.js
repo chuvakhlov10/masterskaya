@@ -298,6 +298,11 @@ function createHandler({
         return reply(200, { ok: true, devices, currentClientId: claims.clientId }, origin);
       }
 
+      if (action === 'device-diagnostics') {
+        const device = await auth.reportDiagnostics(claims, body.diagnostics, body.deviceName);
+        return reply(200, { ok: true, device }, origin);
+      }
+
       if (action === 'pairing-create') {
         const pairing = await auth.createPairing(claims, body.deviceName);
         return reply(200, { ok: true, ...pairing }, origin);

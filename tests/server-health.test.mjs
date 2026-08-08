@@ -54,7 +54,7 @@ test('storage health exposes safe version metadata without requiring a session',
   assert.equal(response.statusCode, 200);
   assert.equal(payload.ok, true);
   assert.equal(payload.service, 'masterskaya-storage-gateway');
-  assert.equal(payload.version, '1.5.0');
+  assert.equal(payload.version, '1.5.2');
   assert.equal(payload.protocolVersion, 4);
   assert.equal(payload.storageProtocolVersion, 4);
   assert.equal(payload.minimumStorageProtocol, 1);

@@ -86,6 +86,48 @@ test('connected device creates a code using only its shared session', async () =
   assert.deepEqual(JSON.parse(calls[0].body), { action: 'pairing-create', deviceName: 'Ноутбук' });
 });
 
+test('connected device reports only bounded queue counts for remote diagnostics', async () => {
+  const client = await loadModule();
+  const storage = new MemoryStorage({
+    masterskaya_storage_session_v1: JSON.stringify({
+      token: 'existing.session.token',
+      expiresAt: Date.now() + 60_000,
+      clientId: 'web-device-123456',
+    }),
+    masterskaya_device_name_v1: 'Телефон',
+  });
+  let sentBody = null;
+  const device = await client.reportDeviceDiagnostics({
+    appVersion: '1.5.2',
+    queues: {
+      dataOperations: 1,
+      stockOperations: 2,
+      quarantinedStockOperations: 1308,
+      totalOperations: 999,
+    },
+  }, {
+    storage,
+    endpoint: 'https://example.test/gateway',
+    fetchImpl: async (_url, options) => {
+      sentBody = JSON.parse(options.body);
+      return jsonResponse({ ok: true, device: { id: 'web-device-123456', diagnostics: sentBody.diagnostics } });
+    },
+  });
+
+  assert.equal(sentBody.action, 'device-diagnostics');
+  assert.equal(sentBody.deviceName, 'Телефон');
+  assert.deepEqual(sentBody.diagnostics, {
+    appVersion: '1.5.2',
+    queues: {
+      dataOperations: 1,
+      stockOperations: 2,
+      quarantinedStockOperations: 1308,
+      totalOperations: 3,
+    },
+  });
+  assert.equal(device.diagnostics.queues.quarantinedStockOperations, 1308);
+});
+
 test('recovery keeps the new session in memory until the owner confirms the replacement code', async () => {
   const client = await loadModule();
   assert.equal(client.RECOVERY_REQUEST_TIMEOUT_MS, 75_000);

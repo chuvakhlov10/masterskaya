@@ -77,6 +77,38 @@ test('registered device session is authorized and listed as current', async () =
   assert.equal(devices[0].name, 'Ноутбук');
 });
 
+test('device queue diagnostics are stored as bounded counts and returned in the device list', async () => {
+  const client = new MemoryGitHubClient();
+  seedDevice(client);
+  let now = 2_000;
+  const auth = createDeviceAuthService({ appClient: client, now: () => now, randomInt: deterministicRandom, recoverySecret: crypto.randomBytes(32) });
+  const claims = { clientId: 'device-client-123', sub: 'device:device-client-123' };
+  const reported = await auth.reportDiagnostics(claims, {
+    appVersion: '1.5.2<script>',
+    queues: {
+      dataOperations: 1,
+      stockOperations: 2,
+      quarantinedStockOperations: 1308,
+      totalOperations: 999,
+      ignoredWorkingData: [{ marker: 'SECRET' }],
+    },
+    ignoredWorkingData: [{ marker: 'SECRET' }],
+  }, 'Телефон');
+
+  assert.equal(reported.name, 'Телефон');
+  assert.equal(reported.diagnostics.reportedAt, now);
+  assert.equal(reported.diagnostics.appVersion, '1.5.2script');
+  assert.deepEqual(reported.diagnostics.queues, {
+    dataOperations: 1,
+    stockOperations: 2,
+    quarantinedStockOperations: 1308,
+    totalOperations: 3,
+  });
+  assert.doesNotMatch(JSON.stringify(client.json(DEVICE_REGISTRY_PATH)), /SECRET/);
+  const listed = await auth.listDevices(claims);
+  assert.equal(listed[0].diagnostics.queues.quarantinedStockOperations, 1308);
+});
+
 test('pairing code is one-time, lasts ten minutes, and raw code is never stored', async () => {
   const client = new MemoryGitHubClient();
   seedDevice(client);
@@ -213,6 +245,7 @@ function fakeAuth(){
       return {id:claims.clientId,name:'Устройство'};
     },
     async listDevices(claims){ return [{id:claims.clientId,current:true,name:'Ноутбук'}]; },
+    async reportDiagnostics(claims, diagnostics){ return {id:claims.clientId,current:true,name:'Ноутбук',diagnostics}; },
     async createPairing(){ return {code:'AAAA-AAAA-AAAA',expiresAt:NOW+600000,createdBy:'device-client-123'}; },
     async rotateRecovery(){ return {code:'AAAA-BBBB-CCCC-DDDD-EEEE-FFFF',generation:2}; },
     async renameDevice(){ return {id:'device-phone-456',name:'Телефон'}; },
@@ -292,6 +325,11 @@ test('devices and pairing-create use the active device session', async () => {
   assert.equal(JSON.parse(devices.body).devices[0].name, 'Ноутбук');
   const pairing = await handler(event({action:'pairing-create'}, headers));
   assert.equal(JSON.parse(pairing.body).code, 'AAAA-AAAA-AAAA');
+  const diagnostics = await handler(event({
+    action:'device-diagnostics',
+    diagnostics:{appVersion:'1.5.2',queues:{dataOperations:0,stockOperations:0,quarantinedStockOperations:1308,totalOperations:0}},
+  }, headers));
+  assert.equal(JSON.parse(diagnostics.body).device.diagnostics.queues.quarantinedStockOperations, 1308);
 });
 
 test('stock writes can require the archive-aware storage protocol without blocking reads', async () => {

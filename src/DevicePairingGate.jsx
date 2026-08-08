@@ -11,11 +11,20 @@ import {
   readDeviceName,
   redeemPairingCode,
   redeemRecoveryCode,
+  reportDeviceDiagnostics,
   renameDevice,
   revokeDevice,
   rotateRecoveryCode,
 } from "./device-pairing-client.js";
+import {
+  DEVICE_DIAGNOSTICS_CHANGED_EVENT,
+  readQueueBreakdown,
+} from "./diagnostics.js";
+import { APP_VERSION } from "./status-core.js";
 import { STORAGE_SESSION_EVENT } from "./storage-gateway.js";
+
+const DEVICE_DIAGNOSTICS_REPORT_KEY = "masterskaya_device_diagnostics_report_v1";
+const DEVICE_DIAGNOSTICS_REFRESH_MS = 6 * 60 * 60 * 1000;
 
 const palette = {
   bg: "#111318",
@@ -340,6 +349,15 @@ function DeviceManager({ open, onClose }) {
                   <div style={{ color: palette.sub, fontSize: 11, marginTop: 5 }}>
                     Последняя активность: {formatSeen(item.lastSeenAt)}{item.revokedAt ? " · отключено" : ""}
                   </div>
+                  {item.diagnostics ? (
+                    <div style={{ color: palette.sub, fontSize: 11, marginTop: 5, lineHeight: 1.45 }}>
+                      Версия {item.diagnostics.appVersion || "—"} · отчёт {formatSeen(item.diagnostics.reportedAt)}<br />
+                      Активная очередь: <b style={{ color: item.diagnostics.queues?.totalOperations ? "#fde68a" : "#bbf7d0" }}>{item.diagnostics.queues?.totalOperations ?? 0}</b>
+                      {` · безопасный карантин: ${item.diagnostics.queues?.quarantinedStockOperations ?? 0}`}
+                    </div>
+                  ) : (
+                    <div style={{ color: palette.sub, fontSize: 11, marginTop: 5 }}>Удалённая диагностика ещё не получена</div>
+                  )}
                 </div>
                 <div style={{ display: "flex", gap: 7, flexShrink: 0 }}>
                   {!item.revokedAt && <button onClick={() => rename(item)} style={{ ...buttonStyle, padding: "7px 9px", background: "#374151", color: palette.text, fontSize: 11 }}>Имя</button>}
@@ -377,6 +395,62 @@ export default function DevicePairingGate({ children }) {
   }, []);
 
   const connected = hasActivePairingSession();
+
+  useEffect(() => {
+    if (!connected) return undefined;
+    let cancelled = false;
+    let timer = null;
+    let inFlight = false;
+    let memoryReport = null;
+
+    const schedule = (delay = 700) => {
+      clearTimeout(timer);
+      timer = setTimeout(reportIfNeeded, delay);
+    };
+
+    const reportIfNeeded = async () => {
+      if (cancelled || globalThis.navigator?.onLine === false) return;
+      if (inFlight) {
+        schedule(1_000);
+        return;
+      }
+      const queues = readQueueBreakdown();
+      const signature = JSON.stringify({ appVersion: APP_VERSION, queues });
+      let previous = memoryReport;
+      try { previous ||= JSON.parse(globalThis.localStorage?.getItem?.(DEVICE_DIAGNOSTICS_REPORT_KEY) || "null"); }
+      catch {}
+      if (previous?.signature === signature && Date.now() - Number(previous.reportedAt) < DEVICE_DIAGNOSTICS_REFRESH_MS) return;
+
+      inFlight = true;
+      try {
+        await reportDeviceDiagnostics({ appVersion: APP_VERSION, queues });
+        memoryReport = {
+          signature,
+          reportedAt: Date.now(),
+        };
+        try { globalThis.localStorage?.setItem?.(DEVICE_DIAGNOSTICS_REPORT_KEY, JSON.stringify(memoryReport)); }
+        catch {}
+      } catch (error) {
+        console.warn('[device-diagnostics] Не удалось отправить безопасную сводку:', error.message);
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    const onChanged = () => schedule();
+    const onOnline = () => schedule(0);
+    schedule(1_500);
+    const interval = setInterval(reportIfNeeded, 5 * 60 * 1000);
+    globalThis.addEventListener?.(DEVICE_DIAGNOSTICS_CHANGED_EVENT, onChanged);
+    globalThis.addEventListener?.("online", onOnline);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      clearInterval(interval);
+      globalThis.removeEventListener?.(DEVICE_DIAGNOSTICS_CHANGED_EVENT, onChanged);
+      globalThis.removeEventListener?.("online", onOnline);
+    };
+  }, [connected]);
 
   if (!connected) {
     return <NewDeviceScreen reason={sessionProblemText(sessionProblem)} />;

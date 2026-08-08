@@ -1,3 +1,5 @@
+import { countQuarantinedStockOps } from "./stock-outbox-quarantine.js";
+
 const DIAGNOSTICS_KEY = "masterskaya_diagnostics_v1";
 const SESSION_KEY = "masterskaya_storage_session_v1";
 const DEVICE_NAME_KEY = "masterskaya_device_name_v1";
@@ -5,6 +7,7 @@ const PENDING_WRITES_KEY = "pending_writes";
 const STOCK_OUTBOX_KEY = "stock_ops_outbox_v1";
 const LAST_SYNC_KEY = "last_successful_sync_v1";
 const SELF_CHECK_OPERATIONS = new Set(["GET status.json"]);
+export const DEVICE_DIAGNOSTICS_CHANGED_EVENT = "masterskaya:device-diagnostics-changed";
 
 function safeGet(storage, key) {
   try { return storage?.getItem?.(key) || ""; }
@@ -86,11 +89,25 @@ export function recordSessionRenewal({ now = Date.now(), storage = globalThis.lo
 export function readQueueBreakdown(storage = globalThis.localStorage) {
   const dataOperations = safeArrayLength(storage, PENDING_WRITES_KEY);
   const stockOperations = safeArrayLength(storage, STOCK_OUTBOX_KEY);
+  const quarantinedStockOperations = countQuarantinedStockOps(storage);
   return {
     dataOperations,
     stockOperations,
+    quarantinedStockOperations,
     totalOperations: dataOperations + stockOperations,
   };
+}
+
+export function notifyDeviceDiagnosticsChanged(eventTarget = globalThis) {
+  try {
+    if (typeof eventTarget?.dispatchEvent !== "function") return;
+    const EventCtor = eventTarget.CustomEvent || globalThis.CustomEvent;
+    if (typeof EventCtor === "function") {
+      eventTarget.dispatchEvent(new EventCtor(DEVICE_DIAGNOSTICS_CHANGED_EVENT));
+      return;
+    }
+    eventTarget.dispatchEvent({ type: DEVICE_DIAGNOSTICS_CHANGED_EVENT });
+  } catch {}
 }
 
 function readSession(storage) {
@@ -220,6 +237,7 @@ export function buildDiagnosticReport(snapshot, appVersion = "unknown") {
     `Ожидает отправки — данные: ${data.sync?.queues?.dataOperations ?? 0}`,
     `Ожидает отправки — склад: ${data.sync?.queues?.stockOperations ?? 0}`,
     `Ожидает отправки — всего: ${data.sync?.queues?.totalOperations ?? 0}`,
+    `Безопасный карантин — склад: ${data.sync?.queues?.quarantinedStockOperations ?? 0}`,
     `Последний успешный запрос хранилища: ${reportDate(data.storage?.lastStorageSuccessAt)}`,
     `Последняя ошибка хранилища: ${data.storage?.lastStorageErrorCode || "нет"}`,
     `Время последней ошибки: ${reportDate(data.storage?.lastStorageErrorAt)}`,

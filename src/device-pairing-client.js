@@ -178,6 +178,27 @@ export async function listDevices(options = {}) {
   return Array.isArray(payload?.devices) ? payload.devices : [];
 }
 
+export async function reportDeviceDiagnostics({ appVersion, queues } = {}, options = {}) {
+  const storage = options.storage || globalThis.localStorage;
+  const source = queues && typeof queues === "object" ? queues : {};
+  const dataOperations = Math.max(0, Math.trunc(Number(source.dataOperations) || 0));
+  const stockOperations = Math.max(0, Math.trunc(Number(source.stockOperations) || 0));
+  const diagnostics = {
+    appVersion: String(appVersion || "unknown").slice(0, 30),
+    queues: {
+      dataOperations,
+      stockOperations,
+      quarantinedStockOperations: Math.max(0, Math.trunc(Number(source.quarantinedStockOperations) || 0)),
+      totalOperations: dataOperations + stockOperations,
+    },
+  };
+  const payload = await authorizedAction("device-diagnostics", {
+    diagnostics,
+    deviceName: readDeviceName(storage),
+  }, options);
+  return payload?.device || null;
+}
+
 export async function createPairingCode(options = {}) {
   const storage = options.storage || globalThis.localStorage;
   const payload = await authorizedAction("pairing-create", { deviceName: readDeviceName(storage) }, options);

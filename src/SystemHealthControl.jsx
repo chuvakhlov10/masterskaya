@@ -223,6 +223,7 @@ export default function SystemHealthControl() {
                   <Row label="Операции данных" value={queues?.dataOperations ?? 0} valueColor={queues?.dataOperations ? palette.warning : palette.text} />
                   <Row label="Складские операции" value={queues?.stockOperations ?? 0} valueColor={queues?.stockOperations ? palette.warning : palette.text} />
                   <Row label="Всего ожидает отправки" value={queues?.totalOperations ?? 0} valueColor={queues?.totalOperations ? palette.warning : palette.text} />
+                  <Row label="Безопасный карантин" value={queues?.quarantinedStockOperations ?? 0} />
                   <Row label="Последняя успешная синхронизация" value={formatDate(client.sync.lastSuccessfulAt)} />
                 </Card>
               )}
