@@ -70,6 +70,30 @@ export function recordRevision(record) {
   return record.id ? 1 : 0;
 }
 
+export function findRecordsMissingCreateEffect(records, stockOps, recordEffectAnchors = []) {
+  const knownOpIds = new Set(
+    [...(Array.isArray(stockOps) ? stockOps : []),
+      ...(Array.isArray(recordEffectAnchors) ? recordEffectAnchors : [])]
+      .map(op => typeof op?.opId === "string" ? op.opId : "")
+      .filter(Boolean),
+  );
+  const seenRecordIds = new Set();
+  const missing = [];
+
+  for (const record of Array.isArray(records) ? records : []) {
+    if (!record || typeof record !== "object" || typeof record.id !== "string" || !record.id) continue;
+    if (seenRecordIds.has(record.id) || recordRevision(record) !== 1) continue;
+    seenRecordIds.add(record.id);
+
+    const mutationId = typeof record.lastMutationId === "string" ? record.lastMutationId.trim() : "";
+    if (!mutationId || !mutationId.startsWith(`mut-${record.id}-`)) continue;
+    if (knownOpIds.has(`record-effect:${mutationId}`)) continue;
+    missing.push(record);
+  }
+
+  return missing;
+}
+
 export function sameRecordVersion(current, opened) {
   if (!current || !opened || typeof current !== "object" || typeof opened !== "object") return false;
   if (current.id || opened.id) {
@@ -574,6 +598,40 @@ export function classifyLateStockOps(checkpoint, hotOps, options = {}) {
     (safeTypes.has(op.type) ? safe : blocking).push(op);
   }
   return { safe, blocking };
+}
+
+// Reconcile a durable device outbox against the complete confirmed history.
+// Matching opId values are already committed and may be removed. An unknown
+// operation older than the checkpoint is never replayed automatically: even an
+// additive delta could be a stale copy whose original effect is already folded
+// into the checkpoint under a different or damaged local state.
+export function reconcileStockOutboxWithHistory(outbox, confirmedOps, checkpoint, options = {}) {
+  const normalizedOutbox = mergeStockOps([], Array.isArray(outbox) ? outbox : []);
+  const confirmedIds = new Set(
+    (Array.isArray(confirmedOps) ? confirmedOps : [])
+      .map(op => typeof op?.opId === "string" ? op.opId : "")
+      .filter(Boolean),
+  );
+  const confirmed = [];
+  const remaining = [];
+  for (const op of normalizedOutbox) {
+    if (typeof op?.opId === "string" && confirmedIds.has(op.opId)) confirmed.push(op);
+    else remaining.push(op);
+  }
+
+  const normalizedCheckpoint = normalizeStockCheckpoint(checkpoint, options);
+  if (!normalizedCheckpoint) {
+    return { confirmed, remaining, sendable: remaining, blocked: [] };
+  }
+
+  const sendable = [];
+  const blocked = [];
+  for (const op of remaining) {
+    const ts = Number(op?.ts);
+    if (Number.isFinite(ts) && ts >= normalizedCheckpoint.cutoffTs) sendable.push(op);
+    else blocked.push(op);
+  }
+  return { confirmed, remaining, sendable, blocked };
 }
 
 function itemVersion(item) {
