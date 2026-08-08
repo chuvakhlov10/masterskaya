@@ -5,7 +5,7 @@ const pairing = require('./pairing-index.js');
 const { createDeviceAuthService } = require('./device-auth.js');
 
 const FUNCTION_NAME = 'masterskaya-storage-gateway';
-const FUNCTION_VERSION = '1.5.0';
+const FUNCTION_VERSION = '1.5.2';
 const PROTOCOL_VERSION = 4;
 const BUILD_ID = '__MASTERSKAYA_BUILD_ID__';
 const BUILD_DATE = '__MASTERSKAYA_BUILD_DATE__';

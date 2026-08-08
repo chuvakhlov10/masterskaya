@@ -22,7 +22,7 @@ assert(fs.existsSync(manifestPath), 'FUNCTION_MANIFEST_MISSING');
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 
 const EXPECTED = {
-  storage: { version: '1.5.0', protocol: 4 },
+  storage: { version: '1.5.2', protocol: 4 },
   ably: { version: '1.4.1', protocol: 3 },
 };
 

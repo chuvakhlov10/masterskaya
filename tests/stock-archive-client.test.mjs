@@ -46,9 +46,12 @@ test('client reconciles the durable stock outbox against every archive before se
   assert.match(appSource, /const opsToSave = mergeStockOps\(remote, outbox\)/);
 });
 
-test('unknown pre-checkpoint outbox operations remain local and blocked for review', () => {
+test('unknown pre-checkpoint outbox operations are persisted to quarantine before removal', () => {
   assert.match(appSource, /stockOutboxHistoryEpochRef\.current !== checkpoint\.epoch\) return \[\]/);
   assert.match(appSource, /reconcileStockOutboxWithHistory\(outbox, \[\], checkpoint\)\.sendable/);
+  assert.match(appSource, /appendStockOutboxQuarantine\(\{/);
+  assert.match(appSource, /remaining = removeStockOutboxIds\(blockedIds\)/);
+  assert.match(appSource, /Never remove an operation unless the quarantine was persisted/);
   assert.match(appSource, /STOCK_ARCHIVE_OUTBOX_REVIEW_REQUIRED/);
   assert.match(appSource, /автоматическая отправка заблокирована до проверки/);
 });

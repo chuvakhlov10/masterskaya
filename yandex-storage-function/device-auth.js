@@ -110,6 +110,29 @@ function normalizeTimestamp(value, fallback = 0) {
   return Number.isFinite(number) && number >= 0 ? number : fallback;
 }
 
+function normalizeQueueCount(value) {
+  const number = Math.trunc(Number(value));
+  return Number.isFinite(number) ? Math.max(0, Math.min(100_000, number)) : 0;
+}
+
+function normalizeDeviceDiagnostics(value) {
+  if (!value || typeof value !== 'object') return null;
+  const queues = value.queues && typeof value.queues === 'object' ? value.queues : {};
+  const dataOperations = normalizeQueueCount(queues.dataOperations);
+  const stockOperations = normalizeQueueCount(queues.stockOperations);
+  return {
+    version: 1,
+    reportedAt: normalizeTimestamp(value.reportedAt),
+    appVersion: String(value.appVersion || 'unknown').replace(/[^A-Za-z0-9._-]/g, '').slice(0, 30) || 'unknown',
+    queues: {
+      dataOperations,
+      stockOperations,
+      quarantinedStockOperations: normalizeQueueCount(queues.quarantinedStockOperations),
+      totalOperations: dataOperations + stockOperations,
+    },
+  };
+}
+
 function normalizeDevice(value) {
   const id = normalizeClientId(value?.id);
   if (!id) return null;
@@ -126,6 +149,7 @@ function normalizeDevice(value) {
     lastSeenAt,
     revokedAt,
     pairedBy: normalizeClientId(value.pairedBy),
+    diagnostics: normalizeDeviceDiagnostics(value.diagnostics),
   };
 }
 
@@ -217,6 +241,7 @@ function publicDevice(device, currentClientId) {
     lastSeenAt: device.lastSeenAt,
     revokedAt: device.revokedAt,
     current: device.id === currentClientId,
+    diagnostics: device.diagnostics,
   };
 }
 
@@ -537,6 +562,28 @@ function createDeviceAuthService({
       });
   }
 
+  async function reportDiagnostics(claims, diagnostics, deviceName) {
+    if (!diagnostics || typeof diagnostics !== 'object' || Array.isArray(diagnostics)) {
+      throw makeError('DEVICE_DIAGNOSTICS_INVALID', 400);
+    }
+    const current = await authorize(claims);
+    const nowMs = now();
+    const normalized = normalizeDeviceDiagnostics({
+      ...diagnostics,
+      reportedAt: nowMs,
+    });
+    if (!normalized) throw makeError('DEVICE_DIAGNOSTICS_INVALID', 400);
+    const response = await mutateRegistry('Update workshop device diagnostics', registry => {
+      const device = registry.devices.find(item => item.id === current.id);
+      if (!device || device.revokedAt) throw makeError(device ? 'DEVICE_REVOKED' : 'DEVICE_NOT_REGISTERED', 401);
+      device.lastSeenAt = nowMs;
+      if (deviceName) device.name = normalizeDeviceName(deviceName, device.name);
+      device.diagnostics = normalized;
+      return { next: registry, result: device };
+    });
+    return publicDevice(response.result, current.id);
+  }
+
   async function renameDevice(claims, targetClientId, deviceName) {
     await authorize(claims);
     const target = normalizeClientId(targetClientId || claims.clientId);
@@ -570,6 +617,7 @@ function createDeviceAuthService({
     authorize,
     createPairing,
     listDevices,
+    reportDiagnostics,
     redeemPairing,
     redeemRecovery,
     renameDevice,
@@ -593,6 +641,7 @@ module.exports = {
   hashPairingCode,
   hashRecoveryCode,
   normalizeDeviceName,
+  normalizeDeviceDiagnostics,
   normalizePairingCode,
   normalizeRecoveryCode,
 };

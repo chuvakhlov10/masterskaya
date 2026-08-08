@@ -26,6 +26,8 @@ test('connected-device manager can create and revoke device access', () => {
   assert.match(gateSource, /revokeDevice/);
   assert.match(gateSource, /Подключить новое устройство/);
   assert.match(gateSource, /Отключить/);
+  assert.match(gateSource, /reportDeviceDiagnostics/);
+  assert.match(gateSource, /безопасный карантин/);
 });
 
 test('expired or revoked sessions return the device to pairing', () => {
@@ -43,8 +45,9 @@ test('connected application exposes safe server health and diagnostics', () => {
   assert.match(healthSource, /Скопировать диагностику/);
   assert.match(healthSource, /Операции данных/);
   assert.match(healthSource, /Складские операции/);
+  assert.match(healthSource, /Безопасный карантин/);
 });
 
-test('diagnostics release is version 1.5.1', () => {
-  assert.match(statusSource, /APP_VERSION = "1\.5\.1"/);
+test('diagnostics release is version 1.5.2', () => {
+  assert.match(statusSource, /APP_VERSION = "1\.5\.2"/);
 });

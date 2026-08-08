@@ -1,7 +1,7 @@
 // Service Worker — кеширует статику для офлайн-работы
 // Стратегия: cache-first для статики, network-first для данных (через fetch в самом приложении)
 
-const CACHE_NAME = 'masterskaya-v5';
+const CACHE_NAME = 'masterskaya-v6';
 const PRECACHE_URLS = [
   './',
   './index.html',

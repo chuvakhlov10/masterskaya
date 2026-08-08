@@ -24,6 +24,8 @@ import {
   reconcileStockOutboxWithHistory,
 } from "./sync-core.js";
 import { APP_VERSION, deriveSyncView, normalizeBackupStatus } from "./status-core.js";
+import { notifyDeviceDiagnosticsChanged } from "./diagnostics.js";
+import { appendStockOutboxQuarantine } from "./stock-outbox-quarantine.js";
 
 const CLIENT_ID = String(Date.now()) + '-' + Math.random().toString(36).slice(2, 8);
 const ably = new Ably.Realtime(createSecureAblyRealtimeOptions({
@@ -286,6 +288,7 @@ function getStockOutbox(){
 function setStockOutbox(ops){
   const normalized = mergeStockOps([], Array.isArray(ops) ? ops : []);
   localStorage.setItem(STOCK_OUTBOX_KEY, JSON.stringify(normalized));
+  notifyDeviceDiagnosticsChanged();
   return normalized;
 }
 function addStockOutboxOp(op){
@@ -374,6 +377,7 @@ function setQueue(q){
   }
   const compacted = [...latestByKey.values()].sort((a,b)=>a.ts-b.ts);
   localStorage.setItem(PENDING_WRITES_KEY, JSON.stringify(compacted));
+  notifyDeviceDiagnosticsChanged();
 }
 function getQueuedWrite(key, id = null){
   return getQueue().find(item => item.key === key && (!id || item.id === id)) || null;
@@ -1784,14 +1788,35 @@ export default function App(){
       removeStockOutboxIds(new Set(result.confirmed.map(op => op.opId).filter(Boolean)));
     }
     stockOutboxHistoryEpochRef.current = Number(normalized?.epoch) || 0;
-    const remaining = getStockOutbox();
-    const pendingResult = reconcileStockOutboxWithHistory(remaining, [], normalized);
+    let remaining = getStockOutbox();
+    let pendingResult = reconcileStockOutboxWithHistory(remaining, [], normalized);
+    let quarantinedCount = 0;
+    if (pendingResult.blocked.length > 0) {
+      try {
+        appendStockOutboxQuarantine({
+          operations: pendingResult.blocked,
+          checkpoint: normalized,
+        });
+        const blockedIds = new Set(pendingResult.blocked.map(op => op?.opId).filter(Boolean));
+        remaining = removeStockOutboxIds(blockedIds);
+        pendingResult = reconcileStockOutboxWithHistory(remaining, [], normalized);
+        quarantinedCount = blockedIds.size;
+        notifyDeviceDiagnosticsChanged();
+      } catch (error) {
+        // Never remove an operation unless the quarantine was persisted and
+        // verified first. A full localStorage therefore leaves the old queue
+        // blocked exactly as it was in 1.5.1.
+        console.warn('[stock-outbox] Не удалось сохранить безопасный карантин:', error.message);
+      }
+    }
     stockOutboxBlockedIdsRef.current = new Set(pendingResult.blocked.map(op => op?.opId).filter(Boolean));
     stockOutboxBlockedCountRef.current = pendingResult.blocked.length;
     unsyncedOpsRef.current = new Set(remaining.map(op => op?.opId).filter(Boolean));
     setPendingCount(getQueue().length + remaining.length);
     if (pendingResult.blocked.length > 0) {
       setLastSyncError(`В очереди ${pendingResult.blocked.length} старых складских операций. Их автоматическая отправка заблокирована до проверки.`);
+    } else if (quarantinedCount > 0) {
+      setLastSyncError("");
     }
     return pendingResult;
   }

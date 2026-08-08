@@ -39,6 +39,28 @@ test('queue breakdown separates data and stock operations', () => {
   assert.deepEqual(queues, {
     dataOperations: 1,
     stockOperations: 2,
+    quarantinedStockOperations: 0,
+    totalOperations: 3,
+  });
+});
+
+test('quarantined stock is reported separately and is not counted as awaiting send', () => {
+  const storage = storageFixture();
+  storage.setItem('stock_ops_quarantine_v1', JSON.stringify({
+    version: 1,
+    batches: [{
+      id: 'legacy',
+      quarantinedAt: 1,
+      reason: 'PRE_CHECKPOINT_UNKNOWN',
+      checkpointEpoch: 1,
+      cutoffTs: 100,
+      operations: [{ opId: 'old-1' }, { opId: 'old-2' }],
+    }],
+  }));
+  assert.deepEqual(readQueueBreakdown(storage), {
+    dataOperations: 1,
+    stockOperations: 2,
+    quarantinedStockOperations: 2,
     totalOperations: 3,
   });
 });
