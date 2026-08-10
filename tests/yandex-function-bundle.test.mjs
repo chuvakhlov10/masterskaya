@@ -10,6 +10,13 @@ import { buildAll } from '../scripts/build-yandex-functions.mjs';
 const require = createRequire(import.meta.url);
 
 const ROOT = path.resolve(new URL('..', import.meta.url).pathname);
+const packageWorkflow = fs.readFileSync(path.join(ROOT, '.github/workflows/package-yandex-functions.yml'), 'utf8');
+
+test('deployment archive label matches the storage function version', () => {
+  assert.match(packageWorkflow, /masterskaya-storage-gateway-1\.5\.3\.zip/);
+  assert.match(packageWorkflow, /name: yandex-functions-1\.5\.3/);
+  assert.doesNotMatch(packageWorkflow, /masterskaya-storage-gateway-1\.5\.2\.zip/);
+});
 
 test('function builder creates executable single-file bundles with injected metadata', () => {
   const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'masterskaya-functions-'));
