@@ -2946,10 +2946,9 @@ async function refreshStockFromServer() {
       setPwdLoaded(true);
 
       // Загружаем остальные данные
-      const [r,deletions,p,stockPair,stk,sCfg,sm2,al,nt,sub,mvs] = await Promise.all([
+      const [r,deletions,p,stockPair,sCfg,sm2,al,nt,sub,mvs] = await Promise.all([
         sGet("records"), sGet("record-deletions"), sGet("prices"),
         readConsistentStockPair(),
-        sGet("stock"),
         sGet("stock:cfg"), sGet("custom:markers"), sGet("marker-aliases"), sGet("marker-notes"), sGet("subcategories"),
         sGet("stock-moves"),
       ]);
@@ -3019,73 +3018,16 @@ async function refreshStockFromServer() {
         if(outbox.length > 0) scheduleStockSync(1_000);
         console.log(`[STOCK] Сервер: ${serverStockOps.length}, к отправке: ${outbox.length}, заблокировано: ${stockOutboxBlockedCountRef.current}, итог: ${merged.length}`);
       } else {
-        // Миграция: читаем старые данные
-        let oldStock = null;
-        if(stk && typeof stk === "object" && stk.main){
-          oldStock = stk;
-        } else {
-          const [sm, sS] = await Promise.all([
-            sGet("stock:main"),
-            Promise.all(WORKSHOPS.map(w=>sGet(`stock:ws:${w}`))),
-          ]);
-          if(sm || sS.some(v => v)){
-            oldStock = {
-              main: ensureObj(sm),
-              ws: {}
-            };
-            WORKSHOPS.forEach((w,i)=>{
-              const v = sS[i];
-              oldStock.ws[w] = (v && typeof v === "object" && !Array.isArray(v)) ? v : {};
-            });
-          }
-        }
-        
-        if(oldStock){
-          // Создаём init-операции для каждой маркировки
-          const initOps = [];
-          const initTs = Date.now();
-          for(const [marker, value] of Object.entries(oldStock.main || {})){
-            if(value > 0){
-              initOps.push({
-                type: "init",
-                location: "main",
-                marker,
-                value,
-                ts: initTs,
-                client: "migration",
-                opId: `${initTs}-main-${marker}-${Math.random().toString(36).slice(2,6)}`,
-              });
-            }
-          }
-          for(const ws of WORKSHOPS){
-            for(const [marker, value] of Object.entries(oldStock.ws?.[ws] || {})){
-              if(value > 0){
-                initOps.push({
-                  type: "init",
-                  location: `ws:${ws}`,
-                  marker,
-                  value,
-                  ts: initTs,
-                  client: "migration",
-                  opId: `${initTs}-ws${ws}-${marker}-${Math.random().toString(36).slice(2,6)}`,
-                });
-              }
-            }
-          }
-          // BUG-C: синхронно обновляем refs + персистим
-          stockOpsRef.current = initOps;
-          const initStock = calculateStock(initOps);
-          stockRef.current = initStock;
-          setStockOps(initOps);
-          setStock(initStock);
-          persistStockSnapshot(initOps);
-          setStockOutbox(initOps);
-          unsyncedOpsRef.current = new Set(initOps.map(op => op.opId));
-          await syncStockOpsRef.current?.();
-          console.log(`[MIGRATION] Создано ${initOps.length} init-операций из старого stock`);
-        } else {
-          setStock({ main: {}, ws: { SMART: {}, Бегемот: {} } });
-        }
+        // Автоматическая миграция legacy-снимков завершена навсегда. Пустая
+        // серверная пара больше не должна превращать устаревшие абсолютные
+        // остатки в новые init-операции.
+        const emptyStock = { main: {}, ws: { SMART: {}, Бегемот: {} } };
+        stockOpsRef.current = [];
+        stockRef.current = emptyStock;
+        setStockOps([]);
+        setStock(emptyStock);
+        persistStockSnapshot([]);
+        console.warn("[STOCK] Пустой серверный журнал; legacy-миграция отключена");
       }
       stockReadyRef.current = true;
       repairMissingCreateRecordEffects(recordsRef.current, "startup");

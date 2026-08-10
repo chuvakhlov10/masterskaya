@@ -178,6 +178,98 @@ test('gateway forwards a validated PUT without widening repository access', asyn
   assert.deepEqual(JSON.parse(putCall.options.body), { message: 'update records', content: 'W10=', sha: 'a'.repeat(40) });
 });
 
+function encodeRepoJson(value) {
+  return Buffer.from(JSON.stringify(value), 'utf8').toString('base64');
+}
+
+function stockJournal(ops) {
+  return { schemaVersion: 4, epoch: 1, ops };
+}
+
+test('stock gateway allows append-only deltas while preserving existing migration history', async () => {
+  const session = createSessionToken({ secret: SESSION_SECRET, clientId: 'device-client-123', nowMs: NOW, version: 1 });
+  const currentOps = [
+    { type: 'init', location: 'main', marker: 'A', value: 10, ts: 100, client: 'migration', opId: 'existing-init' },
+  ];
+  const nextOps = [
+    ...currentOps,
+    { type: 'delta', location: 'main', marker: 'A', delta: -1, ts: 200, client: 'device', opId: 'new-delta' },
+  ];
+  const sha = 'a'.repeat(40);
+  let stockGets = 0;
+  let stockPuts = 0;
+  const handler = createHandler({
+    env: ENV,
+    now: () => NOW,
+    fetchImpl: async (url, options) => {
+      if (url.endsWith('/installation')) return jsonResponse({ id: 1 });
+      if (url.includes('/access_tokens')) return jsonResponse({ token: 'ghs_installation_token_abcdefghijklmnopqrstuvwxyz', expires_at: '2026-08-04T21:00:00Z' });
+      if (url.endsWith('/contents/data/stock-ops.json') && options.method === 'GET') {
+        stockGets++;
+        return jsonResponse({ sha, content: encodeRepoJson(stockJournal(currentOps)) });
+      }
+      if (url.endsWith('/contents/data/stock-ops.json') && options.method === 'PUT') {
+        stockPuts++;
+        return jsonResponse({ content: { sha: 'b'.repeat(40) } });
+      }
+      assert.fail(`unexpected ${url}`);
+    },
+  });
+  const response = await handler(event({
+    action: 'github', method: 'PUT', path: 'data/stock-ops.json',
+    body: { message: 'append delta', content: encodeRepoJson(stockJournal(nextOps)), sha },
+  }, { 'x-masterskaya-session': session.token }));
+  assert.equal(response.statusCode, 200);
+  assert.equal(stockGets, 1);
+  assert.equal(stockPuts, 1);
+});
+
+test('stock gateway rejects a new init batch and any deletion from the journal', async () => {
+  const session = createSessionToken({ secret: SESSION_SECRET, clientId: 'device-client-123', nowMs: NOW, version: 1 });
+  const currentOps = [
+    { type: 'delta', location: 'main', marker: 'A', delta: 1, ts: 100, client: 'device', opId: 'existing-delta' },
+  ];
+  const sha = 'a'.repeat(40);
+  let stockPuts = 0;
+  const handler = createHandler({
+    env: ENV,
+    now: () => NOW,
+    fetchImpl: async (url, options) => {
+      if (url.endsWith('/installation')) return jsonResponse({ id: 1 });
+      if (url.includes('/access_tokens')) return jsonResponse({ token: 'ghs_installation_token_abcdefghijklmnopqrstuvwxyz', expires_at: '2026-08-04T21:00:00Z' });
+      if (url.endsWith('/contents/data/stock-ops.json') && options.method === 'GET') {
+        return jsonResponse({ sha, content: encodeRepoJson(stockJournal(currentOps)) });
+      }
+      if (url.endsWith('/contents/data/stock-ops.json') && options.method === 'PUT') {
+        stockPuts++;
+        return jsonResponse({ content: { sha: 'b'.repeat(40) } });
+      }
+      assert.fail(`unexpected ${url}`);
+    },
+  });
+
+  const withInit = await handler(event({
+    action: 'github', method: 'PUT', path: 'data/stock-ops.json',
+    body: {
+      message: 'repeat migration', sha,
+      content: encodeRepoJson(stockJournal([
+        ...currentOps,
+        { type: 'init', location: 'main', marker: 'A', value: 50, ts: 200, client: 'migration', opId: 'new-init' },
+      ])),
+    },
+  }, { 'x-masterskaya-session': session.token }));
+  assert.equal(withInit.statusCode, 409);
+  assert.deepEqual(JSON.parse(withInit.body), { ok: false, error: 'STOCK_INIT_MIGRATION_LOCKED' });
+
+  const withDeletion = await handler(event({
+    action: 'github', method: 'PUT', path: 'data/stock-ops.json',
+    body: { message: 'replace journal', sha, content: encodeRepoJson(stockJournal([])) },
+  }, { 'x-masterskaya-session': session.token }));
+  assert.equal(withDeletion.statusCode, 409);
+  assert.deepEqual(JSON.parse(withDeletion.body), { ok: false, error: 'STOCK_JOURNAL_NOT_APPEND_ONLY' });
+  assert.equal(stockPuts, 0);
+});
+
 test('path policy allows backup status only as read-only data-backups access', () => {
   assert.deepEqual(
     normalizeRepoRequest({ method: 'GET', path: 'status.json', ref: 'data-backups' }),
