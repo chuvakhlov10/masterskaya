@@ -280,6 +280,78 @@ function normalizeRepoRequest(input = {}) {
   return { method, path, ref, kind, body };
 }
 
+function canonicalize(value) {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (!value || typeof value !== 'object') return value;
+  const result = Object.create(null);
+  for (const key of Object.keys(value).sort()) result[key] = canonicalize(value[key]);
+  return result;
+}
+
+function canonicalJson(value) {
+  return JSON.stringify(canonicalize(value));
+}
+
+function decodeRepositoryJson(content, errorCode) {
+  try {
+    return JSON.parse(Buffer.from(String(content || '').replace(/\s/g, ''), 'base64').toString('utf8'));
+  } catch (cause) {
+    throw makeError(errorCode, 422, cause);
+  }
+}
+
+function stockJournalOps(value, errorCode) {
+  if (Array.isArray(value)) return value;
+  if (value && typeof value === 'object' && Array.isArray(value.ops)) return value.ops;
+  throw makeError(errorCode, 422);
+}
+
+function stockOpsById(ops, errorCode) {
+  const result = new Map();
+  for (const op of ops) {
+    const opId = typeof op?.opId === 'string' ? op.opId.trim() : '';
+    if (!opId || result.has(opId)) throw makeError(errorCode, 422);
+    result.set(opId, op);
+  }
+  return result;
+}
+
+function assertStockJournalAppendOnly({ currentContent, currentSha, candidateContent, candidateSha }) {
+  const candidateValue = decodeRepositoryJson(candidateContent, 'STOCK_JOURNAL_INVALID');
+  const candidateOps = stockJournalOps(candidateValue, 'STOCK_JOURNAL_INVALID');
+  const candidateById = stockOpsById(candidateOps, 'STOCK_JOURNAL_DUPLICATE_OP_ID');
+
+  if (!currentContent) {
+    if (candidateOps.some(op => op?.type === 'init')) throw makeError('STOCK_INIT_MIGRATION_LOCKED', 409);
+    return;
+  }
+  if (currentSha && candidateSha !== currentSha) throw makeError('STOCK_JOURNAL_STALE', 409);
+
+  const currentValue = decodeRepositoryJson(currentContent, 'STOCK_JOURNAL_SERVER_INVALID');
+  const currentOps = stockJournalOps(currentValue, 'STOCK_JOURNAL_SERVER_INVALID');
+  const currentById = stockOpsById(currentOps, 'STOCK_JOURNAL_SERVER_DUPLICATE_OP_ID');
+
+  if (!Array.isArray(currentValue)) {
+    if (Array.isArray(candidateValue) || Number(candidateValue.schemaVersion) !== Number(currentValue.schemaVersion) ||
+        Number(candidateValue.epoch) !== Number(currentValue.epoch)) {
+      throw makeError('STOCK_JOURNAL_EPOCH_MISMATCH', 409);
+    }
+  }
+
+  for (const [opId, currentOp] of currentById) {
+    const candidateOp = candidateById.get(opId);
+    if (!candidateOp) throw makeError('STOCK_JOURNAL_NOT_APPEND_ONLY', 409);
+    if (canonicalJson(candidateOp) !== canonicalJson(currentOp)) {
+      throw makeError('STOCK_JOURNAL_OPERATION_CHANGED', 409);
+    }
+  }
+  for (const [opId, candidateOp] of candidateById) {
+    if (!currentById.has(opId) && candidateOp?.type === 'init') {
+      throw makeError('STOCK_INIT_MIGRATION_LOCKED', 409);
+    }
+  }
+}
+
 function createGitHubAppClient({ fetchImpl = globalThis.fetch, env = process.env, now = () => Date.now() } = {}) {
   if (typeof fetchImpl !== 'function') throw makeError('FETCH_UNAVAILABLE', 503);
   const appId = String(env.GITHUB_APP_ID || '').trim();
@@ -426,7 +498,19 @@ function createHandler({ fetchImpl = globalThis.fetch, env = process.env, now = 
       }
 
       if (action === 'github') {
-        const result = await getAppClient().request(body);
+        const request = normalizeRepoRequest(body);
+        const client = getAppClient();
+        if (request.method === 'PUT' && request.path === 'data/stock-ops.json') {
+          const current = await client.request({ method: 'GET', path: request.path });
+          if (!current.ok && current.status !== 404) return reply(current.status, current.payload, origin);
+          assertStockJournalAppendOnly({
+            currentContent: current.ok ? current.payload?.content : null,
+            currentSha: current.ok ? current.payload?.sha : null,
+            candidateContent: request.body.content,
+            candidateSha: request.body.sha || null,
+          });
+        }
+        const result = await client.request(request);
         return reply(result.status, result.payload, origin);
       }
 
@@ -452,6 +536,7 @@ module.exports = {
   createHandler,
   createSessionToken,
   handler,
+  assertStockJournalAppendOnly,
   normalizeClientId,
   normalizeRepoRequest,
   parsePrivateKey,
