@@ -24,7 +24,7 @@ import {
   reconcileStockOutboxWithHistory,
 } from "./sync-core.js";
 import { APP_VERSION, deriveSyncView, normalizeBackupStatus } from "./status-core.js";
-import { notifyDeviceDiagnosticsChanged } from "./diagnostics.js";
+import { notifyDeviceDiagnosticsChanged, recordStorageSyncCycleResult } from "./diagnostics.js";
 import { appendStockOutboxQuarantine } from "./stock-outbox-quarantine.js";
 
 const CLIENT_ID = String(Date.now()) + '-' + Math.random().toString(36).slice(2, 8);
@@ -2729,8 +2729,13 @@ async function refreshStockFromServer() {
 
         setPendingCount(getQueue().length + getStockOutbox().length);
         setTimeout(()=>window.scrollTo(0, sY), 0);
+        recordStorageSyncCycleResult({ ok: true });
         setSyncStatus(wsConnectedRef.current ? "ws" : "synced");
       } catch(error) {
+        recordStorageSyncCycleResult({
+          ok: false,
+          code: error?.code || error?.message || "SYNC_CYCLE_FAILED",
+        });
         setLastSyncError(error.message || "Ошибка обновления данных");
         console.warn('[POLL] Ошибка:', error.message);
         setSyncStatus(navigator.onLine ? "idle" : "offline");

@@ -8,6 +8,9 @@ const STOCK_OUTBOX_KEY = "stock_ops_outbox_v1";
 const LAST_SYNC_KEY = "last_successful_sync_v1";
 const SELF_CHECK_OPERATIONS = new Set(["GET status.json"]);
 const CONFLICT_ERROR_CODES = new Set(["GATEWAY_HTTP_409", "GATEWAY_HTTP_422"]);
+const DIAGNOSTICS_SCHEMA_VERSION = 3;
+const RETRY_BUCKET_MS = 60 * 60 * 1000;
+const RETRY_BUCKET_COUNT = 24;
 export const DEVICE_DIAGNOSTICS_CHANGED_EVENT = "masterskaya:device-diagnostics-changed";
 
 function safeGet(storage, key) {
@@ -44,23 +47,98 @@ function safeText(value, maxLength) {
   return typeof value === "string" ? value.slice(0, maxLength) : "";
 }
 
-function operationMethod(operation) {
-  return String(operation || "").trim().split(/\s+/, 1)[0].toUpperCase();
+function normalizedOperation(operation) {
+  return String(operation || "").trim().replace(/\s+/g, " ").slice(0, 160);
 }
 
-function isWriteOperation(operation) {
-  return ["PUT", "POST", "PATCH", "DELETE"].includes(operationMethod(operation));
+function normalizeActiveFailures(value) {
+  if (!Array.isArray(value)) return [];
+  const byOperation = new Map();
+  for (const item of value) {
+    const operation = normalizedOperation(item?.operation);
+    const code = safeText(item?.code, 120);
+    if (!operation || !code) continue;
+    const entry = {
+      operation,
+      code,
+      at: positiveTimestamp(item?.at),
+      failures: Math.max(1, nonNegativeInteger(item?.failures)),
+    };
+    const previous = byOperation.get(operation);
+    if (!previous || (entry.at || 0) >= (previous.at || 0)) byOperation.set(operation, entry);
+  }
+  return [...byOperation.values()]
+    .sort((a, b) => (b.at || 0) - (a.at || 0))
+    .slice(0, 50);
 }
 
-function successRecoversFailure(successOperation, failureOperation) {
-  const successMethod = operationMethod(successOperation);
-  const failureMethod = operationMethod(failureOperation);
-  if (!successMethod) return false;
-  if (isWriteOperation(failureOperation)) return isWriteOperation(successOperation);
-  return !failureMethod || successMethod === failureMethod || isWriteOperation(successOperation);
+function latestActiveFailure(failures) {
+  return failures[0] || null;
 }
 
-function normalizeMetrics(raw) {
+function upsertActiveFailure(failures, { operation, code, at, increment = true }) {
+  const normalized = normalizedOperation(operation);
+  if (!normalized || !code) return failures;
+  const previous = failures.find(item => item.operation === normalized);
+  return normalizeActiveFailures([
+    ...failures.filter(item => item.operation !== normalized),
+    {
+      operation: normalized,
+      code: String(code).slice(0, 120),
+      at,
+      failures: increment ? (previous?.failures || 0) + 1 : Math.max(1, previous?.failures || 1),
+    },
+  ]);
+}
+
+function clearActiveFailure(failures, operation) {
+  const normalized = normalizedOperation(operation);
+  return failures.filter(item => item.operation !== normalized);
+}
+
+function normalizeRetryBuckets(value, referenceNow = Date.now()) {
+  const byHour = new Map();
+  for (const item of Array.isArray(value) ? value : []) {
+    const at = positiveTimestamp(item?.at);
+    const count = nonNegativeInteger(item?.count);
+    if (!at || !count) continue;
+    const hour = Math.floor(at / RETRY_BUCKET_MS) * RETRY_BUCKET_MS;
+    byHour.set(hour, (byHour.get(hour) || 0) + count);
+  }
+  const latestHour = Math.max(
+    Math.floor(Number(referenceNow || Date.now()) / RETRY_BUCKET_MS) * RETRY_BUCKET_MS,
+    ...byHour.keys(),
+  );
+  const cutoff = latestHour - (RETRY_BUCKET_COUNT - 1) * RETRY_BUCKET_MS;
+  return [...byHour.entries()]
+    .filter(([at]) => at >= cutoff)
+    .sort(([a], [b]) => a - b)
+    .map(([at, count]) => ({ at, count }));
+}
+
+function addRetryBucket(buckets, count, now) {
+  const retryCount = nonNegativeInteger(count);
+  const normalized = normalizeRetryBuckets(buckets, now);
+  if (!retryCount) return normalized;
+  const hour = Math.floor(now / RETRY_BUCKET_MS) * RETRY_BUCKET_MS;
+  return normalizeRetryBuckets([
+    ...normalized.filter(item => item.at !== hour),
+    { at: hour, count: (normalized.find(item => item.at === hour)?.count || 0) + retryCount },
+  ], now);
+}
+
+function applyActiveFailureSummary(target, failures) {
+  const normalized = normalizeActiveFailures(failures);
+  const latest = latestActiveFailure(normalized);
+  target.activeStorageFailures = normalized;
+  target.activeStorageFailureCount = normalized.length;
+  target.activeStorageErrorCode = latest?.code || "";
+  target.activeStorageErrorOperation = latest?.operation || "";
+  target.consecutiveStorageFailures = latest?.failures || 0;
+  return target;
+}
+
+function normalizeMetrics(raw, referenceNow = Date.now()) {
   const source = raw && typeof raw === "object" ? raw : {};
   const lastStorageSuccessAt = positiveTimestamp(source.lastStorageSuccessAt);
   const lastStorageErrorAt = positiveTimestamp(source.lastStorageErrorAt);
@@ -68,14 +146,30 @@ function normalizeMetrics(raw) {
   const schemaVersion = nonNegativeInteger(source.schemaVersion);
   const legacyErrorIsNewer = !!lastStorageErrorAt && (!lastStorageSuccessAt || lastStorageErrorAt > lastStorageSuccessAt);
   const lastStorageErrorCode = safeText(source.lastStorageErrorCode, 120);
-  const explicitConflictState = ["pending", "resolved", "failed", "historical"].includes(source.lastStorageConflictState)
+  const explicitConflictState = ["pending", "resolved", "failed", "recovered", "historical"].includes(source.lastStorageConflictState)
     ? source.lastStorageConflictState
     : "";
   const legacyConflictState = schemaVersion < 2 && CONFLICT_ERROR_CODES.has(lastStorageErrorCode)
     ? "historical"
     : "";
-  return {
-    schemaVersion: 2,
+  const legacyActiveCode = safeText(source.activeStorageErrorCode, 120)
+    || (schemaVersion < 2 && legacyErrorIsNewer && !CONFLICT_ERROR_CODES.has(lastStorageErrorCode) ? lastStorageErrorCode : "");
+  const legacyActiveOperation = safeText(source.activeStorageErrorOperation, 160)
+    || (schemaVersion < 2 && legacyErrorIsNewer && !CONFLICT_ERROR_CODES.has(lastStorageErrorCode) ? legacyOperation : "");
+  const activeStorageFailures = schemaVersion >= 3
+    ? normalizeActiveFailures(source.activeStorageFailures)
+    : normalizeActiveFailures(legacyActiveCode && legacyActiveOperation ? [{
+        code: legacyActiveCode,
+        operation: legacyActiveOperation,
+        at: lastStorageErrorAt,
+        failures: schemaVersion >= 2 ? Math.max(1, nonNegativeInteger(source.consecutiveStorageFailures)) : 1,
+      }] : []);
+  const conflictState = schemaVersion < 3 && explicitConflictState === "failed" && activeStorageFailures.length === 0
+    ? "recovered"
+    : (explicitConflictState || legacyConflictState);
+  const retryBuckets = normalizeRetryBuckets(source.storageRetryBuckets, referenceNow);
+  const normalized = {
+    schemaVersion: DIAGNOSTICS_SCHEMA_VERSION,
     lastStorageSuccessAt,
     lastStorageSuccessOperation: safeText(source.lastStorageSuccessOperation, 160)
       || (schemaVersion < 2 && lastStorageSuccessAt && !legacyErrorIsNewer ? legacyOperation : ""),
@@ -83,30 +177,33 @@ function normalizeMetrics(raw) {
     lastStorageErrorCode,
     lastStorageErrorOperation: safeText(source.lastStorageErrorOperation, 160)
       || (schemaVersion < 2 && legacyErrorIsNewer ? legacyOperation : ""),
-    activeStorageErrorCode: safeText(source.activeStorageErrorCode, 120)
-      || (schemaVersion < 2 && legacyErrorIsNewer && !CONFLICT_ERROR_CODES.has(lastStorageErrorCode) ? lastStorageErrorCode : ""),
-    activeStorageErrorOperation: safeText(source.activeStorageErrorOperation, 160)
-      || (schemaVersion < 2 && legacyErrorIsNewer && !CONFLICT_ERROR_CODES.has(lastStorageErrorCode) ? legacyOperation : ""),
-    consecutiveStorageFailures: schemaVersion >= 2
-      ? nonNegativeInteger(source.consecutiveStorageFailures)
-      : (legacyErrorIsNewer && !CONFLICT_ERROR_CODES.has(lastStorageErrorCode) ? 1 : 0),
     lastStorageOperation: legacyOperation,
     lastStorageRetries: nonNegativeInteger(source.lastStorageRetries),
     totalStorageRetries: nonNegativeInteger(source.totalStorageRetries),
-    lastStorageConflictState: explicitConflictState || legacyConflictState,
+    storageRetryBuckets: retryBuckets,
+    storageRetries24h: retryBuckets.reduce((sum, item) => sum + item.count, 0),
+    lastStorageConflictState: conflictState,
     lastStorageConflictAt: positiveTimestamp(source.lastStorageConflictAt)
       || (legacyConflictState ? lastStorageErrorAt : null),
+    lastStorageConflictRecoveredAt: positiveTimestamp(source.lastStorageConflictRecoveredAt),
     lastStorageConflictOperation: safeText(source.lastStorageConflictOperation, 160),
     lastStorageConflictCode: safeText(source.lastStorageConflictCode, 120)
       || (legacyConflictState ? lastStorageErrorCode : ""),
     lastStorageConflictAttempts: nonNegativeInteger(source.lastStorageConflictAttempts),
     totalResolvedStorageConflicts: nonNegativeInteger(source.totalResolvedStorageConflicts),
+    lastStorageSyncCycleState: ["success", "failed"].includes(source.lastStorageSyncCycleState)
+      ? source.lastStorageSyncCycleState
+      : "",
+    lastStorageSyncCycleAt: positiveTimestamp(source.lastStorageSyncCycleAt),
+    lastStorageSyncCycleErrorCode: safeText(source.lastStorageSyncCycleErrorCode, 120),
+    lastSuccessfulStorageSyncCycleAt: positiveTimestamp(source.lastSuccessfulStorageSyncCycleAt),
     lastSessionRenewedAt: positiveTimestamp(source.lastSessionRenewedAt),
   };
+  return applyActiveFailureSummary(normalized, activeStorageFailures);
 }
 
-export function readDiagnosticMetrics(storage = globalThis.localStorage) {
-  return normalizeMetrics(safeJson(safeGet(storage, DIAGNOSTICS_KEY), {}));
+export function readDiagnosticMetrics(storage = globalThis.localStorage, referenceNow = Date.now()) {
+  return normalizeMetrics(safeJson(safeGet(storage, DIAGNOSTICS_KEY), {}), referenceNow);
 }
 
 export function recordStorageRequestResult({
@@ -117,40 +214,44 @@ export function recordStorageRequestResult({
   now = Date.now(),
   storage = globalThis.localStorage,
 } = {}) {
-  const previous = readDiagnosticMetrics(storage);
-  const normalizedOperation = String(operation || "").slice(0, 160);
-  if (SELF_CHECK_OPERATIONS.has(normalizedOperation)) return previous;
+  const previous = readDiagnosticMetrics(storage, now);
+  const operationName = normalizedOperation(operation);
+  if (SELF_CHECK_OPERATIONS.has(operationName)) return previous;
 
   const retryCount = Number.isInteger(Number(retries)) ? Math.max(0, Number(retries)) : 0;
   const next = {
     ...previous,
-    schemaVersion: 2,
-    lastStorageOperation: normalizedOperation,
+    schemaVersion: DIAGNOSTICS_SCHEMA_VERSION,
+    lastStorageOperation: operationName,
     lastStorageRetries: retryCount,
     totalStorageRetries: previous.totalStorageRetries + retryCount,
+    storageRetryBuckets: addRetryBucket(previous.storageRetryBuckets, retryCount, now),
   };
   if (ok) {
     next.lastStorageSuccessAt = now;
-    next.lastStorageSuccessOperation = normalizedOperation;
-    if (previous.activeStorageErrorCode && successRecoversFailure(normalizedOperation, previous.activeStorageErrorOperation)) {
-      next.activeStorageErrorCode = "";
-      next.activeStorageErrorOperation = "";
-      next.consecutiveStorageFailures = 0;
+    next.lastStorageSuccessOperation = operationName;
+    applyActiveFailureSummary(next, clearActiveFailure(previous.activeStorageFailures, operationName));
+    if (previous.lastStorageConflictState === "failed"
+      && previous.lastStorageConflictOperation === operationName) {
+      next.lastStorageConflictState = "recovered";
+      next.lastStorageConflictRecoveredAt = now;
     }
   } else {
     next.lastStorageErrorAt = now;
     next.lastStorageErrorCode = String(code || "STORAGE_REQUEST_FAILED").slice(0, 120);
-    next.lastStorageErrorOperation = normalizedOperation;
+    next.lastStorageErrorOperation = operationName;
     if (CONFLICT_ERROR_CODES.has(next.lastStorageErrorCode)) {
       next.lastStorageConflictState = "pending";
       next.lastStorageConflictAt = now;
-      next.lastStorageConflictOperation = normalizedOperation;
+      next.lastStorageConflictOperation = operationName;
       next.lastStorageConflictCode = next.lastStorageErrorCode;
       next.lastStorageConflictAttempts = 1;
     } else {
-      next.activeStorageErrorCode = next.lastStorageErrorCode;
-      next.activeStorageErrorOperation = normalizedOperation;
-      next.consecutiveStorageFailures = previous.consecutiveStorageFailures + 1;
+      applyActiveFailureSummary(next, upsertActiveFailure(previous.activeStorageFailures, {
+        operation: operationName,
+        code: next.lastStorageErrorCode,
+        at: now,
+      }));
     }
   }
   safeSet(storage, DIAGNOSTICS_KEY, JSON.stringify(next));
@@ -163,17 +264,20 @@ export function recordStorageConflictResolved({
   now = Date.now(),
   storage = globalThis.localStorage,
 } = {}) {
-  const previous = readDiagnosticMetrics(storage);
+  const previous = readDiagnosticMetrics(storage, now);
+  const operationName = normalizedOperation(operation || previous.lastStorageConflictOperation);
   const next = {
     ...previous,
-    schemaVersion: 2,
+    schemaVersion: DIAGNOSTICS_SCHEMA_VERSION,
     lastStorageConflictState: "resolved",
     lastStorageConflictAt: now,
-    lastStorageConflictOperation: String(operation || previous.lastStorageConflictOperation || "").slice(0, 160),
+    lastStorageConflictRecoveredAt: now,
+    lastStorageConflictOperation: operationName,
     lastStorageConflictCode: previous.lastStorageConflictCode || "GATEWAY_HTTP_409",
     lastStorageConflictAttempts: Math.max(1, nonNegativeInteger(attempts)),
     totalResolvedStorageConflicts: previous.totalResolvedStorageConflicts + 1,
   };
+  applyActiveFailureSummary(next, clearActiveFailure(previous.activeStorageFailures, operationName));
   safeSet(storage, DIAGNOSTICS_KEY, JSON.stringify(next));
   return next;
 }
@@ -186,48 +290,74 @@ export function recordStorageConflictFailed({
   now = Date.now(),
   storage = globalThis.localStorage,
 } = {}) {
-  const previous = readDiagnosticMetrics(storage);
+  const previous = readDiagnosticMetrics(storage, now);
   const normalizedConflictCode = String(code || "GATEWAY_HTTP_409").slice(0, 120);
   const normalizedActiveCode = String(activeCode || normalizedConflictCode).slice(0, 120);
-  const normalizedOperation = String(operation || previous.lastStorageConflictOperation || "").slice(0, 160);
-  const alreadyRecorded = previous.activeStorageErrorCode === normalizedActiveCode
-    && previous.activeStorageErrorOperation === normalizedOperation;
+  const operationName = normalizedOperation(operation || previous.lastStorageConflictOperation);
+  const existingFailure = previous.activeStorageFailures.find(item => item.operation === operationName);
+  const alreadyRecorded = existingFailure?.code === normalizedActiveCode;
   const next = {
     ...previous,
-    schemaVersion: 2,
+    schemaVersion: DIAGNOSTICS_SCHEMA_VERSION,
     lastStorageConflictState: "failed",
     lastStorageConflictAt: now,
-    lastStorageConflictOperation: normalizedOperation,
+    lastStorageConflictOperation: operationName,
     lastStorageConflictCode: normalizedConflictCode,
     lastStorageConflictAttempts: Math.max(1, nonNegativeInteger(attempts)),
     lastStorageErrorAt: alreadyRecorded ? previous.lastStorageErrorAt : now,
     lastStorageErrorCode: normalizedActiveCode,
-    lastStorageErrorOperation: normalizedOperation,
-    activeStorageErrorCode: normalizedActiveCode,
-    activeStorageErrorOperation: normalizedOperation,
-    consecutiveStorageFailures: alreadyRecorded
-      ? previous.consecutiveStorageFailures
-      : previous.consecutiveStorageFailures + 1,
+    lastStorageErrorOperation: operationName,
   };
+  applyActiveFailureSummary(next, upsertActiveFailure(previous.activeStorageFailures, {
+    operation: operationName,
+    code: normalizedActiveCode,
+    at: now,
+    increment: !alreadyRecorded,
+  }));
   safeSet(storage, DIAGNOSTICS_KEY, JSON.stringify(next));
   return next;
 }
 
 export function deriveStorageRequestState(metrics) {
   const data = normalizeMetrics(metrics);
-  if (data.activeStorageErrorCode || data.consecutiveStorageFailures > 0 || data.lastStorageConflictState === "failed") {
+  if (data.activeStorageFailureCount > 0) {
     return { kind: "error", label: "Ошибка требует внимания" };
   }
   if (data.lastStorageConflictState === "pending") {
     return { kind: "warning", label: "Устраняется конфликт" };
   }
+  if (data.lastStorageSyncCycleState === "failed") {
+    return { kind: "warning", label: "Последний полный цикл с ошибкой" };
+  }
   if (data.lastStorageConflictState === "resolved") {
     return { kind: "resolved", label: "Конфликт автоматически разрешён" };
   }
-  if (data.lastStorageErrorCode || data.lastStorageConflictState === "historical") {
+  if (data.lastStorageConflictState === "recovered") {
+    return { kind: "recovered", label: "Сбой записи устранён" };
+  }
+  if (data.lastStorageErrorCode || data.lastStorageConflictState === "historical" || data.lastStorageConflictState === "failed") {
     return { kind: "history", label: "Работает · есть история" };
   }
   return { kind: "ok", label: "Работает без ошибок" };
+}
+
+export function recordStorageSyncCycleResult({
+  ok,
+  code = "",
+  now = Date.now(),
+  storage = globalThis.localStorage,
+} = {}) {
+  const previous = readDiagnosticMetrics(storage, now);
+  const next = {
+    ...previous,
+    schemaVersion: DIAGNOSTICS_SCHEMA_VERSION,
+    lastStorageSyncCycleState: ok ? "success" : "failed",
+    lastStorageSyncCycleAt: now,
+    lastStorageSyncCycleErrorCode: ok ? "" : String(code || "SYNC_CYCLE_FAILED").slice(0, 120),
+    lastSuccessfulStorageSyncCycleAt: ok ? now : previous.lastSuccessfulStorageSyncCycleAt,
+  };
+  safeSet(storage, DIAGNOSTICS_KEY, JSON.stringify(next));
+  return next;
 }
 
 export function recordSessionRenewal({ now = Date.now(), storage = globalThis.localStorage } = {}) {
@@ -392,15 +522,23 @@ export function buildDiagnosticReport(snapshot, appVersion = "unknown") {
     `Последний успешный запрос хранилища: ${reportDate(data.storage?.lastStorageSuccessAt)}`,
     `Операция последнего успешного запроса: ${data.storage?.lastStorageSuccessOperation || "нет данных"}`,
     `Активная ошибка хранилища: ${data.storage?.activeStorageErrorCode || "нет"}`,
+    `Операция активной ошибки: ${data.storage?.activeStorageErrorOperation || "нет"}`,
+    `Активных неустранённых операций: ${data.storage?.activeStorageFailureCount ?? 0}`,
     `Последняя ошибка в истории: ${data.storage?.lastStorageErrorCode || "нет"}`,
     `Операция последней ошибки: ${data.storage?.lastStorageErrorOperation || "нет данных"}`,
     `Время последней ошибки: ${reportDate(data.storage?.lastStorageErrorAt)}`,
-    `Последовательных окончательных ошибок: ${data.storage?.consecutiveStorageFailures ?? 0}`,
+    `Повторных сбоев активной операции: ${data.storage?.consecutiveStorageFailures ?? 0}`,
+    `Последний полный цикл синхронизации: ${data.storage?.lastStorageSyncCycleState || "нет данных"}`,
+    `Время последнего полного цикла: ${reportDate(data.storage?.lastStorageSyncCycleAt)}`,
+    `Последний успешный полный цикл: ${reportDate(data.storage?.lastSuccessfulStorageSyncCycleAt)}`,
+    `Ошибка последнего полного цикла: ${data.storage?.lastStorageSyncCycleErrorCode || "нет"}`,
     `Сетевых автоповторов в последнем запросе: ${data.storage?.lastStorageRetries ?? 0}`,
+    `Сетевых автоповторов за последние 24 часа: ${data.storage?.storageRetries24h ?? 0}`,
     `Сетевых автоповторов за всё время: ${data.storage?.totalStorageRetries ?? 0}`,
     `Последний конфликт записи: ${data.storage?.lastStorageConflictState || "нет"}`,
     `Операция последнего конфликта: ${data.storage?.lastStorageConflictOperation || "нет данных"}`,
     `Время последнего конфликта: ${reportDate(data.storage?.lastStorageConflictAt)}`,
+    `Время устранения последнего конфликта: ${reportDate(data.storage?.lastStorageConflictRecoveredAt)}`,
     `Разрешённых конфликтов за всё время: ${data.storage?.totalResolvedStorageConflicts ?? 0}`,
     `Последнее продление сессии: ${reportDate(data.storage?.lastSessionRenewedAt)}`,
     `Storage Gateway: ${data.servers?.storage?.ok ? "работает" : "ошибка"} · ${data.servers?.storage?.version || "нет версии"} · протокол ${data.servers?.storage?.protocolVersion ?? "—"}`,
