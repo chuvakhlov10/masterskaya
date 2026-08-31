@@ -21,6 +21,14 @@ test('stock editing uses the location of the visible stock tab', () => {
   assert.match(appSource, /appendStockOp\("delta", \{\s*location,\s*marker: m,/);
 });
 
+test('manual stock input commits one delta from the value captured at focus', () => {
+  assert.match(appSource, /const editBaseRef = useRef\(Number\(value\) \|\| 0\)/);
+  assert.match(appSource, /if \(!editingRef\.current \|\| editCommittedRef\.current\) return/);
+  assert.match(appSource, /const delta = final - editBaseRef\.current/);
+  assert.match(appSource, /onFocus=\{beginEdit\}/);
+  assert.match(appSource, /onBlur=\{commitEdit\}/);
+});
+
 test('movement quantities remain visible for markers in every category', () => {
   assert.match(appSource, /setCollapsed\(p=>\(\{\.\.\.p,\[cat\]:p\[cat\]===false\}\)\)/);
   assert.match(appSource, /flexShrink:0,whiteSpace:"nowrap"/);
