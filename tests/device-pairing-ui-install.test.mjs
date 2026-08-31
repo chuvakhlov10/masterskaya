@@ -48,6 +48,6 @@ test('connected application exposes safe server health and diagnostics', () => {
   assert.match(healthSource, /Безопасный карантин/);
 });
 
-test('stock recovery guard release is version 1.5.5', () => {
-  assert.match(statusSource, /APP_VERSION = "1\.5\.5"/);
+test('storage diagnostics recovery release is version 1.5.6', () => {
+  assert.match(statusSource, /APP_VERSION = "1\.5\.6"/);
 });

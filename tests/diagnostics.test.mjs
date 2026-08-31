@@ -11,6 +11,7 @@ import {
   recordStorageConflictFailed,
   recordStorageConflictResolved,
   recordStorageRequestResult,
+  recordStorageSyncCycleResult,
 } from '../src/diagnostics.js';
 
 class MemoryStorage {
@@ -252,6 +253,180 @@ test('successful reads do not hide a failed write, but a later write clears it',
   assert.equal(metrics.activeStorageErrorCode, '');
   assert.equal(metrics.consecutiveStorageFailures, 0);
   assert.equal(deriveStorageRequestState(metrics).kind, 'history');
+});
+
+test('parallel request results only recover the exact failed operation', () => {
+  const storage = storageFixture();
+  recordStorageRequestResult({
+    ok: false,
+    code: 'GATEWAY_REQUEST_FAILED',
+    operation: 'GET data/stock-ops.json',
+    now: 1_800_000_000_100,
+    storage,
+  });
+  recordStorageRequestResult({
+    ok: true,
+    operation: 'GET data/marker-aliases.json',
+    now: 1_800_000_000_200,
+    storage,
+  });
+
+  let metrics = readDiagnosticMetrics(storage);
+  assert.equal(metrics.activeStorageFailureCount, 1);
+  assert.equal(metrics.activeStorageErrorOperation, 'GET data/stock-ops.json');
+  assert.equal(deriveStorageRequestState(metrics).kind, 'error');
+
+  recordStorageRequestResult({
+    ok: false,
+    code: 'GATEWAY_REQUEST_FAILED',
+    operation: 'GET data/subcategories.json',
+    now: 1_800_000_000_300,
+    storage,
+  });
+  metrics = readDiagnosticMetrics(storage);
+  assert.equal(metrics.activeStorageFailureCount, 2);
+  assert.equal(metrics.activeStorageErrorOperation, 'GET data/subcategories.json');
+
+  recordStorageRequestResult({
+    ok: true,
+    operation: 'GET data/stock-ops.json',
+    now: 1_800_000_000_400,
+    storage,
+  });
+  metrics = readDiagnosticMetrics(storage);
+  assert.equal(metrics.activeStorageFailureCount, 1);
+  assert.equal(metrics.activeStorageErrorOperation, 'GET data/subcategories.json');
+
+  recordStorageRequestResult({
+    ok: true,
+    operation: 'GET data/subcategories.json',
+    now: 1_800_000_000_500,
+    storage,
+  });
+  metrics = readDiagnosticMetrics(storage);
+  assert.equal(metrics.activeStorageFailureCount, 0);
+  assert.equal(metrics.activeStorageErrorCode, '');
+  assert.equal(deriveStorageRequestState(metrics).kind, 'history');
+});
+
+test('failed conflict is recovered only by a successful write to the same file', () => {
+  const storage = storageFixture();
+  recordStorageRequestResult({
+    ok: false,
+    code: 'GATEWAY_REQUEST_FAILED',
+    operation: 'PUT data/records.json',
+    now: 1_800_000_000_100,
+    storage,
+  });
+  recordStorageConflictFailed({
+    operation: 'PUT data/records.json',
+    code: 'GATEWAY_HTTP_409',
+    activeCode: 'GATEWAY_REQUEST_FAILED',
+    attempts: 1,
+    now: 1_800_000_000_200,
+    storage,
+  });
+  recordStorageRequestResult({
+    ok: true,
+    operation: 'PUT data/prices.json',
+    now: 1_800_000_000_300,
+    storage,
+  });
+
+  let metrics = readDiagnosticMetrics(storage);
+  assert.equal(metrics.lastStorageConflictState, 'failed');
+  assert.equal(metrics.activeStorageErrorOperation, 'PUT data/records.json');
+  assert.equal(deriveStorageRequestState(metrics).kind, 'error');
+
+  recordStorageRequestResult({
+    ok: true,
+    operation: 'PUT data/records.json',
+    now: 1_800_000_000_400,
+    storage,
+  });
+  metrics = readDiagnosticMetrics(storage);
+  assert.equal(metrics.lastStorageConflictState, 'recovered');
+  assert.equal(metrics.lastStorageConflictRecoveredAt, 1_800_000_000_400);
+  assert.equal(metrics.activeStorageFailureCount, 0);
+  assert.deepEqual(deriveStorageRequestState(metrics), {
+    kind: 'recovered',
+    label: 'Сбой записи устранён',
+  });
+});
+
+test('stale version 2 failed conflict without an active error migrates to recovered history', () => {
+  const storage = storageFixture();
+  storage.setItem('masterskaya_diagnostics_v1', JSON.stringify({
+    schemaVersion: 2,
+    lastStorageSuccessAt: 1_800_000_000_500,
+    lastStorageSuccessOperation: 'PUT data/records.json',
+    lastStorageErrorAt: 1_800_000_000_100,
+    lastStorageErrorCode: 'GATEWAY_REQUEST_FAILED',
+    lastStorageErrorOperation: 'PUT data/records.json',
+    activeStorageErrorCode: '',
+    activeStorageErrorOperation: '',
+    consecutiveStorageFailures: 0,
+    lastStorageConflictState: 'failed',
+    lastStorageConflictOperation: 'PUT data/records.json',
+    lastStorageConflictAt: 1_800_000_000_200,
+  }));
+
+  const metrics = readDiagnosticMetrics(storage);
+  assert.equal(metrics.schemaVersion, 3);
+  assert.equal(metrics.lastStorageConflictState, 'recovered');
+  assert.equal(metrics.activeStorageFailureCount, 0);
+  assert.equal(deriveStorageRequestState(metrics).kind, 'recovered');
+});
+
+test('full synchronization cycle is reported independently from individual requests', () => {
+  const storage = storageFixture();
+  recordStorageSyncCycleResult({ ok: true, now: 1_800_000_000_100, storage });
+  recordStorageSyncCycleResult({
+    ok: false,
+    code: 'GATEWAY_REQUEST_FAILED',
+    now: 1_800_000_000_200,
+    storage,
+  });
+
+  let metrics = readDiagnosticMetrics(storage);
+  assert.equal(metrics.lastStorageSyncCycleState, 'failed');
+  assert.equal(metrics.lastStorageSyncCycleErrorCode, 'GATEWAY_REQUEST_FAILED');
+  assert.equal(metrics.lastSuccessfulStorageSyncCycleAt, 1_800_000_000_100);
+  assert.deepEqual(deriveStorageRequestState(metrics), {
+    kind: 'warning',
+    label: 'Последний полный цикл с ошибкой',
+  });
+
+  recordStorageSyncCycleResult({ ok: true, now: 1_800_000_000_300, storage });
+  metrics = readDiagnosticMetrics(storage);
+  assert.equal(metrics.lastStorageSyncCycleState, 'success');
+  assert.equal(metrics.lastStorageSyncCycleErrorCode, '');
+  assert.equal(metrics.lastSuccessfulStorageSyncCycleAt, 1_800_000_000_300);
+  assert.equal(deriveStorageRequestState(metrics).kind, 'ok');
+});
+
+test('24 hour retry counter does not inflate the lifetime history', () => {
+  const storage = storageFixture();
+  const hour = 60 * 60 * 1000;
+  const start = 1_800_000_000_000;
+  recordStorageRequestResult({
+    ok: true,
+    operation: 'GET data/records.json',
+    retries: 2,
+    now: start,
+    storage,
+  });
+  recordStorageRequestResult({
+    ok: true,
+    operation: 'GET data/records.json',
+    retries: 3,
+    now: start + 25 * hour,
+    storage,
+  });
+
+  const metrics = readDiagnosticMetrics(storage, start + 25 * hour);
+  assert.equal(metrics.storageRetries24h, 3);
+  assert.equal(metrics.totalStorageRetries, 5);
 });
 
 test('diagnostic snapshot reports PWA, queues and masked device id', async () => {

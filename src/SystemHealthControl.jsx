@@ -54,8 +54,15 @@ function conflictStateLabel(value) {
   if (value === "pending") return "Выполняется повтор записи";
   if (value === "resolved") return "Автоматически разрешён";
   if (value === "failed") return "Не удалось разрешить";
+  if (value === "recovered") return "Сбой устранён последующей записью";
   if (value === "historical") return "Старая запись в истории";
   return "нет";
+}
+
+function syncCycleStateLabel(value) {
+  if (value === "success") return "Успешно";
+  if (value === "failed") return "Завершился с ошибкой";
+  return "нет данных";
 }
 
 function Card({ title, status, statusColor, children }) {
@@ -248,15 +255,23 @@ export default function SystemHealthControl() {
                   <Row label="Последний успешный запрос" value={formatDate(client.storage.lastStorageSuccessAt)} />
                   <Row label="Успешная операция" value={client.storage.lastStorageSuccessOperation || "нет данных"} />
                   <Row label="Активная ошибка" value={client.storage.activeStorageErrorCode || "нет"} valueColor={client.storage.activeStorageErrorCode ? "#fca5a5" : palette.text} />
-                  <Row label="Последовательных окончательных ошибок" value={client.storage.consecutiveStorageFailures} valueColor={client.storage.consecutiveStorageFailures ? "#fca5a5" : palette.text} />
+                  <Row label="Операция активной ошибки" value={client.storage.activeStorageErrorOperation || "нет"} valueColor={client.storage.activeStorageErrorOperation ? "#fca5a5" : palette.text} />
+                  <Row label="Активных неустранённых операций" value={client.storage.activeStorageFailureCount} valueColor={client.storage.activeStorageFailureCount ? "#fca5a5" : palette.text} />
+                  <Row label="Повторных сбоев активной операции" value={client.storage.consecutiveStorageFailures} valueColor={client.storage.consecutiveStorageFailures ? "#fca5a5" : palette.text} />
                   <Row label="Последняя ошибка в истории" value={client.storage.lastStorageErrorCode || "нет"} />
                   <Row label="Операция с ошибкой" value={client.storage.lastStorageErrorOperation || "нет данных"} />
                   <Row label="Время последней ошибки" value={formatDate(client.storage.lastStorageErrorAt)} />
+                  <Row label="Последний полный цикл" value={syncCycleStateLabel(client.storage.lastStorageSyncCycleState)} valueColor={client.storage.lastStorageSyncCycleState === "failed" ? "#fbbf24" : palette.text} />
+                  <Row label="Время полного цикла" value={formatDate(client.storage.lastStorageSyncCycleAt)} />
+                  <Row label="Последний успешный полный цикл" value={formatDate(client.storage.lastSuccessfulStorageSyncCycleAt)} />
+                  <Row label="Ошибка полного цикла" value={client.storage.lastStorageSyncCycleErrorCode || "нет"} />
                   <Row label="Состояние последнего конфликта" value={conflictStateLabel(client.storage.lastStorageConflictState)} valueColor={client.storage.lastStorageConflictState === "failed" ? "#fca5a5" : palette.text} />
                   <Row label="Операция конфликта" value={client.storage.lastStorageConflictOperation || "нет данных"} />
                   <Row label="Время конфликта" value={formatDate(client.storage.lastStorageConflictAt)} />
+                  <Row label="Время устранения конфликта" value={formatDate(client.storage.lastStorageConflictRecoveredAt)} />
                   <Row label="Разрешённых конфликтов за всё время" value={client.storage.totalResolvedStorageConflicts} />
                   <Row label="Сетевых автоповторов в последнем запросе" value={client.storage.lastStorageRetries} />
+                  <Row label="Сетевых автоповторов за последние 24 часа" value={client.storage.storageRetries24h} />
                   <Row label="Сетевых автоповторов за всё время" value={client.storage.totalStorageRetries} />
                 </Card>
               )}

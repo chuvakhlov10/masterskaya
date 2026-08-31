@@ -24,7 +24,7 @@ import {
   reconcileStockOutboxWithHistory,
 } from "./sync-core.js";
 import { APP_VERSION, deriveSyncView, normalizeBackupStatus } from "./status-core.js";
-import { notifyDeviceDiagnosticsChanged } from "./diagnostics.js";
+import { notifyDeviceDiagnosticsChanged, recordStorageSyncCycleResult } from "./diagnostics.js";
 import { appendStockOutboxQuarantine } from "./stock-outbox-quarantine.js";
 
 const CLIENT_ID = String(Date.now()) + '-' + Math.random().toString(36).slice(2, 8);
@@ -184,10 +184,52 @@ function NumInput({ value, onChange, style, min="0", placeholder="" }) {
 // Если нет — кнопки используют silentSave/set (старое поведение)
 function StepperInput({ value, onChange, step = 1, min = 0, style, inputStyle, silentSave = null, silentSaveDelta = null }) {
   const [localVal, setLocalVal] = useState(String(value ?? ""));
+  const editingRef = useRef(false);
+  const editBaseRef = useRef(Number(value) || 0);
+  const editDirtyRef = useRef(false);
+  const editCommittedRef = useRef(false);
 
   useEffect(() => {
-    setLocalVal(String(value ?? ""));
+    // Пока пользователь печатает, фоновые синхронизации не должны затирать
+    // введённое значение. После завершения редактирования снова следуем props.
+    if (!editingRef.current) {
+      setLocalVal(String(value ?? ""));
+      editBaseRef.current = Number(value) || 0;
+    }
   }, [value]);
+
+  const beginEdit = () => {
+    if (editingRef.current) return;
+    editingRef.current = true;
+    editBaseRef.current = Number(value) || 0;
+    editDirtyRef.current = false;
+    editCommittedRef.current = false;
+  };
+
+  const commitEdit = () => {
+    const parsed = localVal === "" ? 0 : parseInt(localVal, 10);
+    const final = isNaN(parsed) || parsed < min ? Number(min) : parsed;
+    setLocalVal(String(final));
+
+    // blur может повториться при переключении вкладки или размонтировании.
+    // Одно ручное редактирование должно породить не более одной операции.
+    if (!editingRef.current || editCommittedRef.current) return;
+    editingRef.current = false;
+    editCommittedRef.current = true;
+
+    if (!editDirtyRef.current) return;
+    const delta = final - editBaseRef.current;
+    editBaseRef.current = final;
+    if (delta === 0) return;
+
+    if (silentSaveDelta) {
+      silentSaveDelta(delta);
+    } else if (silentSave) {
+      silentSave(final);
+    } else if (onChange) {
+      onChange(final);
+    }
+  };
 
   const dec = () => {
     const cur = parseInt(localVal || "0", 10);
@@ -238,26 +280,20 @@ function StepperInput({ value, onChange, step = 1, min = 0, style, inputStyle, s
         onMouseEnter={e=>{if(parseInt(localVal||"0")>min){e.target.style.background=C.brand;e.target.style.color="#fff";}}}
         onMouseLeave={e=>{e.target.style.background=C.bgSection;e.target.style.color=C.textSub;}}>−</button>
       <input type="text" inputMode="numeric" value={localVal}
+        onFocus={beginEdit}
         onChange={e => {
           const v = e.target.value.replace(/[^0-9]/g,"");
+          beginEdit();
+          editDirtyRef.current = true;
           setLocalVal(v);
         }}
-        onBlur={() => {
-          const n = localVal===""?0:parseInt(localVal,10);
-          const final = isNaN(n)||n<min ? min : n;
-          setLocalVal(String(final));
-          // БАГ#1: НЕ создаём set-операцию! Вычисляем delta и используем delta.
-          // set перезаписывает все delta от других устройств → откат.
-          // delta складывается с другими → корректно.
-          if (final !== value) {
-            if (silentSaveDelta) {
-              // Вычисляем разницу и отправляем как delta
-              silentSaveDelta(final - value);
-            } else if (silentSave) {
-              silentSave(final);
-            } else if (onChange) {
-              onChange(final);
-            }
+        onBlur={commitEdit}
+        onKeyDown={e => {
+          if (e.key === "Enter") e.currentTarget.blur();
+          if (e.key === "Escape") {
+            editDirtyRef.current = false;
+            setLocalVal(String(editBaseRef.current));
+            e.currentTarget.blur();
           }
         }}
         style={{ textAlign: "center", width: 50, padding: "6px 4px", fontSize: 14, fontWeight: 700, border: "none", borderLeft: `1px solid ${C.border}`, borderRight: `1px solid ${C.border}`, background: C.bgCard, fontVariantNumeric: "tabular-nums", outline: "none", ...inputStyle }}/>
@@ -2729,8 +2765,13 @@ async function refreshStockFromServer() {
 
         setPendingCount(getQueue().length + getStockOutbox().length);
         setTimeout(()=>window.scrollTo(0, sY), 0);
+        recordStorageSyncCycleResult({ ok: true });
         setSyncStatus(wsConnectedRef.current ? "ws" : "synced");
       } catch(error) {
+        recordStorageSyncCycleResult({
+          ok: false,
+          code: error?.code || error?.message || "SYNC_CYCLE_FAILED",
+        });
         setLastSyncError(error.message || "Ошибка обновления данных");
         console.warn('[POLL] Ошибка:', error.message);
         setSyncStatus(navigator.onLine ? "idle" : "offline");
