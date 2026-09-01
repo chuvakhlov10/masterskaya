@@ -151,6 +151,40 @@ test('gateway forwards an allowed data GET with an installation token', async ()
   assert.match(calls.at(-1).options.headers.Authorization, /^Bearer ghs_/);
 });
 
+test('gateway hydrates repository files larger than one megabyte through the Git blob API', async () => {
+  const session = createSessionToken({ secret: SESSION_SECRET, clientId: 'device-client-123', nowMs: NOW, version: 1 });
+  const sha = 'c'.repeat(40);
+  const content = encodeRepoJson({ schemaVersion: 4, epoch: 1, ops: [] });
+  const calls = [];
+  const handler = createHandler({
+    env: ENV,
+    now: () => NOW,
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      if (url.endsWith('/installation')) return jsonResponse({ id: 1 });
+      if (url.includes('/access_tokens')) return jsonResponse({ token: 'ghs_installation_token_abcdefghijklmnopqrstuvwxyz', expires_at: '2026-08-04T21:00:00Z' });
+      if (url.endsWith('/contents/data/stock-ops.json')) {
+        return jsonResponse({ type: 'file', sha, size: 1_022_047, encoding: 'none', content: '' });
+      }
+      if (url.endsWith(`/git/blobs/${sha}`)) {
+        return jsonResponse({ sha, size: 1_022_047, encoding: 'base64', content });
+      }
+      assert.fail(`unexpected ${url}`);
+    },
+  });
+
+  const response = await handler(event(
+    { action: 'github', method: 'GET', path: 'data/stock-ops.json' },
+    { 'x-masterskaya-session': session.token },
+  ));
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(JSON.parse(response.body), {
+    type: 'file', sha, size: 1_022_047, encoding: 'base64', content,
+  });
+  assert.equal(calls.filter(call => call.url.includes('/contents/data/stock-ops.json')).length, 1);
+  assert.equal(calls.filter(call => call.url.includes(`/git/blobs/${sha}`)).length, 1);
+});
+
 test('gateway forwards a validated PUT without widening repository access', async () => {
   const session = createSessionToken({ secret: SESSION_SECRET, clientId: 'device-client-123', nowMs: NOW, version: 1 });
   let putCall;
@@ -221,6 +255,49 @@ test('stock gateway allows append-only deltas while preserving existing migratio
   }, { 'x-masterskaya-session': session.token }));
   assert.equal(response.statusCode, 200);
   assert.equal(stockGets, 1);
+  assert.equal(stockPuts, 1);
+});
+
+test('stock gateway validates an append against a large journal loaded through the Git blob API', async () => {
+  const session = createSessionToken({ secret: SESSION_SECRET, clientId: 'device-client-123', nowMs: NOW, version: 1 });
+  const currentOps = [
+    { type: 'delta', location: 'main', marker: 'A', delta: 1, ts: 100, client: 'device', opId: 'existing-delta' },
+  ];
+  const nextOps = [
+    ...currentOps,
+    { type: 'delta', location: 'main', marker: 'A', delta: 2, ts: 200, client: 'device', opId: 'pending-delta' },
+  ];
+  const sha = 'd'.repeat(40);
+  let blobGets = 0;
+  let stockPuts = 0;
+  const handler = createHandler({
+    env: ENV,
+    now: () => NOW,
+    fetchImpl: async (url, options) => {
+      if (url.endsWith('/installation')) return jsonResponse({ id: 1 });
+      if (url.includes('/access_tokens')) return jsonResponse({ token: 'ghs_installation_token_abcdefghijklmnopqrstuvwxyz', expires_at: '2026-08-04T21:00:00Z' });
+      if (url.endsWith('/contents/data/stock-ops.json') && options.method === 'GET') {
+        return jsonResponse({ type: 'file', sha, size: 1_022_047, encoding: 'none', content: '' });
+      }
+      if (url.endsWith(`/git/blobs/${sha}`)) {
+        blobGets++;
+        return jsonResponse({ sha, size: 1_022_047, encoding: 'base64', content: encodeRepoJson(stockJournal(currentOps)) });
+      }
+      if (url.endsWith('/contents/data/stock-ops.json') && options.method === 'PUT') {
+        stockPuts++;
+        return jsonResponse({ content: { sha: 'e'.repeat(40) } });
+      }
+      assert.fail(`unexpected ${url}`);
+    },
+  });
+
+  const response = await handler(event({
+    action: 'github', method: 'PUT', path: 'data/stock-ops.json',
+    body: { message: 'append pending delta', content: encodeRepoJson(stockJournal(nextOps)), sha },
+  }, { 'x-masterskaya-session': session.token }));
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(blobGets, 1);
   assert.equal(stockPuts, 1);
 });
 
