@@ -13,9 +13,9 @@ const ROOT = path.resolve(new URL('..', import.meta.url).pathname);
 const packageWorkflow = fs.readFileSync(path.join(ROOT, '.github/workflows/package-yandex-functions.yml'), 'utf8');
 
 test('deployment archive label matches the storage function version', () => {
-  assert.match(packageWorkflow, /masterskaya-storage-gateway-1\.5\.3\.zip/);
-  assert.match(packageWorkflow, /name: yandex-functions-1\.5\.3/);
-  assert.doesNotMatch(packageWorkflow, /masterskaya-storage-gateway-1\.5\.2\.zip/);
+  assert.match(packageWorkflow, /masterskaya-storage-gateway-1\.5\.4\.zip/);
+  assert.match(packageWorkflow, /name: yandex-functions-1\.5\.4/);
+  assert.doesNotMatch(packageWorkflow, /masterskaya-storage-gateway-1\.5\.3\.zip/);
 });
 
 test('function builder creates executable single-file bundles with injected metadata', () => {
@@ -29,7 +29,7 @@ test('function builder creates executable single-file bundles with injected meta
     });
 
     const expected = {
-      storage: { version: '1.5.3', protocol: 4 },
+      storage: { version: '1.5.4', protocol: 4 },
       ably: { version: '1.4.1', protocol: 3 },
     };
     for (const targetName of ['storage', 'ably']) {

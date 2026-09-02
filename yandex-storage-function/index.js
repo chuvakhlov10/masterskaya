@@ -220,6 +220,13 @@ function encodeRepoPath(path) {
   return path.split('/').map(segment => encodeURIComponent(segment)).join('/');
 }
 
+function needsBlobContent(payload) {
+  if (!payload || payload.type !== 'file') return false;
+  if (!/^[a-f0-9]{40,64}$/i.test(String(payload.sha || ''))) return false;
+  return payload.encoding === 'none'
+    || (Number(payload.size) > 1_000_000 && !payload.content);
+}
+
 function normalizeRepoRequest(input = {}) {
   const method = String(input.method || '').toUpperCase();
   if (!['GET', 'PUT', 'DELETE'].includes(method)) throw makeError('METHOD_NOT_ALLOWED', 405);
@@ -423,7 +430,30 @@ function createGitHubAppClient({ fetchImpl = globalThis.fetch, env = process.env
         cachedTokenExpiresAt = 0;
         continue;
       }
-      const payload = response.status === 204 ? null : await readJsonSafe(response);
+      let payload = response.status === 204 ? null : await readJsonSafe(response);
+      if (response.ok && normalized.method === 'GET' && needsBlobContent(payload)) {
+        const blobResponse = await fetchWithTimeout(
+          fetchImpl,
+          `${GITHUB_API}/repos/${OWNER}/${REPO}/git/blobs/${payload.sha}`,
+          { method: 'GET', headers: githubHeaders(token) },
+        );
+        if (blobResponse.status === 401 && attempt === 0) {
+          cachedToken = null;
+          cachedTokenExpiresAt = 0;
+          continue;
+        }
+        const blob = await readJsonSafe(blobResponse);
+        if (!blobResponse.ok) return { status: blobResponse.status, ok: false, payload: blob };
+        if (blob?.sha !== payload.sha || blob?.encoding !== 'base64' || typeof blob?.content !== 'string') {
+          throw makeError('GITHUB_BLOB_CONTENT_INVALID', 503);
+        }
+        payload = {
+          ...payload,
+          content: blob.content,
+          encoding: blob.encoding,
+          size: Number.isFinite(Number(blob.size)) ? Number(blob.size) : payload.size,
+        };
+      }
       return { status: response.status, ok: response.ok, payload };
     }
     throw makeError('GITHUB_REQUEST_FAILED', 503);
