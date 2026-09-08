@@ -9,6 +9,7 @@
     "verify:functions": "node scripts/verify-yandex-bundles.mjs",
     "preview": "vite preview",
     "plan:stock-archive": "node scripts/plan-stock-archive.mjs",
+    "plan:stock-rollover": "node scripts/plan-stock-rollover.mjs",
     "test": "node --test tests/*.test.mjs",
     "check": "npm run test && npm run build && npm run build:functions && npm run verify:functions"
   },
