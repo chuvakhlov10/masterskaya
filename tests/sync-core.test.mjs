@@ -81,6 +81,36 @@ test('rename keeps later offline operation under the new marker name', () => {
   assert.equal(stock.main.OLD, undefined);
 });
 
+test('renaming a marker back restores its quantities in every warehouse', () => {
+  const start = 1_800_000_000_000;
+  const operations = [
+    op({ type: 'init', opId: 'main', marker: 'Favour', location: 'main', value: 30, delta: undefined, ts: start }),
+    op({ type: 'init', opId: 'smart', marker: 'Favour', location: 'ws:SMART', value: 13, delta: undefined, ts: start + 1 }),
+    op({ type: 'init', opId: 'begemot', marker: 'Favour', location: 'ws:Бегемот', value: 9, delta: undefined, ts: start + 2 }),
+    op({ type: 'rename', opId: 'first-rename', oldMarker: 'Favour', newMarker: 'Favour (AN 0015)', ts: start + 3 }),
+    op({ type: 'rename', opId: 'rename-back', oldMarker: 'Favour (AN 0015)', newMarker: 'Favour', ts: start + 4 }),
+    op({ opId: 'later-delivery', marker: 'Favour', delta: 2, ts: start + 5 }),
+  ];
+  const stock = applyOpsToStock(operations);
+  assert.equal(stock.main.Favour, 32);
+  assert.equal(stock.ws.SMART.Favour, 13);
+  assert.equal(stock.ws.Бегемот.Favour, 9);
+  assert.equal(stock.main['Favour (AN 0015)'], undefined);
+});
+
+test('renaming back across an archive checkpoint restores the original name', () => {
+  const cutoff = 1_800_000_000_100;
+  const archive = createStockArchivePlan([
+    op({ type: 'init', opId: 'initial', marker: 'ORIGINAL', value: 7, delta: undefined, ts: cutoff - 30 }),
+    op({ type: 'rename', opId: 'archived-rename', oldMarker: 'ORIGINAL', newMarker: 'TEMP', ts: cutoff - 20 }),
+  ], cutoff);
+  const stock = applyStockCheckpoint(archive.checkpoint, [
+    op({ type: 'rename', opId: 'rename-back', oldMarker: 'TEMP', newMarker: 'ORIGINAL', ts: cutoff + 10 }),
+  ]);
+  assert.equal(stock.main.ORIGINAL, 7);
+  assert.equal(stock.main.TEMP, undefined);
+});
+
 test('invalid location is skipped and never interpreted as main warehouse', () => {
   const stock = applyOpsToStock([op({ opId: 'bad-location', location: 'SMART', delta: 9 })]);
   assert.deepEqual(stock.main, {});
