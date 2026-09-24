@@ -424,7 +424,14 @@ export function replayStockOps(ops, options = {}) {
     try {
       if (op.type === "rename") {
         const oldMarker = resolveMarker(op.oldMarker);
-        const newMarker = resolveMarker(op.newMarker);
+        const requestedName = typeof op.newMarker === "string" ? op.newMarker.trim() : "";
+        // A name can be reused after a rename (A → B → A). In that case A is
+        // still an alias of B. Release it before moving the balance back;
+        // otherwise both names resolve to B and the second rename is skipped.
+        if (requestedName && requestedName !== oldMarker && resolveMarker(requestedName) === oldMarker) {
+          renamedTo.delete(requestedName);
+        }
+        const newMarker = resolveMarker(requestedName);
         if (!oldMarker || !newMarker || oldMarker === newMarker) continue;
         renamedTo.set(oldMarker, newMarker);
         for (const bucket of [result.main, ...workshops.map(ws => result.ws[ws])]) {
