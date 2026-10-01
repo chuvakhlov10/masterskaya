@@ -48,6 +48,6 @@ test('connected application exposes safe server health and diagnostics', () => {
   assert.match(healthSource, /Безопасный карантин/);
 });
 
-test('stock rename recovery release is version 1.5.7', () => {
-  assert.match(statusSource, /APP_VERSION = "1\.5\.7"/);
+test('durable record persistence release is version 1.5.8', () => {
+  assert.match(statusSource, /APP_VERSION = "1\.5\.8"/);
 });
