@@ -26,6 +26,7 @@ import {
 import { APP_VERSION, deriveSyncView, normalizeBackupStatus } from "./status-core.js";
 import { notifyDeviceDiagnosticsChanged, recordStorageSyncCycleResult } from "./diagnostics.js";
 import { appendStockOutboxQuarantine } from "./stock-outbox-quarantine.js";
+import { compactRecordWrite, mergeRecordRefresh, persistPendingWrites, persistRecordMutation } from "./record-sync.js";
 
 const CLIENT_ID = String(Date.now()) + '-' + Math.random().toString(36).slice(2, 8);
 const ably = new Ably.Realtime(createSecureAblyRealtimeOptions({
@@ -412,7 +413,7 @@ function setQueue(q){
     }
   }
   const compacted = [...latestByKey.values()].sort((a,b)=>a.ts-b.ts);
-  localStorage.setItem(PENDING_WRITES_KEY, JSON.stringify(compacted));
+  persistPendingWrites(localStorage, compacted);
   notifyDeviceDiagnosticsChanged();
 }
 function getQueuedWrite(key, id = null){
@@ -422,6 +423,10 @@ function enqueueWrite(key, val, id = makeQueueId(), options = {}){
   const queue = getQueue();
   const previous = queue.find(item => item.key === key) || null;
   let item = { key, val, ts: Date.now(), id, mode: "snapshot" };
+
+  if(key === "records" && Array.isArray(options.beforeValue)) {
+    item.val = compactRecordWrite(options.beforeValue, val, previous?.val || []);
+  }
 
   if(OBJECT_PATCH_KEYS.has(key)) {
     const before = options.beforeValue !== undefined
@@ -500,7 +505,7 @@ function getMergeFn(key){
 }
 
 async function sSet(key, val, options = {}){
-  cacheSet(key, val);
+  if(key !== "records") cacheSet(key, val);
   const durableQueue = options.durableQueue !== false;
   let queueId = null;
   let queueItem = null;
@@ -520,7 +525,7 @@ async function sSet(key, val, options = {}){
   }
 
   const isPatch = queueItem?.mode === "patch";
-  const valueToWrite = isPatch ? queueItem.patch : val;
+  const valueToWrite = isPatch ? queueItem.patch : (key === "records" ? (queueItem?.val ?? val) : val);
   const mergeFn = isPatch ? applyObjectPatch : (options.mergeFn || getMergeFn(key));
   try {
     const result = await dbSet(key, valueToWrite, mergeFn);
@@ -1921,6 +1926,14 @@ export default function App(){
     return refs[key]?.current;
   }
 
+  function applyRecordRefresh(serverRecords){
+    const merged = mergeRecordRefresh(serverRecords, recordsRef.current,
+      getQueuedWrite("records")?.val || [], recordDeletionIds);
+    applyLocalValue("records", merged);
+    cacheSet("records", merged);
+    return merged;
+  }
+
   // форма записи
   const [category, setCategory] = useState("Автомобильные");
   const [marker, setMarker] = useState("");
@@ -2130,15 +2143,14 @@ export default function App(){
   // затем с debounce отправляется в GitHub. Ably используется только как сигнал
   // ПОСЛЕ подтверждённого commit — неподтверждённые snapshots другим устройствам
   // больше не рассылаются.
-  async function saveAndSync(key, value, setter) {
+  function saveAndSync(key, value, setter, options = {}) {
     const beforeValue = currentValueForKey(key);
+    // Persist first. Callers can catch a storage failure synchronously before
+    // showing success or creating any stock effect.
+    const queueId = options.queueId || enqueueWrite(key, value, undefined, { beforeValue });
     applyLocalValue(key, value, setter);
     cacheSet(key, value);
-    if (key === "records" && Array.isArray(value)) {
-      try { localStorage.setItem("records_local", JSON.stringify(value)); } catch {}
-    }
 
-    const queueId = enqueueWrite(key, value, undefined, { beforeValue });
     saveQueueIdsRef.current[key] = queueId;
     setPendingCount(getQueue().length + getStockOutbox().length);
 
@@ -2162,22 +2174,25 @@ export default function App(){
           "passwords": passwordsRef,
         };
         const ref = refMap[key];
-        const valueToSave = ref ? ref.current : value;
         const latestQueueId = saveQueueIdsRef.current[key] || queueId;
+        const queuedRecordWrite = key === "records" ? getQueuedWrite(key) : null;
+        const valueToSave = key === "records" ? (queuedRecordWrite?.val || []) : (ref ? ref.current : value);
         // Обновляем очередь актуальным ref, не snapshot из первого вызова.
-        refreshQueuedWrite(key, latestQueueId, valueToSave);
 
         let result;
         try {
-          result = await sSet(key, valueToSave, { queueId: latestQueueId });
+          if(key !== "records") refreshQueuedWrite(key, latestQueueId, valueToSave);
+          result = key === "records" && !queuedRecordWrite
+            ? { ok:true, queued:false, value:recordsRef.current }
+            : await sSet(key, valueToSave, { queueId: queuedRecordWrite?.id || latestQueueId });
           setPendingCount(getQueue().length + getStockOutbox().length);
           if (result?.ok && !result.queued) {
             const committedValue = result.value ?? valueToSave;
-            const stateSetter = stateSettersRef.current[key];
-            if (stateSetter) stateSetter(committedValue);
             if (key === "records" && Array.isArray(committedValue)) {
-              recordsRef.current = committedValue;
-              try { localStorage.setItem("records_local", JSON.stringify(committedValue)); } catch {}
+              applyRecordRefresh(committedValue);
+            } else {
+              const stateSetter = stateSettersRef.current[key];
+              if (stateSetter) stateSetter(committedValue);
             }
             publishCommittedChange(key);
           }
@@ -2572,7 +2587,7 @@ async function refreshStockFromServer() {
 
     stateSettersRef.current = {
       "record-deletions": (items) => {
-        const merged = mergeById(Array.isArray(items) ? items : [], pendingFor("record-deletions") || []);
+        const merged = mergeById(Array.isArray(items) ? items : [], mergeById(recordDeletionsRef.current, pendingFor("record-deletions") || []));
         recordDeletionsRef.current = merged;
         setRecordDeletionIds(merged);
         const cleaned = recordsRef.current.filter(r => !recordDeletionIds.has(r.id));
@@ -2580,10 +2595,7 @@ async function refreshStockFromServer() {
         setRecords(cleaned);
       },
       "records": (recs) => {
-        const merged = mergeRecords(Array.isArray(recs) ? recs : [], pendingFor("records") || []);
-        recordsRef.current = merged;
-        setRecords(merged);
-        try { localStorage.setItem("records_local", JSON.stringify(merged)); } catch {}
+        const merged = applyRecordRefresh(Array.isArray(recs) ? recs : []);
         repairMissingCreateRecordEffects(merged, "remote-records");
       },
       "prices": (value) => { pricesRef.current = ensureObj(mergeServerWithPending("prices", value)); setPrices(pricesRef.current); },
@@ -2729,16 +2741,13 @@ async function refreshStockFromServer() {
 
         const sY = window.scrollY;
         if (Array.isArray(deletions)) {
-          const mergedDeletions = mergePending("record-deletions", deletions);
+          const mergedDeletions = mergeById(recordDeletionsRef.current, mergePending("record-deletions", deletions));
           recordDeletionsRef.current = Array.isArray(mergedDeletions) ? mergedDeletions : [];
           setRecordDeletionIds(recordDeletionsRef.current);
         }
 
         if (Array.isArray(r)) {
-          const mergedRecords = mergeRecords(r, pendingValue("records") || []);
-          recordsRef.current = mergedRecords;
-          setRecords(mergedRecords);
-          try { localStorage.setItem("records_local", JSON.stringify(mergedRecords)); } catch {}
+          applyRecordRefresh(r);
         }
 
         activateStockCheckpoint(stockPair.checkpoint);
@@ -2820,11 +2829,11 @@ async function refreshStockFromServer() {
             removeQueuedWrite(item.key, item.id);
             const committedValue = result.value ?? item.val;
             cacheSet(item.key, committedValue);
-            const setter = stateSettersRef.current[item.key];
-            if (setter) setter(committedValue);
             if (item.key === "records" && Array.isArray(committedValue)) {
-              recordsRef.current = committedValue;
-              try { localStorage.setItem("records_local", JSON.stringify(committedValue)); } catch {}
+              applyRecordRefresh(committedValue);
+            } else {
+              const setter = stateSettersRef.current[item.key];
+              if (setter) setter(committedValue);
             }
             publishCommittedChange(item.key);
           } catch (error) {
@@ -3009,15 +3018,18 @@ async function refreshStockFromServer() {
         let localRecords = [];
         try { localRecords = JSON.parse(localStorage.getItem("records_local") || "[]"); } catch {}
         const pendingRecords = getQueue().find(item => item.key === "records")?.val;
-        const mergedRecords = mergeRecords(r, Array.isArray(pendingRecords) ? pendingRecords : localRecords);
+        const mergedRecords = mergeRecords(mergeRecords(r, localRecords), Array.isArray(pendingRecords) ? pendingRecords : []);
         recordsRef.current = mergedRecords;
         setRecords(mergedRecords);
-        try { localStorage.setItem("records_local", JSON.stringify(mergedRecords)); } catch {}
         const serverVersion = JSON.stringify(mergeRecords(r, []));
-        if (!pendingRecords && JSON.stringify(mergedRecords) !== serverVersion) {
-          enqueueWrite("records", mergedRecords);
+        if (JSON.stringify(mergedRecords) !== serverVersion) {
+          enqueueWrite("records", mergedRecords, undefined, { beforeValue:r });
           setPendingCount(getQueue().length + getStockOutbox().length);
         }
+        // Legacy recovery contents are now either server-confirmed or durable
+        // in the queue. Keep one disposable history cache instead of two copies.
+        try { localStorage.removeItem("records_local"); } catch {}
+        cacheSet("records", mergedRecords);
       }
       if(p && typeof p === "object" && !Array.isArray(p)) {
         pricesRef.current = p;
@@ -3403,6 +3415,29 @@ async function refreshStockFromServer() {
     if(committed) repairMissingCreateRecordEffects([committed], "record-commit");
   }
 
+  function saveRecordAndStock(next, effect){
+    const previous = getQueuedWrite("records");
+    return persistRecordMutation({
+      persistRecord: () => enqueueWrite("records", next, undefined, { beforeValue:recordsRef.current }),
+      persistStockEffect: () => stageRecordEffect(effect),
+      rollbackRecord: (queueId) => {
+        if(!getQueuedWrite("records", queueId)) return;
+        const others = getQueue().filter(item => item.key !== "records");
+        setQueue(previous ? [...others, previous] : others);
+      },
+      startDelivery: (queueId) => saveAndSync("records", next, setRecords, { queueId }),
+    });
+  }
+
+  function recordStorageFailure(error){
+    const text = error?.message === "LOCAL_QUEUE_STORAGE_FAILED"
+      ? "Не удалось сохранить запись: хранилище браузера заполнено или недоступно. Поля сохранены в форме; повторите после освобождения места."
+      : "Не удалось надёжно сохранить запись. Поля сохранены в форме; повторите действие.";
+    setLastSyncError(text);
+    setSyncStatus("idle");
+    return text;
+  }
+
   // ── добавление записи ──
   async function submitRecord(){
     if(!marker.trim()){setSubmitMsg({ok:false,text:"Укажите маркировку"});return;}
@@ -3419,19 +3454,22 @@ async function refreshStockFromServer() {
       id: recordId, workshop, category, marker: m, qty, defect, amount, comment,
       recordType, timestamp: now, updatedAt: now, revision: 1, lastMutationId: mutationId,
     };
-    const staged = stageRecordEffect({
-      kind: "create", beforeRecord: null, afterRecord: rec, mutationId, revision: 1, now,
-    });
-    if(!staged.ok){
-      setSubmitMsg({ok:false,text:"Не удалось надёжно сохранить операцию. Освободите место и повторите."});
+    const next = [...recordsRef.current, rec];
+    let saved;
+    try {
+      saved = saveRecordAndStock(next, {
+        kind: "create", beforeRecord: null, afterRecord: rec, mutationId, revision: 1, now,
+      });
+    } catch(error) {
+      setSubmitMsg({ok:false, text:recordStorageFailure(error)});
       return;
     }
-
-    const next = [...recordsRef.current, rec];
-    recordsRef.current = next;
-    const savePromise = saveAndSync("records", next, setRecords);
+    if(!saved.ok){
+      setSubmitMsg({ok:false,text:"Не удалось надёжно сохранить операцию. Поля оставлены в форме."});
+      return;
+    }
     scheduleStockSync(700);
-    savePromise.then(result => checkCommittedRecordMutation(result, recordId, mutationId)).catch(()=>{});
+    saved.savePromise.then(result => checkCommittedRecordMutation(result, recordId, mutationId)).catch(()=>{});
 
     setMarker(""); setQty(0); setDefect(0); setAmount(0);
     setManualAmount(false); setComment(""); setRecordType("sale");
@@ -3463,16 +3501,19 @@ async function refreshStockFromServer() {
       ...updated, id: recId, timestamp: old.timestamp, updatedAt: now,
       revision, lastMutationId: mutationId,
     };
-    const staged = stageRecordEffect({
-      kind: "edit", beforeRecord: old, afterRecord: nextRecord, mutationId, revision, now,
-    });
-    if(!staged.ok) return;
-
     const next = recordsRef.current.map((record, index) => index === oldIdx ? nextRecord : record);
-    recordsRef.current = next;
-    const savePromise = saveAndSync("records", next, setRecords);
+    let saved;
+    try {
+      saved = saveRecordAndStock(next, {
+        kind: "edit", beforeRecord: old, afterRecord: nextRecord, mutationId, revision, now,
+      });
+    } catch(error) {
+      alert(recordStorageFailure(error));
+      return;
+    }
+    if(!saved.ok) return;
     scheduleStockSync(700);
-    savePromise.then(result => checkCommittedRecordMutation(result, recId, mutationId)).catch(()=>{});
+    saved.savePromise.then(result => checkCommittedRecordMutation(result, recId, mutationId)).catch(()=>{});
     setEditRec(null);
   }
 
