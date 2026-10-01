@@ -164,16 +164,28 @@ test('legacy recovery copy is removed only after missing records become durable'
   const init = section('      if(Array.isArray(r)){', '      if(p &&');
   const blocked = appHarness(storage(0, { records_local:recovery }));
   blocked.context.r = [record('existing')];
+  blocked.context.recordsLoadedFromServer = true;
   blocked.context.mergeRecords = mergeRecordRefresh;
   assert.throws(() => vm.runInContext(init, blocked.context), /LOCAL_QUEUE_STORAGE_FAILED/);
   assert.equal(blocked.context.localStorage.getItem('records_local'), recovery);
 
   const h = appHarness(storage(Infinity, { records_local:recovery }));
   h.context.r = [record('existing')];
+  h.context.recordsLoadedFromServer = true;
   h.context.mergeRecords = mergeRecordRefresh;
   vm.runInContext(init, h.context);
   assert.equal(h.context.localStorage.getItem('records_local'), null);
   const payload = JSON.parse(h.context.localStorage.getItem('pending_writes'))[0].val;
   assert.equal(payload.length, 1);
   assert.equal(payload[0].id, 'recovered');
+});
+
+test('offline cached history cannot authorize deleting the legacy recovery copy', () => {
+  const recovery = JSON.stringify([record('existing'), record('recovered')]);
+  const h = appHarness(storage(Infinity, { records_local:recovery }));
+  h.context.r = JSON.parse(recovery);
+  h.context.recordsLoadedFromServer = false;
+  h.context.mergeRecords = mergeRecordRefresh;
+  vm.runInContext(section('      if(Array.isArray(r)){', '      if(p &&'), h.context);
+  assert.equal(h.context.localStorage.getItem('records_local'), recovery);
 });

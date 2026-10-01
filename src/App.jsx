@@ -465,6 +465,7 @@ async function sGet(key, options = {}){
   if (navigator.onLine) {
     try {
       const val = await dbGet(key);
+      options.onSource?.("server");
       if (val !== null && val !== undefined) {
         cacheSet(key, val);
         return val;
@@ -480,6 +481,7 @@ async function sGet(key, options = {}){
     throw new Error("OFFLINE");
   }
   // Fallback: локальный кеш
+  options.onSource?.("cache");
   return cacheGet(key);
 }
 
@@ -2996,8 +2998,9 @@ async function refreshStockFromServer() {
       setPwdLoaded(true);
 
       // Загружаем остальные данные
+      let recordsLoadedFromServer = false;
       const [r,deletions,p,stockPair,sCfg,sm2,al,nt,sub,mvs] = await Promise.all([
-        sGet("records"), sGet("record-deletions"), sGet("prices"),
+        sGet("records", { onSource:source => { recordsLoadedFromServer = source === "server"; } }), sGet("record-deletions"), sGet("prices"),
         readConsistentStockPair(),
         sGet("stock:cfg"), sGet("custom:markers"), sGet("marker-aliases"), sGet("marker-notes"), sGet("subcategories"),
         sGet("stock-moves"),
@@ -3028,7 +3031,9 @@ async function refreshStockFromServer() {
         }
         // Legacy recovery contents are now either server-confirmed or durable
         // in the queue. Keep one disposable history cache instead of two copies.
-        try { localStorage.removeItem("records_local"); } catch {}
+        if(recordsLoadedFromServer) {
+          try { localStorage.removeItem("records_local"); } catch {}
+        }
         cacheSet("records", mergedRecords);
       }
       if(p && typeof p === "object" && !Array.isArray(p)) {
