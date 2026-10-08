@@ -59,7 +59,6 @@ const SERVICE_MARKERS = new Set([
 ]);
 const LOCAL_WS_KEY = "workshop_choice_v2";
 const LOCAL_AUTH_KEY = "workshop_auth_v2";
-const DEFAULT_PASSWORDS = { "SMART": "smart123", "Бегемот": "begemot123" };
 
 // Хэширование SHA-256 через встроенный WebCrypto
 async function sha256(text){
@@ -461,6 +460,7 @@ function removeQueuedWrite(key, id){
 
 async function sGet(key, options = {}){
   const allowCache = options.allowCache !== false;
+  let readError = null;
   // Пробуем GitHub (только если онлайн)
   if (navigator.onLine) {
     try {
@@ -472,9 +472,15 @@ async function sGet(key, options = {}){
       }
       // Файла действительно нет. Старый кеш здесь использовать нельзя:
       // он мог бы воскресить удалённые серверные данные.
+      if(options.requireData) {
+        const missing = new Error("SERVER_DATA_MISSING");
+        missing.serverMissing = true;
+        throw missing;
+      }
       return null;
     } catch (e) {
-      if (!allowCache) throw e;
+      if (!allowCache || e.serverMissing) throw e;
+      readError = e;
       console.warn(`[sGet] GitHub failed for "${key}", using cache:`, e.message);
     }
   } else if (!allowCache) {
@@ -482,7 +488,11 @@ async function sGet(key, options = {}){
   }
   // Fallback: локальный кеш
   options.onSource?.("cache");
-  return cacheGet(key);
+  const cached = cacheGet(key);
+  if(options.requireData && (cached === null || cached === undefined)) {
+    throw readError || new Error("OFFLINE_DATA_UNAVAILABLE");
+  }
+  return cached;
 }
 
 // Удаления записей хранятся отдельно как tombstones, иначе union-merge
@@ -1686,6 +1696,8 @@ export default function App(){
   // ── данные ──
   const [workshop, setWorkshop] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [startupError, setStartupError] = useState("");
+  const [startupAttempt, setStartupAttempt] = useState(0);
   const [tab, setTab] = useState("record");
   const [records, setRecords] = useState([]);
   const recordDeletionsRef = useRef([]);
@@ -1741,8 +1753,8 @@ export default function App(){
     let lastError = null;
     for (let attempt = 0; attempt < attempts; attempt++) {
       const [checkpointValue, journalValue] = await Promise.all([
-        sGet("stock-checkpoint", { allowCache }),
-        sGet("stock-ops", { allowCache }),
+        sGet("stock-checkpoint", { allowCache, requireData: options.requireData === true }),
+        sGet("stock-ops", { allowCache, requireData: options.requireData === true }),
       ]);
       const checkpoint = normalizeStockCheckpoint(checkpointValue);
       try {
@@ -2984,27 +2996,25 @@ async function refreshStockFromServer() {
   // ── загрузка при старте ──
   useEffect(()=>{
     (async()=>{
+      setLoading(true);
+      setStartupError("");
+      stockReadyRef.current = false;
       try {
-      // Загружаем пароли из Supabase (или инициализируем дефолтные)
-      let pwd = await sGet("passwords");
-      if(!pwd){
-        pwd = {};
-        for(const ws of WORKSHOPS){
-          pwd[ws] = await sha256(DEFAULT_PASSWORDS[ws]);
-        }
-        await sSet("passwords", pwd);
-      }
+      // Ошибка чтения не означает, что мастерская новая или данные пусты.
+      const pwd = await sGet("passwords", { requireData:true });
+      if(typeof pwd !== "object" || Array.isArray(pwd)) throw new Error("STARTUP_DATA_INVALID");
       setPasswords(pwd);
       setPwdLoaded(true);
 
       // Загружаем остальные данные
       let recordsLoadedFromServer = false;
       const [r,deletions,p,stockPair,sCfg,sm2,al,nt,sub,mvs] = await Promise.all([
-        sGet("records", { onSource:source => { recordsLoadedFromServer = source === "server"; } }), sGet("record-deletions"), sGet("prices"),
-        readConsistentStockPair(),
+        sGet("records", { requireData:true, onSource:source => { recordsLoadedFromServer = source === "server"; } }), sGet("record-deletions", { requireData:true }), sGet("prices"),
+        readConsistentStockPair({ requireData:true }),
         sGet("stock:cfg"), sGet("custom:markers"), sGet("marker-aliases"), sGet("marker-notes"), sGet("subcategories"),
         sGet("stock-moves"),
       ]);
+      if(!Array.isArray(r) || !Array.isArray(deletions)) throw new Error("STARTUP_DATA_INVALID");
       // Защита: гарантируем, что у нас правильные типы (массив/объект),
       // иначе рендер упадёт с белым экраном
       if (Array.isArray(deletions)) {
@@ -3105,12 +3115,13 @@ async function refreshStockFromServer() {
       }catch{}
       } catch (e) {
         console.error('[INIT] Ошибка при загрузке:', e);
-        // Даже при ошибке — разблокируем UI чтобы пользователь мог хотя бы войти
+        stockReadyRef.current = false;
+        setStartupError(String(e?.code || e?.message || "STARTUP_DATA_UNAVAILABLE"));
       } finally {
         setLoading(false);
       }
     })();
-  },[]);
+  },[startupAttempt]);
 
   // ── авто-расчёт суммы для sale ──
   useEffect(()=>{
@@ -4650,6 +4661,23 @@ async function refreshStockFromServer() {
   }
 
   // ── экраны ──
+  if(startupError) return (
+    <div style={{...s.app,display:"flex",alignItems:"center",justifyContent:"center",minHeight:"100vh"}}>
+      <div style={{width:"100%",maxWidth:360,padding:24,textAlign:"center"}}>
+        <div style={{fontSize:22,fontWeight:800,marginBottom:16}}>Данные не загрузились</div>
+        <div style={{fontSize:14,lineHeight:1.6,color:C.textSub,marginBottom:16}}>
+          Не удалось загрузить записи и остатки. Это не означает, что они удалены или равны нулю.
+          Проверьте соединение и повторите попытку. Несохранённые изменения остаются на этом устройстве.
+        </div>
+        <div style={{fontSize:12,color:C.textDim,marginBottom:20}}>{startupError}</div>
+        <button type="button" onClick={()=>{
+          setLoading(true);
+          setStartupError("");
+          setStartupAttempt(attempt=>attempt+1);
+        }} style={{...s.btn("accent"),width:"100%",padding:"14px 0"}}>Повторить загрузку</button>
+      </div>
+    </div>
+  );
   if(loading || !pwdLoaded) return (
     <div style={{...s.app,display:"flex",alignItems:"center",justifyContent:"center",minHeight:"100vh"}}>
       <div style={{textAlign:"center"}}>
