@@ -3,5 +3,5 @@
 export default {
   storage: 'https://masterskaya-six.vercel.app/api/storage',
   ably: 'https://masterskaya-six.vercel.app/api/ably',
-  enabled: false,
+  enabled: true,
 };
