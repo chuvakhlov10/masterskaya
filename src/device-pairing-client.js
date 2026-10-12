@@ -1,3 +1,4 @@
+import { gatewayFailover } from "./gateway-failover.js";
 import {
   STORAGE_GATEWAY_ENDPOINT,
   getOrCreateStorageDeviceId,
@@ -81,33 +82,8 @@ async function postGateway({
   fetchImpl = globalThis.fetch,
   timeoutMs = REQUEST_TIMEOUT_MS,
 }) {
-  if (typeof fetchImpl !== "function") throw makeError("FETCH_UNAVAILABLE");
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  let response;
-  try {
-    response = await fetchImpl(endpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(sessionToken ? { "X-Masterskaya-Session": sessionToken } : {}),
-      },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-      cache: "no-store",
-    });
-  } catch (cause) {
-    if (cause?.name === "AbortError") throw makeError("GATEWAY_REQUEST_TIMEOUT", cause);
-    throw makeError("GATEWAY_REQUEST_FAILED", cause);
-  } finally {
-    clearTimeout(timeout);
-  }
-
-  let payload;
-  try { payload = await response.json(); }
-  catch (cause) { throw makeError("GATEWAY_RESPONSE_INVALID", cause); }
-  if (!response.ok) throw makeError(payload?.error || `GATEWAY_HTTP_${response.status}`);
-  return payload;
+  return gatewayFailover.send({endpoint,fetchImpl,timeoutMs,body,
+    headers:sessionToken ? {"X-Masterskaya-Session":sessionToken} : {}});
 }
 
 async function authorizedAction(action, fields = {}, options = {}) {

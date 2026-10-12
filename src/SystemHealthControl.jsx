@@ -93,6 +93,7 @@ function ServiceCard({ title, service }) {
       {service?.ok ? (
         <>
           <Row label="Версия" value={service.version} />
+          <Row label="Маршрут" value={service.gatewayRoute === "reserve" ? "Резервный сервер" : "Основной сервер"} />
           <Row label="Протокол" value={service.protocolVersion ?? "—"} />
           <Row label="Сборка" value={service.buildId || "—"} />
           <Row label="Дата сборки" value={formatDate(service.buildDate)} />
