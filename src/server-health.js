@@ -1,3 +1,4 @@
+import { gatewayFailover } from "./gateway-failover.js";
 import { SECURE_ABLY_AUTH_ENDPOINT } from "./ably-session-auth.js";
 import {
   STORAGE_GATEWAY_ENDPOINT,
@@ -14,37 +15,13 @@ function makeError(code, cause) {
 }
 
 async function postHealth({ endpoint, sessionToken, fetchImpl, timeoutMs }) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  let response;
-  try {
-    response = await fetchImpl(endpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(sessionToken ? { "X-Masterskaya-Session": sessionToken } : {}),
-      },
-      body: JSON.stringify({ action: "health" }),
-      signal: controller.signal,
-      cache: "no-store",
-    });
-  } catch (cause) {
-    if (cause?.name === "AbortError") throw makeError("HEALTH_REQUEST_TIMEOUT", cause);
-    throw makeError("HEALTH_REQUEST_FAILED", cause);
-  } finally {
-    clearTimeout(timeout);
-  }
-
-  let payload;
-  try { payload = await response.json(); }
-  catch (cause) { throw makeError("HEALTH_RESPONSE_INVALID", cause); }
-  if (!response.ok || payload?.ok !== true) {
-    throw makeError(payload?.error || `HEALTH_HTTP_${response.status}`);
-  }
+  const payload = await gatewayFailover.send({endpoint,fetchImpl,timeoutMs,errorPrefix:"HEALTH",
+    headers:sessionToken ? {"X-Masterskaya-Session":sessionToken} : {},body:{action:"health"}});
+  if(payload?.ok !== true) throw makeError(payload?.error || "HEALTH_RESPONSE_INVALID");
   if (typeof payload?.service !== "string" || typeof payload?.version !== "string") {
     throw makeError("HEALTH_RESPONSE_INVALID");
   }
-  return payload;
+  return {...payload,gatewayRoute:gatewayFailover.lastRoute(endpoint)?.route || "primary"};
 }
 
 function failedHealth(service, error) {

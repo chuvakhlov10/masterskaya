@@ -48,6 +48,6 @@ test('connected application exposes safe server health and diagnostics', () => {
   assert.match(healthSource, /Безопасный карантин/);
 });
 
-test('offline-first release is version 1.6.0', () => {
-  assert.match(statusSource, /APP_VERSION = "1\.6\.0"/);
+test('reserve gateway release is version 1.6.1', () => {
+  assert.match(statusSource, /APP_VERSION = "1\.6\.1"/);
 });

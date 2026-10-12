@@ -1,3 +1,4 @@
+import { gatewayFailover } from "./gateway-failover.js";
 import {
   ensureStorageSession,
   invalidateStoredStorageSession,
@@ -21,11 +22,6 @@ function wait(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function readJson(response) {
-  try { return await response.json(); }
-  catch (cause) { throw makeError("AUTH_RESPONSE_INVALID", cause, response?.status); }
-}
-
 function isTransientAuthError(error) {
   if (isTransientGatewayError(error)) return true;
   const code = String(error?.code || error?.message || "");
@@ -40,29 +36,8 @@ async function postSessionAblyTokenOnce({
   fetchImpl,
   timeoutMs = REQUEST_TIMEOUT_MS,
 }) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  let response;
-  try {
-    response = await fetchImpl(endpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Masterskaya-Session": session.token,
-      },
-      body: JSON.stringify({ clientId }),
-      signal: controller.signal,
-      cache: "no-store",
-    });
-  } catch (cause) {
-    if (cause?.name === "AbortError") throw makeError("AUTH_REQUEST_TIMEOUT", cause);
-    throw makeError("AUTH_REQUEST_FAILED", cause);
-  } finally {
-    clearTimeout(timeout);
-  }
-
-  const payload = await readJson(response);
-  if (!response.ok) throw makeError(String(payload?.error || `AUTH_HTTP_${response.status}`), undefined, response.status);
+  const payload = await gatewayFailover.send({endpoint,fetchImpl,timeoutMs,errorPrefix:"AUTH",
+    headers:{"X-Masterskaya-Session":session.token},body:{clientId}});
   if (typeof payload?.token !== "string" || payload.token.split(".").length !== 3) {
     throw makeError("AUTH_TOKEN_INVALID");
   }

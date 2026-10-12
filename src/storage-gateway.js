@@ -1,3 +1,4 @@
+import { gatewayFailover } from "./gateway-failover.js";
 import {
   recordSessionRenewal,
   recordStorageRequestResult,
@@ -149,33 +150,8 @@ function storeSession(details, storage) {
   return normalized;
 }
 
-async function readJson(response) {
-  try { return await response.json(); }
-  catch (cause) { throw makeError("GATEWAY_RESPONSE_INVALID", cause, response?.status); }
-}
-
-async function postGatewayOnce({ endpoint, headers, body, fetchImpl, timeoutMs = REQUEST_TIMEOUT_MS }) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  let response;
-  try {
-    response = await fetchImpl(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...headers },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-      cache: "no-store",
-    });
-  } catch (cause) {
-    if (cause?.name === "AbortError") throw makeError("GATEWAY_REQUEST_TIMEOUT", cause);
-    throw makeError("GATEWAY_REQUEST_FAILED", cause);
-  } finally {
-    clearTimeout(timeout);
-  }
-
-  const payload = await readJson(response);
-  if (!response.ok) throw makeError(String(payload?.error || `GATEWAY_HTTP_${response.status}`), undefined, response.status);
-  return payload;
+async function postGatewayOnce({ endpoint, reserveEndpoint, headers, body, fetchImpl, timeoutMs = REQUEST_TIMEOUT_MS }) {
+  return gatewayFailover.send({endpoint, reserveEndpoint, headers, body, fetchImpl, timeoutMs});
 }
 
 function wait(ms) {
@@ -184,6 +160,7 @@ function wait(ms) {
 
 async function postGateway({
   endpoint,
+  reserveEndpoint,
   headers,
   body,
   fetchImpl,
@@ -196,7 +173,7 @@ async function postGateway({
   let lastError;
   for (let attempt = 0; attempt < Math.max(1, maxAttempts); attempt++) {
     try {
-      return await postGatewayOnce({ endpoint, headers, body, fetchImpl, timeoutMs });
+      return await postGatewayOnce({ endpoint, reserveEndpoint, headers, body, fetchImpl, timeoutMs });
     } catch (error) {
       lastError = error;
       if (!isTransientGatewayError(error) || attempt >= maxAttempts - 1) throw error;
@@ -210,6 +187,7 @@ async function postGateway({
 
 export async function renewStorageSession({
   endpoint = DEFAULT_ENDPOINT,
+  reserveEndpoint,
   fetchImpl = globalThis.fetch,
   storage = globalThis.localStorage,
   session = readStoredStorageSession(storage),
@@ -220,6 +198,7 @@ export async function renewStorageSession({
   if (!session?.token) throw makeError("SESSION_REQUIRED");
   const payload = await postGateway({
     endpoint,
+    reserveEndpoint,
     fetchImpl,
     headers: { "X-Masterskaya-Session": session.token },
     body: { action: "renew" },
@@ -236,8 +215,8 @@ export async function renewStorageSession({
 const renewalInFlight = new Map();
 const renewalRetryAfter = new Map();
 
-function renewalKey({ endpoint, session }) {
-  return `${endpoint}|${session?.clientId || ""}|${session?.token || ""}`;
+function renewalKey({ endpoint, reserveEndpoint, session }) {
+  return `${endpoint}|${reserveEndpoint || ""}|${session?.clientId || ""}|${session?.token || ""}`;
 }
 
 function sharedRenew(options) {
@@ -253,6 +232,7 @@ function sharedRenew(options) {
 
 export async function ensureStorageSession({
   endpoint = DEFAULT_ENDPOINT,
+  reserveEndpoint,
   fetchImpl = globalThis.fetch,
   storage = globalThis.localStorage,
   now = Date.now(),
@@ -269,11 +249,11 @@ export async function ensureStorageSession({
   }
   if (existing.expiresAt - now > SESSION_RENEW_WINDOW_MS) return existing;
 
-  const key = renewalKey({ endpoint, session: existing });
+  const key = renewalKey({ endpoint, reserveEndpoint, session: existing });
   if ((renewalRetryAfter.get(key) || 0) > now) return existing;
 
   try {
-    const renewed = await sharedRenew({ endpoint, fetchImpl, storage, session: existing, waitImpl, random, onRetry });
+    const renewed = await sharedRenew({ endpoint, reserveEndpoint, fetchImpl, storage, session: existing, waitImpl, random, onRetry });
     renewalRetryAfter.delete(key);
     return renewed;
   } catch (error) {
@@ -300,6 +280,7 @@ export async function storageGatewayRequest({
   ref,
   body,
   endpoint = DEFAULT_ENDPOINT,
+  reserveEndpoint,
   fetchImpl = globalThis.fetch,
   storage = globalThis.localStorage,
   eventTarget = globalThis,
@@ -312,9 +293,10 @@ export async function storageGatewayRequest({
   const operation = `${String(method || "REQUEST").toUpperCase()} ${String(path || "gateway")}`;
 
   try {
-    const session = await ensureStorageSession({ endpoint, fetchImpl, storage, eventTarget, waitImpl, random, onRetry });
+    const session = await ensureStorageSession({ endpoint, reserveEndpoint, fetchImpl, storage, eventTarget, waitImpl, random, onRetry });
     const payload = await postGateway({
       endpoint,
+      reserveEndpoint,
       fetchImpl,
       headers: { "X-Masterskaya-Session": session.token },
       body: {
