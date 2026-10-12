@@ -17,9 +17,14 @@ ReactDOM.createRoot(document.getElementById('root')).render(
 )
 
 // Регистрация Service Worker для офлайн-режима
-if ('serviceWorker' in navigator) {
+if (import.meta.env.PROD && 'serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('./sw.js').catch(err => {
+    navigator.serviceWorker.register('./sw.js', {updateViaCache:'none'}).then(registration => {
+      registration.update().catch(() => {});
+      navigator.serviceWorker.ready.then(() => {
+        navigator.serviceWorker.controller?.postMessage({type:'CHECK_OFFLINE_SHELL'});
+      });
+    }).catch(err => {
       console.warn('[SW] registration failed:', err);
     });
   });
