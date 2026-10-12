@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { backupStatusGet } from "./github-storage.js";
 import { APP_VERSION, normalizeBackupStatus } from "./status-core.js";
-import { checkServerHealth, healthErrorText } from "./server-health.js";
+import { checkServerHealth, checkReserveHealth, reserveHealthConfigured, healthErrorText } from "./server-health.js";
 import {
   buildDiagnosticReport,
   collectClientDiagnostics,
@@ -129,6 +129,15 @@ export default function SystemHealthControl() {
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
+  const [reserve, setReserve] = useState(null);
+  const [reserveLoading, setReserveLoading] = useState(false);
+
+  async function refreshReserve() {
+    setReserveLoading(true);
+    try { setReserve(await checkReserveHealth()); }
+    catch (cause) { setReserve({ ready: false, error: String(cause?.code || cause?.message || "HEALTH_REQUEST_FAILED") }); }
+    finally { setReserveLoading(false); }
+  }
 
   async function refresh() {
     setLoading(true);
@@ -231,6 +240,18 @@ export default function SystemHealthControl() {
 
               {result?.health && <ServiceCard title="Хранилище" service={result.health.storage} />}
               {result?.health && <ServiceCard title="Live-синхронизация" service={result.health.ably} />}
+
+              {reserveHealthConfigured && (
+                <Card title="Резервная синхронизация" status={reserve?.ready ? "Готова" : reserve ? "Требует внимания" : "Не проверена"} statusColor={reserve?.ready ? palette.success : palette.warning}>
+                  <div>{reserve?.ready ? "Сессия устройства и доступ к данным проверены." : "Проверка использует текущую сессию устройства."}</div>
+                  {reserve?.storage && <ServiceCard title="Резерв: хранилище" service={reserve.storage} />}
+                  {reserve?.ably && <ServiceCard title="Резерв: Live" service={reserve.ably} />}
+                  {reserve?.error && <div style={{ color: "#fca5a5" }}>{healthErrorText(reserve.error)}</div>}
+                  <button onClick={refreshReserve} disabled={reserveLoading} style={{ ...buttonStyle, marginTop: 8, border: `1px solid ${palette.border}`, background: palette.panel, color: palette.text, opacity: reserveLoading ? .6 : 1 }}>
+                    {reserveLoading ? "Проверка резерва..." : "Проверить резерв"}
+                  </button>
+                </Card>
+              )}
 
               {client && (
                 <Card title="Текущее устройство">

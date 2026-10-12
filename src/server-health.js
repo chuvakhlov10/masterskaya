@@ -1,11 +1,14 @@
 import { gatewayFailover } from "./gateway-failover.js";
+import reserveConfig from "./reserve-gateway-config.js";
 import { SECURE_ABLY_AUTH_ENDPOINT } from "./ably-session-auth.js";
 import {
   STORAGE_GATEWAY_ENDPOINT,
   readStoredStorageSession,
+  verifyStorageGatewayRead,
 } from "./storage-gateway.js";
 
 const REQUEST_TIMEOUT_MS = 12_000;
+export const reserveHealthConfigured = Boolean(reserveConfig.storage && reserveConfig.ably);
 
 function makeError(code, cause) {
   const error = new Error(String(code || "HEALTH_REQUEST_FAILED"));
@@ -80,4 +83,30 @@ export async function checkServerHealth({
       ? ablyResult.value
       : failedHealth("masterskaya-ably-auth", ablyResult.reason),
   };
+}
+
+// This explicit diagnostic does not use fallback and does not discard a valid
+// primary session if the reserve has a mismatched key or configuration.
+export async function checkReserveHealth({
+  storage = globalThis.localStorage,
+  fetchImpl = globalThis.fetch,
+  storageEndpoint = reserveConfig.storage,
+  ablyEndpoint = reserveConfig.ably,
+  timeoutMs = REQUEST_TIMEOUT_MS,
+} = {}) {
+  if (!storageEndpoint || !ablyEndpoint) return { ready: false, error: 'RESERVE_NOT_CONFIGURED' };
+  const health = await checkServerHealth({ storage, fetchImpl, storageEndpoint, ablyEndpoint, timeoutMs });
+  health.storage.gatewayRoute = 'reserve';
+  health.ably.gatewayRoute = 'reserve';
+  const authorized = Boolean(health.session && health.storage.ok && health.ably.ok &&
+    health.storage.authenticated === true && health.ably.authenticated === true &&
+    health.storage.checks.deviceRegistry === 'ok' && health.storage.checks.githubApp === 'ok' &&
+    health.ably.checks.deviceRegistry === 'ok');
+  if (!authorized) return { ...health, ready: false, readOk: false };
+  try {
+    await verifyStorageGatewayRead({ endpoint: storageEndpoint, reserveEndpoint: '', storage, fetchImpl, maxAttempts: 1 });
+    return { ...health, ready: true, readOk: true };
+  } catch (cause) {
+    return { ...health, ready: false, readOk: false, error: String(cause?.code || cause?.message || 'GATEWAY_READ_INVALID') };
+  }
 }
