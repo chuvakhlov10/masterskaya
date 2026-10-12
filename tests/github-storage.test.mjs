@@ -173,7 +173,9 @@ test('backup status is requested through the gateway from data-backups', async (
 
   const result = await storage.backupStatusGet();
   assert.deepEqual(result, expected);
-  assert.match(request.url, /^https:\/\/functions\.yandexcloud\.net\//);
+  const { STORAGE_GATEWAY_ENDPOINT } = await import('../src/storage-gateway.js');
+  const { default: reserve } = await import('../src/reserve-gateway-config.js');
+  assert.ok(request.url === STORAGE_GATEWAY_ENDPOINT || (reserve.enabled && request.url === reserve.storage));
   assert.deepEqual(gatewayBody(request.options), {
     action: 'github',
     storageProtocolVersion: 4,
