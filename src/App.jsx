@@ -27,6 +27,7 @@ import { APP_VERSION, deriveSyncView, normalizeBackupStatus } from "./status-cor
 import { notifyDeviceDiagnosticsChanged, recordStorageSyncCycleResult } from "./diagnostics.js";
 import { appendStockOutboxQuarantine } from "./stock-outbox-quarantine.js";
 import { compactRecordWrite, mergeRecordRefresh, persistPendingWrites, persistRecordMutation } from "./record-sync.js";
+import { offlineStore } from "./offline-store.js";
 
 const CLIENT_ID = String(Date.now()) + '-' + Math.random().toString(36).slice(2, 8);
 const ably = new Ably.Realtime(createSecureAblyRealtimeOptions({
@@ -336,6 +337,7 @@ function removeStockOutboxIds(ids){
 }
 
 function cacheGet(key){
+  if(offlineStore.has(key)) return offlineStore.get(key);
   try {
     // Журнал склада большой, поэтому для него используется одна специальная копия,
     // а не дубликат offline_cache_stock-ops + stock_ops_local.
@@ -345,6 +347,9 @@ function cacheGet(key){
   } catch { return null; }
 }
 function cacheSet(key, val){
+  const durable = offlineStore.put(key, val);
+  durable.catch(error => console.warn('[offline-copy]', error.message));
+  if(offlineStore.available()) return durable;
   const storageKey = key === "stock-ops" ? "stock_ops_local" : OFFLINE_CACHE_PREFIX + key;
   try {
     localStorage.setItem(storageKey, JSON.stringify(val));
@@ -461,15 +466,22 @@ function removeQueuedWrite(key, id){
 async function sGet(key, options = {}){
   const allowCache = options.allowCache !== false;
   let readError = null;
+  if(options.preferCache) {
+    const cached = cacheGet(key);
+    if(options.requireData && (cached === null || cached === undefined)) throw new Error("OFFLINE_DATA_UNAVAILABLE");
+    options.onSource?.("cache");
+    return cached;
+  }
   // Пробуем GitHub (только если онлайн)
   if (navigator.onLine) {
     try {
       const val = await dbGet(key);
       options.onSource?.("server");
       if (val !== null && val !== undefined) {
-        cacheSet(key, val);
+        await cacheSet(key, val);
         return val;
       }
+      await cacheSet(key, null);
       // Файла действительно нет. Старый кеш здесь использовать нельзя:
       // он мог бы воскресить удалённые серверные данные.
       if(options.requireData) {
@@ -542,8 +554,8 @@ async function sSet(key, val, options = {}){
   try {
     const result = await dbSet(key, valueToWrite, mergeFn);
     if (result.ok) {
+      await cacheSet(key, result.value ?? val);
       if (durableQueue) removeQueuedWrite(key, queueId);
-      cacheSet(key, result.value ?? val);
       return { ...result, queued: false, queueId };
     }
     return { ...result, queued: true, queueId, value: val };
@@ -1698,6 +1710,25 @@ export default function App(){
   const [loading, setLoading] = useState(true);
   const [startupError, setStartupError] = useState("");
   const [startupAttempt, setStartupAttempt] = useState(0);
+  const [offlineCopy, setOfflineCopy] = useState(() => offlineStore.info());
+  const [offlineShellReady, setOfflineShellReady] = useState(false);
+  useEffect(() => offlineStore.subscribe(setOfflineCopy), []);
+  useEffect(() => {
+    const worker = navigator.serviceWorker;
+    if(!worker) return;
+    const onMessage = event => {
+      if(event.data?.type === "OFFLINE_SHELL_READY") setOfflineShellReady(true);
+      if(event.data?.type === "OFFLINE_SHELL_STATUS") setOfflineShellReady(event.data.ready === true);
+    };
+    const check = () => worker.controller?.postMessage({type:"CHECK_OFFLINE_SHELL"});
+    worker.addEventListener("message", onMessage);
+    worker.addEventListener("controllerchange", check);
+    worker.ready.then(check).catch(()=>{});
+    return () => {
+      worker.removeEventListener("message", onMessage);
+      worker.removeEventListener("controllerchange", check);
+    };
+  }, []);
   const [tab, setTab] = useState("record");
   const [records, setRecords] = useState([]);
   const recordDeletionsRef = useRef([]);
@@ -1753,8 +1784,8 @@ export default function App(){
     let lastError = null;
     for (let attempt = 0; attempt < attempts; attempt++) {
       const [checkpointValue, journalValue] = await Promise.all([
-        sGet("stock-checkpoint", { allowCache, requireData: options.requireData === true }),
-        sGet("stock-ops", { allowCache, requireData: options.requireData === true }),
+        sGet("stock-checkpoint", { allowCache, preferCache: options.preferCache, requireData: options.requireData === true }),
+        sGet("stock-ops", { allowCache, preferCache: options.preferCache, requireData: options.requireData === true }),
       ]);
       const checkpoint = normalizeStockCheckpoint(checkpointValue);
       try {
@@ -2277,6 +2308,8 @@ export default function App(){
   const stockSyncWaitersRef = useRef([]);
 
   function persistStockSnapshot(ops){
+    cacheSet("stock-ops", encodeStockJournal(ops));
+    if(offlineStore.available()) return true;
     try {
       localStorage.setItem("stock_ops_local", JSON.stringify(encodeStockJournal(ops)));
       return true;
@@ -2840,9 +2873,9 @@ async function refreshStockFromServer() {
 
             // Удаляем только именно ту версию, которую отправили. Новая запись
             // того же key, созданная во время flush, останется в очереди.
-            removeQueuedWrite(item.key, item.id);
             const committedValue = result.value ?? item.val;
-            cacheSet(item.key, committedValue);
+            await cacheSet(item.key, committedValue);
+            removeQueuedWrite(item.key, item.id);
             if (item.key === "records" && Array.isArray(committedValue)) {
               applyRecordRefresh(committedValue);
             } else {
@@ -3000,8 +3033,11 @@ async function refreshStockFromServer() {
       setStartupError("");
       stockReadyRef.current = false;
       try {
+      await offlineStore.hydrate();
+      const usingSnapshot = offlineStore.hasComplete();
+      const startupGet = (key, options = {}) => sGet(key, {...options, preferCache:usingSnapshot});
       // Ошибка чтения не означает, что мастерская новая или данные пусты.
-      const pwd = await sGet("passwords", { requireData:true });
+      const pwd = await startupGet("passwords", { requireData:true });
       if(typeof pwd !== "object" || Array.isArray(pwd)) throw new Error("STARTUP_DATA_INVALID");
       setPasswords(pwd);
       setPwdLoaded(true);
@@ -3009,21 +3045,37 @@ async function refreshStockFromServer() {
       // Загружаем остальные данные
       let recordsLoadedFromServer = false;
       const [r,deletions,p,stockPair,sCfg,sm2,al,nt,sub,mvs] = await Promise.all([
-        sGet("records", { requireData:true, onSource:source => { recordsLoadedFromServer = source === "server"; } }), sGet("record-deletions", { requireData:true }), sGet("prices"),
-        readConsistentStockPair({ requireData:true }),
-        sGet("stock:cfg"), sGet("custom:markers"), sGet("marker-aliases"), sGet("marker-notes"), sGet("subcategories"),
-        sGet("stock-moves"),
+        startupGet("records", { requireData:true, onSource:source => { recordsLoadedFromServer = source === "server"; } }), startupGet("record-deletions", { requireData:true }), startupGet("prices"),
+        readConsistentStockPair({ requireData:true, preferCache:usingSnapshot }),
+        startupGet("stock:cfg"), startupGet("custom:markers"), startupGet("marker-aliases"), startupGet("marker-notes"), startupGet("subcategories"),
+        startupGet("stock-moves"),
       ]);
       if(!Array.isArray(r) || !Array.isArray(deletions)) throw new Error("STARTUP_DATA_INVALID");
       // Защита: гарантируем, что у нас правильные типы (массив/объект),
       // иначе рендер упадёт с белым экраном
       if (Array.isArray(deletions)) {
-        recordDeletionsRef.current = deletions;
-        setRecordDeletionIds(deletions);
+        recordDeletionsRef.current = mergeById(deletions, getQueuedWrite("record-deletions")?.val || []);
+        setRecordDeletionIds(recordDeletionsRef.current);
       }
       activateStockCheckpoint(stockPair.checkpoint);
       const serverStockOps = stockPair.journal.ops;
-      await reconcileStockOutboxAgainstHistory(serverStockOps, stockPair.checkpoint);
+      if(usingSnapshot) {
+        // A cached copy is not a server acknowledgement. Keep every outbox
+        // intent, and defer archive/network reconciliation until reconnection.
+        const pending = reconcileStockOutboxWithHistory(getStockOutbox(), [], stockPair.checkpoint);
+        stockOutboxHistoryEpochRef.current = Number(stockPair.checkpoint?.epoch) || 0;
+        stockOutboxBlockedIdsRef.current = new Set(pending.blocked.map(op=>op.opId));
+        stockOutboxBlockedCountRef.current = pending.blocked.length;
+      } else {
+        await reconcileStockOutboxAgainstHistory(serverStockOps, stockPair.checkpoint);
+      }
+      const startupPending = (key, value) => {
+        const item = getQueuedWrite(key);
+        if(!item) return value;
+        if(item.mode === "patch") return applyObjectPatch(value, item.patch);
+        const merge = getMergeFn(key);
+        return merge ? merge(value, item.val) : item.val;
+      };
       // Восстанавливаем только подтверждённые сервером записи + явную
       // локальную очередь. Для совместимости один раз подхватываем records_local,
       // созданный старой версией до появления durable queue.
@@ -3047,8 +3099,8 @@ async function refreshStockFromServer() {
         cacheSet("records", mergedRecords);
       }
       if(p && typeof p === "object" && !Array.isArray(p)) {
-        pricesRef.current = p;
-        setPrices(p);
+        pricesRef.current = startupPending("prices", p);
+        setPrices(pricesRef.current);
       }
       
       // Event sourcing: серверный журнал + явный outbox локальных операций.
@@ -3073,7 +3125,7 @@ async function refreshStockFromServer() {
         }
 
         const alreadyConfirmed = new Set(outbox.filter(op => serverIds.has(op.opId)).map(op => op.opId));
-        removeStockOutboxIds(alreadyConfirmed);
+        if(!usingSnapshot) removeStockOutboxIds(alreadyConfirmed);
         outbox = prepareStockOutbox(getStockOutbox());
         const merged = mergeStockOps(serverStockOps, outbox);
         stockOpsRef.current = merged;
@@ -3098,14 +3150,14 @@ async function refreshStockFromServer() {
         console.warn("[STOCK] Пустой серверный журнал; legacy-миграция отключена");
       }
       stockReadyRef.current = true;
-      repairMissingCreateRecordEffects(recordsRef.current, "startup");
+      if(!usingSnapshot) repairMissingCreateRecordEffects(recordsRef.current, "startup");
       
-      if(Array.isArray(mvs)) setStockMoves(mvs);
-      if(sCfg && typeof sCfg === "object" && !Array.isArray(sCfg)) setStockCfg(sCfg);
-      if(sm2 && typeof sm2 === "object" && !Array.isArray(sm2)) setMarkers(sm2);
-      if(al && typeof al === "object" && !Array.isArray(al)) setAliases(al);
-      if(nt && typeof nt === "object" && !Array.isArray(nt)) setNotes(nt);
-      if(sub && typeof sub === "object" && !Array.isArray(sub)) setSubcategories(sub);
+      if(Array.isArray(mvs)) setStockMoves(startupPending("stock-moves", mvs));
+      if(sCfg && typeof sCfg === "object" && !Array.isArray(sCfg)) setStockCfg(startupPending("stock:cfg", sCfg));
+      if(sm2 && typeof sm2 === "object" && !Array.isArray(sm2)) setMarkers(startupPending("custom:markers", sm2));
+      if(al && typeof al === "object" && !Array.isArray(al)) setAliases(startupPending("marker-aliases", al));
+      if(nt && typeof nt === "object" && !Array.isArray(nt)) setNotes(startupPending("marker-notes", nt));
+      if(sub && typeof sub === "object" && !Array.isArray(sub)) setSubcategories(startupPending("subcategories", sub));
 
       // Проверяем сохранённую авторизацию
       try{
@@ -4872,6 +4924,9 @@ async function refreshStockFromServer() {
                 <div style={{background:C.bgSection,padding:9}}><div style={{color:C.textDim}}>Последняя отправка</div><div style={{fontSize:12,fontWeight:700,color:C.text,marginTop:3}}>{lastSyncAt ? new Date(lastSyncAt).toLocaleString("ru-RU",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit"}) : "Нет данных"}</div></div>
               </div>
               {lastSyncError&&<div style={{fontSize:11,color:C.danger,marginTop:10,lineHeight:1.45}}>Ошибка: {lastSyncError}</div>}
+              <div style={{fontSize:12,marginTop:12,color:offlineCopy.ready && !offlineCopy.error ? C.success : C.warn}}>
+                {offlineCopy.ready && !offlineCopy.error && offlineShellReady ? `Копия для работы без интернета сохранена: ${new Date(offlineCopy.savedAt).toLocaleString("ru-RU")}` : "Офлайн-копия ещё не готова. Дождитесь успешной загрузки с интернетом."}
+              </div>
             </div>
 
             <div style={{...s.card,padding:14,marginBottom:10}}>
@@ -4976,6 +5031,7 @@ async function refreshStockFromServer() {
               display:"inline-flex",alignItems:"center",gap:5,
             }}>
               <span>{syncView.icon}</span><span>{syncView.label}</span>
+              {offlineCopy.ready && !offlineCopy.error && offlineShellReady && <span>· Офлайн готов</span>}
             </button>
           </div>
         </div>
