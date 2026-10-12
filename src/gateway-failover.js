@@ -7,6 +7,7 @@ const REPLAY_SAFE_ACTIONS = new Set(['github','renew','session-check','health','
   'device-rename','device-revoke','device-diagnostics']);
 
 export function reserveEndpointFor(endpoint) {
+  if(reserve.enabled === false) return '';
   if(endpoint === PRIMARY_STORAGE) return reserve.storage || '';
   if(endpoint === PRIMARY_ABLY) return reserve.ably || '';
   return '';
