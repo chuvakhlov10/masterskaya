@@ -220,6 +220,25 @@ function stockJournal(ops) {
   return { schemaVersion: 4, epoch: 1, ops };
 }
 
+test('stock append above the old 2.9 MB cap still enforces complete immutable history',async()=>{
+  const session=createSessionToken({secret:SESSION_SECRET,clientId:'device-client-123',nowMs:NOW,version:1});
+  const currentOps=[{type:'delta',location:'main',marker:'A',delta:1,ts:100,client:'device',opId:'existing',comment:'x'.repeat(2_300_000)}];
+  const next=[...currentOps,{type:'delta',location:'main',marker:'A',delta:-1,ts:200,client:'device',opId:'pending'}];
+  let puts=0;
+  const handler=createHandler({env:ENV,now:()=>NOW,fetchImpl:async(url,options)=>{
+    if(url.endsWith('/installation'))return jsonResponse({id:1});
+    if(url.includes('/access_tokens'))return jsonResponse({token:'ghs_installation_token_abcdefghijklmnopqrstuvwxyz'});
+    if(options.method==='GET')return jsonResponse({sha:'a'.repeat(40),content:encodeRepoJson(stockJournal(currentOps))});
+    puts++;return jsonResponse({content:{sha:'b'.repeat(40)}});
+  }});
+  const request=ops=>event({action:'github',method:'PUT',path:'data/stock-ops.json',body:{message:'append pending',content:encodeRepoJson(stockJournal(ops)),sha:'a'.repeat(40)}},{'x-masterskaya-session':session.token});
+  assert.ok(request(next).body.length>3_000_000);
+  assert.equal((await handler(request(next))).statusCode,200);
+  const changed=await handler(request([{...currentOps[0],delta:2},next[1]]));
+  assert.equal(changed.statusCode,409);assert.equal(JSON.parse(changed.body).error,'STOCK_JOURNAL_OPERATION_CHANGED');
+  assert.equal(puts,1);
+});
+
 test('stock gateway allows append-only deltas while preserving existing migration history', async () => {
   const session = createSessionToken({ secret: SESSION_SECRET, clientId: 'device-client-123', nowMs: NOW, version: 1 });
   const currentOps = [

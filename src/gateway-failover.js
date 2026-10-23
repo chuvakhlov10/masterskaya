@@ -35,7 +35,13 @@ export function createGatewayFailover({now=Date.now,cooldownMs=60_000}={}) {
     const serialized=JSON.stringify(body);
     const configured=reserveEndpoint && reserveEndpoint !== endpoint;
     const cooling=configured && (failedUntil.get(endpoint)||0)>now();
-    const routes=configured ? (cooling ? [reserveEndpoint,endpoint] : [endpoint,reserveEndpoint]) : [endpoint];
+    // The deployed Yandex gateway caps base64 content at 2.9 MB. Its 400 is a
+    // deliberate rejection, so ordinary error failover must not replay it.
+    // Send these writes straight to the verified reserve with its larger cap.
+    const needsLargerGateway=endpoint===PRIMARY_STORAGE && body?.action==='github' &&
+      body?.method==='PUT' && typeof body?.body?.content==='string' && body.body.content.length>2_900_000;
+    const routes=configured ? (needsLargerGateway ? [reserveEndpoint] :
+      (cooling ? [reserveEndpoint,endpoint] : [endpoint,reserveEndpoint])) : [endpoint];
     let lastError;
     for(let i=0;i<routes.length;i++) {
       const route=routes[i], controller=new AbortController();
