@@ -6,6 +6,32 @@ import {storageGatewayRequest,renewStorageSession} from '../src/storage-gateway.
 const endpoint='https://primary.example/storage', reserveEndpoint='https://reserve.example/api/storage';
 const response=(data,status=200)=>new Response(JSON.stringify(data),{status});
 
+test('stock writes above the deployed primary content cap go directly to reserve unchanged',async()=>{
+  const primary='https://functions.yandexcloud.net/d4ep5fmjtp6t09f06tvt';
+  for(const size of [2_900_000,2_900_004]) {
+    const calls=[],transport=createGatewayFailover();
+    const body={action:'github',method:'PUT',path:'data/stock-ops.json',storageProtocolVersion:4,
+      body:{message:'update stock-ops',sha:'a'.repeat(40),content:'e30='.repeat(size/4)}};
+    await transport.send({endpoint:primary,reserveEndpoint,body,headers:{'X-Masterskaya-Session':'signed-session'},fetchImpl:async(url,request)=>{
+      calls.push(url);assert.equal(request.body,JSON.stringify(body));
+      assert.equal(request.headers['X-Masterskaya-Session'],'signed-session');return response({ok:true});
+    }});
+    assert.deepEqual(calls,[size>2_900_000?reserveEndpoint:primary]);
+  }
+});
+
+test('large stock reserve rejection preserves conflict handling without replaying to primary',async()=>{
+  const primary='https://functions.yandexcloud.net/d4ep5fmjtp6t09f06tvt';
+  for(const status of [401,409,503]) {
+    const calls=[];
+    await assert.rejects(createGatewayFailover().send({endpoint:primary,reserveEndpoint,
+      body:{action:'github',method:'PUT',body:{content:'e30='.repeat(725001)}},fetchImpl:async url=>{
+        calls.push(url);return response({error:'REJECTED'},status);
+      }}),error=>error.status===status);
+    assert.deepEqual(calls,[reserveEndpoint]);
+  }
+});
+
 test('timeout sends the identical stock write to reserve, cools primary and probes recovery',async()=>{
   let clock=1000;
   const transport=createGatewayFailover({now:()=>clock});

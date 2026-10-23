@@ -10,7 +10,7 @@ const REPO = 'masterskaya-data';
 const SESSION_ISSUER = 'masterskaya-storage-gateway';
 const SESSION_AUDIENCE = 'masterskaya-web';
 const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
-const MAX_BODY_BYTES = 3_000_000;
+const MAX_BODY_BYTES = 4_100_000;
 const GITHUB_TIMEOUT_MS = 20_000;
 const SESSION_HEADER = 'x-masterskaya-session';
 
@@ -267,7 +267,7 @@ function normalizeRepoRequest(input = {}) {
     const content = String(body.content || '');
     const sha = body.sha === undefined ? null : String(body.sha || '');
     if (!message.trim() || message.length > 240) throw makeError('GITHUB_BODY_INVALID', 400);
-    if (!content || content.length > 2_900_000 || !/^[A-Za-z0-9+/=\r\n]+$/.test(content)) {
+    if (!content || content.length > 4_000_000 || !/^[A-Za-z0-9+/=\r\n]+$/.test(content)) {
       throw makeError('GITHUB_BODY_INVALID', 400);
     }
     if (sha && !/^[a-f0-9]{40,64}$/i.test(sha)) throw makeError('GITHUB_BODY_INVALID', 400);

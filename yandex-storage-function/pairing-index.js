@@ -4,7 +4,7 @@ const base = require('./index.js');
 const { createDeviceAuthService, normalizeDeviceName } = require('./device-auth.js');
 
 const SESSION_HEADER = 'x-masterskaya-session';
-const MAX_BODY_BYTES = 3_000_000;
+const MAX_BODY_BYTES = 4_100_000;
 const GITHUB_API = 'https://api.github.com';
 const GITHUB_TIMEOUT_MS = 20_000;
 const INTERNAL_PATHS = new Set(['auth/devices.json', 'auth/pairings.json', 'auth/recovery.json']);

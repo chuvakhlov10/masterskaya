@@ -4,7 +4,8 @@ const storage = require('../yandex-storage-function/device-index.js');
 const ably = require('../yandex-function/device-aware-index.js');
 const { ALLOWED_ORIGIN } = require('../yandex-storage-function/index.js');
 const INTERNAL_STORAGE_URL = 'https://masterskaya-internal.invalid/storage';
-const MAX_BODY_BYTES = 3_000_000;
+// Leave room below the hosting platform's 4.5 MB request/response ceiling.
+const MAX_BODY_BYTES = 4_100_000;
 
 function createReserveHandlers({env=process.env,fetchImpl=globalThis.fetch,now=Date.now,
   appClient,deviceAuthService}={}) {
