@@ -28,6 +28,7 @@ import { notifyDeviceDiagnosticsChanged, recordStorageSyncCycleResult } from "./
 import { appendStockOutboxQuarantine } from "./stock-outbox-quarantine.js";
 import { compactRecordWrite, mergeRecordRefresh, persistPendingWrites, persistRecordMutation } from "./record-sync.js";
 import { offlineStore } from "./offline-store.js";
+import { calcEarnings } from "./earnings.js";
 
 const CLIENT_ID = String(Date.now()) + '-' + Math.random().toString(36).slice(2, 8);
 const ably = new Ably.Realtime(createSecureAblyRealtimeOptions({
@@ -46,10 +47,6 @@ const DEFAULT_MARKERS = {
   "Прочие услуги": ["Заточка ножей","Заточка топоров","Заточка садового инструмента","Исправление чужой работы","Заточка топора"]
 };
 const WORKSHOPS = ["SMART","Бегемот"];
-const INCOME_PCT = 0.4;          // 40% с ключей
-const SHARP_INCOME_PCT = 1.0;    // 100% с заточки
-// Маркировки, которые считаются «заточкой» — Илья получает 100%
-const SHARPING_MARKERS = new Set(["Заточка ножей","Заточка топоров","Заточка садового инструмента","Заточка топора"]);
 // «Услуги» — маркировки, которые не учитываются на складе (не заготовки).
 // Они всегда показываются в форме записи, даже если остаток 0.
 // В разделах склада (общий/мастерская) — не отображаются.
@@ -121,28 +118,6 @@ function isServiceMarker(marker, category){
   if(category === "Прочие услуги") return true;
   if(SERVICE_MARKERS.has(marker)) return true;
   return false;
-}
-
-// Расчёт зарплаты Ильи (только для SMART):
-// - 40% с ключей (обычные категории)
-// - 100% с заточки (маркировки из SHARPING_MARKERS)
-// - «Исправление чужой работы» и другие не-заточечные услуги — 40%
-function calcEarnings(recs){
-  let total = 0;
-  let fromKeys = 0;
-  let fromSharping = 0;
-  for(const r of recs){
-    const sign = signOf(r);
-    const amt = (r.amount || 0) * sign;
-    if(SHARPING_MARKERS.has(r.marker)){
-      total += amt * SHARP_INCOME_PCT;
-      fromSharping += amt * SHARP_INCOME_PCT;
-    } else {
-      total += amt * INCOME_PCT;
-      fromKeys += amt * INCOME_PCT;
-    }
-  }
-  return { total, fromKeys, fromSharping };
 }
 
 // Сортировка категорий по алфавиту (А → Я)
