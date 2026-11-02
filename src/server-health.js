@@ -45,6 +45,7 @@ export function healthErrorText(code) {
     HEALTH_REQUEST_TIMEOUT: "Сервер не ответил вовремя",
     HEALTH_REQUEST_FAILED: "Нет связи с сервером",
     HEALTH_RESPONSE_INVALID: "Сервер вернул некорректный ответ",
+    HEALTH_HTTP_402: "Хостинг приостановил работу сервера",
     SESSION_REQUIRED: "Сессия устройства отсутствует",
     SESSION_INVALID: "Сессия устройства недействительна",
     SESSION_EXPIRED: "Сессия устройства истекла",

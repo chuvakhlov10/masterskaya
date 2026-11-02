@@ -6,7 +6,7 @@ import {storageGatewayRequest,renewStorageSession} from '../src/storage-gateway.
 const endpoint='https://primary.example/storage', reserveEndpoint='https://reserve.example/api/storage';
 const response=(data,status=200)=>new Response(JSON.stringify(data),{status});
 
-test('stock writes above the deployed primary content cap go directly to reserve unchanged',async()=>{
+test('small and large stock writes use the upgraded primary with identical payload and session',async()=>{
   const primary='https://functions.yandexcloud.net/d4ep5fmjtp6t09f06tvt';
   for(const size of [2_900_000,2_900_004]) {
     const calls=[],transport=createGatewayFailover();
@@ -16,20 +16,44 @@ test('stock writes above the deployed primary content cap go directly to reserve
       calls.push(url);assert.equal(request.body,JSON.stringify(body));
       assert.equal(request.headers['X-Masterskaya-Session'],'signed-session');return response({ok:true});
     }});
-    assert.deepEqual(calls,[size>2_900_000?reserveEndpoint:primary]);
+    assert.deepEqual(calls,[primary]);
   }
 });
 
-test('large stock reserve rejection preserves conflict handling without replaying to primary',async()=>{
+test('large stock authorization and conflict rejections are not replayed',async()=>{
   const primary='https://functions.yandexcloud.net/d4ep5fmjtp6t09f06tvt';
-  for(const status of [401,409,503]) {
+  for(const status of [401,409]) {
     const calls=[];
     await assert.rejects(createGatewayFailover().send({endpoint:primary,reserveEndpoint,
       body:{action:'github',method:'PUT',body:{content:'e30='.repeat(725001)}},fetchImpl:async url=>{
         calls.push(url);return response({error:'REJECTED'},status);
       }}),error=>error.status===status);
-    assert.deepEqual(calls,[reserveEndpoint]);
+    assert.deepEqual(calls,[primary]);
   }
+});
+
+test('a hosting-disabled reserve falls back to a recovered primary during cooldown',async()=>{
+  const transport=createGatewayFailover(),calls=[];
+  let first=true;
+  const fetchImpl=async url=>{
+    calls.push(url);
+    if(first && url===endpoint)throw new TypeError('primary network interruption');
+    if(url===reserveEndpoint)return first?response({ok:true}):new Response('Payment required\nDEPLOYMENT_DISABLED',{status:402});
+    return response({ok:true});
+  };
+  await transport.send({endpoint,reserveEndpoint,body:{action:'github'},fetchImpl});
+  first=false;
+  await transport.send({endpoint,reserveEndpoint,body:{action:'github'},fetchImpl});
+  assert.deepEqual(calls,[endpoint,reserveEndpoint,reserveEndpoint,endpoint]);
+  assert.equal(transport.lastRoute(endpoint).route,'primary');
+});
+
+test('a 402 from the primary remains a terminal refusal',async()=>{
+  const calls=[];
+  await assert.rejects(createGatewayFailover().send({endpoint,reserveEndpoint,body:{action:'github'},fetchImpl:async url=>{
+    calls.push(url);return new Response('Payment required',{status:402});
+  }}),error=>error.status===402);
+  assert.deepEqual(calls,[endpoint]);
 });
 
 test('timeout sends the identical stock write to reserve, cools primary and probes recovery',async()=>{
