@@ -23,6 +23,46 @@ class MemoryStorage {
 
 const SESSION_TOKEN = 'header.payload.signature';
 
+test('missing optional photos do not report a failed write or a successful sync', () => {
+  const storage = new MemoryStorage();
+  recordStorageRequestResult({ok:true,operation:'PUT data/records.json',now:1000,storage});
+  recordStorageRequestResult({ok:false,code:'GATEWAY_HTTP_404',operation:'GET photos/Техком(TKRF).txt',now:2000,storage});
+  const metrics=readDiagnosticMetrics(storage);
+  assert.equal(metrics.activeStorageFailureCount,0);
+  assert.equal(metrics.lastStorageSuccessAt,1000);
+  assert.equal(metrics.lastStorageSuccessOperation,'PUT data/records.json');
+  assert.equal(metrics.lastStorageErrorCode,'');
+  assert.equal(deriveStorageRequestState(metrics).kind,'ok');
+});
+
+test('existing optional photo 404 alarms are removed while real failures and history remain', () => {
+  const storage = new MemoryStorage();
+  const failures=Array.from({length:43},(_,i)=>({operation:`GET photos/marker-${i}.txt`,code:'GATEWAY_HTTP_404',at:2000+i,failures:1}));
+  storage.setItem('masterskaya_diagnostics_v1',JSON.stringify({schemaVersion:3,
+    lastStorageErrorCode:'GATEWAY_REQUEST_TIMEOUT',lastStorageErrorOperation:'GET data/stock-ops.json',lastStorageErrorAt:1500,
+    activeStorageFailures:[...failures,
+      {operation:'PUT data/records.json',code:'GATEWAY_HTTP_404',at:1800,failures:1},
+      {operation:'GET photos/private.txt',code:'DEVICE_NOT_REGISTERED',at:1900,failures:1},
+      {operation:'GET data/stock-ops.json',code:'GATEWAY_REQUEST_TIMEOUT',at:1500,failures:1}]}));
+  const metrics=readDiagnosticMetrics(storage);
+  assert.equal(metrics.activeStorageFailureCount,3);
+  assert.equal(metrics.lastStorageErrorCode,'GATEWAY_REQUEST_TIMEOUT');
+  assert.equal(metrics.activeStorageErrorCode,'DEVICE_NOT_REGISTERED');
+  assert.equal(deriveStorageRequestState(metrics).kind,'error');
+});
+
+test('an absent photo clears only a previous failure of the same optional read', () => {
+  const storage = new MemoryStorage();
+  recordStorageRequestResult({ok:false,code:'GATEWAY_REQUEST_TIMEOUT',operation:'GET photos/A.txt',now:1000,storage});
+  recordStorageRequestResult({ok:false,code:'GATEWAY_REQUEST_TIMEOUT',operation:'PUT data/records.json',now:1100,storage});
+  recordStorageRequestResult({ok:false,code:'GATEWAY_HTTP_404',operation:'GET photos/A.txt',now:2000,storage});
+  const metrics=readDiagnosticMetrics(storage);
+  assert.equal(metrics.activeStorageFailureCount,1);
+  assert.equal(metrics.activeStorageErrorOperation,'PUT data/records.json');
+  assert.equal(metrics.lastStorageErrorAt,1100);
+  assert.equal(metrics.lastStorageSuccessAt,null);
+});
+
 function storageFixture() {
   return new MemoryStorage({
     masterskaya_storage_session_v1: JSON.stringify({
