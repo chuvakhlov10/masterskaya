@@ -48,6 +48,6 @@ test('connected application exposes safe server health and diagnostics', () => {
   assert.match(healthSource, /Безопасный карантин/);
 });
 
-test('large stock synchronization fix is version 1.6.4', () => {
-  assert.match(statusSource, /APP_VERSION = "1\.6\.4"/);
+test('optional photo diagnostics fix is version 1.6.5', () => {
+  assert.match(statusSource, /APP_VERSION = "1\.6\.5"/);
 });

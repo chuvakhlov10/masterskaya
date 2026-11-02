@@ -51,13 +51,19 @@ function normalizedOperation(operation) {
   return String(operation || "").trim().replace(/\s+/g, " ").slice(0, 160);
 }
 
+// photoGet treats a missing optional photo (including its legacy-path probe)
+// as an empty result. It must not leave a permanent storage failure alarm.
+function isMissingOptionalPhoto(code, operation) {
+  return code === "GATEWAY_HTTP_404" && /^GET photos\/.+\.txt$/.test(operation);
+}
+
 function normalizeActiveFailures(value) {
   if (!Array.isArray(value)) return [];
   const byOperation = new Map();
   for (const item of value) {
     const operation = normalizedOperation(item?.operation);
     const code = safeText(item?.code, 120);
-    if (!operation || !code) continue;
+    if (!operation || !code || isMissingOptionalPhoto(code, operation)) continue;
     const entry = {
       operation,
       code,
@@ -217,6 +223,15 @@ export function recordStorageRequestResult({
   const previous = readDiagnosticMetrics(storage, now);
   const operationName = normalizedOperation(operation);
   if (SELF_CHECK_OPERATIONS.has(operationName)) return previous;
+
+  if (!ok && isMissingOptionalPhoto(code, operationName)) {
+    // Clear an earlier real error on this exact read: the server now answered
+    // normally that no photo exists. Do not report this as a successful sync
+    // or overwrite the history of real failures.
+    const next = applyActiveFailureSummary({ ...previous }, clearActiveFailure(previous.activeStorageFailures, operationName));
+    safeSet(storage, DIAGNOSTICS_KEY, JSON.stringify(next));
+    return next;
+  }
 
   const retryCount = Number.isInteger(Number(retries)) ? Math.max(0, Number(retries)) : 0;
   const next = {
