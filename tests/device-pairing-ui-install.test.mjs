@@ -48,6 +48,6 @@ test('connected application exposes safe server health and diagnostics', () => {
   assert.match(healthSource, /Безопасный карантин/);
 });
 
-test('optional photo diagnostics fix is version 1.6.5', () => {
-  assert.match(statusSource, /APP_VERSION = "1\.6\.5"/);
+test('primary stock gateway recovery release is version 1.6.6', () => {
+  assert.match(statusSource, /APP_VERSION = "1\.6\.6"/);
 });

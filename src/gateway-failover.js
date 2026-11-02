@@ -35,19 +35,18 @@ export function createGatewayFailover({now=Date.now,cooldownMs=60_000}={}) {
     const serialized=JSON.stringify(body);
     const configured=reserveEndpoint && reserveEndpoint !== endpoint;
     const cooling=configured && (failedUntil.get(endpoint)||0)>now();
-    // The deployed Yandex gateway caps base64 content at 2.9 MB. Its 400 is a
-    // deliberate rejection, so ordinary error failover must not replay it.
-    // Send these writes straight to the verified reserve with its larger cap.
-    const needsLargerGateway=endpoint===PRIMARY_STORAGE && body?.action==='github' &&
+    // The primary now accepts the larger journal too. A paused reserve must
+    // never be the only route for stock writes. Large uploads retain their
+    // full timeout, including GitHub's read/merge/write and response transfer.
+    const largeWrite=endpoint===PRIMARY_STORAGE && body?.action==='github' &&
       body?.method==='PUT' && typeof body?.body?.content==='string' && body.body.content.length>2_900_000;
-    const routes=configured ? (needsLargerGateway ? [reserveEndpoint] :
-      (cooling ? [reserveEndpoint,endpoint] : [endpoint,reserveEndpoint])) : [endpoint];
+    const routes=configured ? (cooling ? [reserveEndpoint,endpoint] : [endpoint,reserveEndpoint]) : [endpoint];
     let lastError;
     for(let i=0;i<routes.length;i++) {
       const route=routes[i], controller=new AbortController();
       // Fail over promptly when a verified reserve is configured; preserve the
       // original timeout otherwise. Every attempt reuses the identical intent.
-      const duration=configured && canReplay && route===endpoint ? Math.min(timeoutMs,6000) : timeoutMs;
+      const duration=configured && canReplay && !largeWrite && route===endpoint ? Math.min(timeoutMs,6000) : timeoutMs;
       const timer=setTimeout(()=>controller.abort(),duration);
       try {
         let response;
@@ -67,7 +66,8 @@ export function createGatewayFailover({now=Date.now,cooldownMs=60_000}={}) {
         return payload;
       } catch(cause) {
         lastError=cause;
-        const transient=RETRYABLE_STATUS.has(Number(cause.status)) ||
+        const reservePaused=route===reserveEndpoint && Number(cause.status)===402;
+        const transient=reservePaused || RETRYABLE_STATUS.has(Number(cause.status)) ||
           cause.code===errorPrefix+'_REQUEST_TIMEOUT' || cause.code===errorPrefix+'_REQUEST_FAILED' ||
           cause.code===errorPrefix+'_RESPONSE_INVALID';
         // A 401/403, revoked device, conflict, invalid input or consumed one-time
