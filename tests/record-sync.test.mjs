@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
-import { buildPayments, paymentDraft } from '../src/payments.js';
+import { buildPayments, paymentDraft, usesPaymentMethods } from '../src/payments.js';
 import { findRecordIndex, sameRecordVersion, recordRevision, legacyRecordFingerprint } from '../src/sync-core.js';
 import { compactRecordWrite, mergeRecordRefresh, persistPendingWrites, persistRecordMutation } from '../src/record-sync.js';
 
@@ -114,7 +114,7 @@ function appHarness(disk) {
     recordStorageFailure:() => 'LOCAL_QUEUE_STORAGE_FAILED',
     findRecordIndex, sameRecordVersion, recordRevision, legacyRecordFingerprint,
     editRec:null, setEditRec:()=>{}, alert:message=>messages.push({ok:false,text:message}),
-    buildPayments, paymentDraft, payment:{...paymentDraft(),method:"cash"}, setPayment:()=>{},
+    buildPayments, paymentDraft, usesPaymentMethods, payment:{...paymentDraft(),method:"cash"}, setPayment:()=>{},
     marker:'Proxy', recordType:'sale', qty:1, defect:0, amount:250, comment:'',
     workshop:'SMART', category:'Домофонные', makeRecordMutationId:id => `mut-${id}`,
     setRecords:() => {}, setSubmitMsg:value => messages.push(value),
@@ -247,4 +247,32 @@ test('actual payment edit rejects an outdated record opened before a concurrent 
   await h.context.handleEditSave({...opened,payments:[{method:'qr',amount:250}]});
   assert.equal(h.effects.length,0);
   assert.match(h.messages.at(-1).text,/другом устройстве/);
+});
+
+
+test('Begemot sale and refund save without choosing payment or adding payment fields', async () => {
+  for(const type of ['sale','refund']){
+    const disk=storage(), h=appHarness(disk);
+    h.context.workshop='Бегемот';
+    h.context.recordType=type;
+    h.context.payment={...paymentDraft(),method:'split',cash:'1',card:'2'};
+    await h.context.submitRecord();
+    assert.equal(h.messages[0].ok,true);
+    const saved=JSON.parse(disk.getItem('pending_writes'))[0].val[0];
+    assert.equal(saved.workshop,'Бегемот');
+    assert.equal(saved.recordType,type);
+    assert.equal(Object.hasOwn(saved,'payments'),false);
+    assert.equal(h.effects.length,1);
+  }
+});
+
+test('SMART still requires a payment choice for new sales and refunds', async () => {
+  for(const type of ['sale','refund']){
+    const h=appHarness(storage());
+    h.context.recordType=type;
+    h.context.payment=paymentDraft();
+    await h.context.submitRecord();
+    assert.equal(h.effects.length,0);
+    assert.match(h.messages.at(-1).text,/Выберите способ оплаты/);
+  }
 });

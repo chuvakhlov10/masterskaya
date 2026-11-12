@@ -3,6 +3,10 @@ export const PAYMENT_METHODS = [
 ];
 export const UNSPECIFIED_PAYMENT = "Способ оплаты не указан";
 
+export function usesPaymentMethods(workshop) {
+  return workshop === "SMART";
+}
+
 // Calculate in kopecks: a split must balance exactly, including decimal amounts.
 export function moneyCents(value) {
   if (typeof value === "number") {

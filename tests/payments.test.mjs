@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildPayments, paymentDraft, recordPayments, paymentLabel, paymentTotals, moneyCents, UNSPECIFIED_PAYMENT } from '../src/payments.js';
+import { buildPayments, paymentDraft, recordPayments, paymentLabel, paymentTotals, moneyCents, UNSPECIFIED_PAYMENT, usesPaymentMethods } from '../src/payments.js';
 import { calcEarnings } from '../src/earnings.js';
 import { compactRecordWrite, mergeRecordRefresh } from '../src/record-sync.js';
 import { legacyRecordFingerprint, mergeRecords } from '../src/sync-core.js';
@@ -91,7 +91,7 @@ test('CSV export carries mixed amounts, unspecified history and negative refund 
   ];
   let downloaded;
   const context = vm.createContext({
-    records,workshop:'SMART',paymentTotals,paymentLabel,Blob,
+    records,workshop:'SMART',paymentTotals,paymentLabel,usesPaymentMethods,Blob,
     signOf:r=>r.recordType==='refund'?-1:1,
     URL:{createObjectURL:blob=>{downloaded=blob;return 'blob:test';},revokeObjectURL:()=>{}},
     document:{createElement:()=>({click:()=>{}})},alert:message=>assert.fail(message),
@@ -101,4 +101,36 @@ test('CSV export carries mixed amounts, unspecified history and negative refund 
   assert.ok(rows.every(row=>row.length===15));
   assert.deepEqual(rows.find(row=>row[3]==='Возврат').slice(11),['0','-100','0','0']);
   assert.deepEqual(rows.at(-1).slice(8),['1100','3 записей','','300','600','0','200']);
+});
+
+
+test('only SMART enables payment methods', () => {
+  assert.equal(usesPaymentMethods('SMART'),true);
+  for(const workshop of ['Бегемот',undefined,null,'']) assert.equal(usesPaymentMethods(workshop),false);
+});
+
+test('Begemot CSV keeps ordinary totals and excludes payment columns even for previously classified records', async () => {
+  const fs=await import('node:fs'), vm=await import('node:vm');
+  const app=fs.readFileSync(new URL('../src/App.jsx',import.meta.url),'utf8');
+  const start=app.indexOf('  function exportStatsCSV(){'), end=app.indexOf('  // ── Касса дня',start);
+  const records=[
+    {...sale,workshop:'Бегемот',payments:[{method:'card',amount:1000}]},
+    {...sale,workshop:'Бегемот',id:'refund',amount:100,recordType:'refund'},
+    {...sale,workshop:'SMART',id:'other'},
+  ];
+  const before=JSON.stringify(records);
+  let downloaded;
+  const context=vm.createContext({records,workshop:'Бегемот',usesPaymentMethods,Blob,
+    paymentTotals:()=>assert.fail('Begemot must not calculate payment totals'),
+    paymentLabel:()=>assert.fail('Begemot must not export payment labels'),
+    signOf:r=>r.recordType==='refund'?-1:1,
+    URL:{createObjectURL:blob=>{downloaded=blob;return 'blob:test';},revokeObjectURL:()=>{}},
+    document:{createElement:()=>({click:()=>{}})},alert:message=>assert.fail(message),
+  });
+  vm.runInContext(app.slice(start,end)+'\nexportStatsCSV();',context);
+  const csv=await downloaded.text(), rows=csv.trim().split('\n').map(row=>row.split(';'));
+  assert.ok(rows.every(row=>row.length===10));
+  assert.deepEqual(rows.at(-1).slice(8),['900','2 записей']);
+  assert.doesNotMatch(csv,/Способ оплаты|Наличные|QR-код|Карта/);
+  assert.equal(JSON.stringify(records),before);
 });
