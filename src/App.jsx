@@ -11,6 +11,7 @@ import {
   createStockJournal,
   findRecordsMissingCreateEffect,
   findRecordIndex,
+  legacyRecordFingerprint,
   recordRevision,
   sameRecordVersion,
   mergeById,
@@ -29,6 +30,7 @@ import { appendStockOutboxQuarantine } from "./stock-outbox-quarantine.js";
 import { compactRecordWrite, mergeRecordRefresh, persistPendingWrites, persistRecordMutation } from "./record-sync.js";
 import { offlineStore } from "./offline-store.js";
 import { calcEarnings } from "./earnings.js";
+import { PAYMENT_METHODS, UNSPECIFIED_PAYMENT, buildPayments, paymentDraft, paymentLabel, paymentTotals } from "./payments.js";
 
 const CLIENT_ID = String(Date.now()) + '-' + Math.random().toString(36).slice(2, 8);
 const ably = new Ably.Realtime(createSecureAblyRealtimeOptions({
@@ -683,6 +685,45 @@ function MarkerPicker({ markers, value, onChange, extraLabel }){
   );
 }
 
+function PaymentFields({ value, onChange, amount, refund = false, allowUnspecified = false }){
+  if(Number(amount) === 0) return <div style={{fontSize:12,color:C.textDim,marginBottom:12}}>Сумма 0 ₽ — оплата не требуется</div>;
+  const result = buildPayments(value, amount, allowUnspecified);
+  const options = [...PAYMENT_METHODS, ["split", "Смешанная"]];
+  return (
+    <fieldset style={{border:0,padding:0,margin:"0 0 16px",minWidth:0}}>
+      <legend style={s.label}>{refund ? "Способ возврата денег" : "Способ оплаты"}</legend>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(2,minmax(0,1fr))",gap:6}}>
+        {options.map(([id,label]) => <button key={id} type="button" aria-pressed={value.method === id}
+          onClick={()=>onChange({...value,method:id})}
+          style={{...s.btn(),background:value.method===id?C.brandDim:C.bgInput,color:value.method===id?C.brand:C.text,borderColor:value.method===id?C.brand:C.border}}>{label}</button>)}
+      </div>
+      {allowUnspecified && <button type="button" aria-pressed={!value.method} onClick={()=>onChange(paymentDraft())}
+        style={{...s.btn(),marginTop:6,fontSize:10,borderColor:!value.method?C.brand:C.border}}>{UNSPECIFIED_PAYMENT}</button>}
+      {value.method === "split" && <div style={{marginTop:10}}>
+        {PAYMENT_METHODS.map(([id,label]) => <label key={id} style={{display:"block",marginBottom:8,fontSize:12}}>
+          {label}, ₽
+          <input type="text" inputMode="decimal" value={value[id]} placeholder="0" style={{...s.input,marginTop:4}}
+            onChange={e=>onChange({...value,[id]:e.target.value})}/>
+        </label>)}
+        <div style={{fontSize:12,color:C.textSub}}>Итого должно быть: {fmt(amount)} ₽</div>
+      </div>}
+      {value.method && result.error && <div role="alert" style={{fontSize:12,color:C.danger,marginTop:6}}>{result.error}</div>}
+      {!value.method && !allowUnspecified && <div style={{fontSize:12,color:C.textSub,marginTop:6}}>Выберите способ для этой записи</div>}
+    </fieldset>
+  );
+}
+
+function PaymentSummary({ records }){
+  const totals = paymentTotals(records);
+  return <div style={{...s.card,marginBottom:14}}>
+    <div style={{...s.label,marginBottom:10}}>По способам оплаты · с учётом возвратов</div>
+    {[...PAYMENT_METHODS,["unspecified",UNSPECIFIED_PAYMENT]].map(([id,label]) =>
+      <div key={id} style={{display:"flex",justifyContent:"space-between",gap:8,marginTop:6,fontSize:13}}>
+        <span>{label}</span><b>{fmt(totals[id])} ₽</b>
+      </div>)}
+  </div>;
+}
+
 function EditModal({ record, id, markers, onSave, onDelete, onClose }){
   const [cat, setCat] = useState(record.category);
   const [mrk, setMrk] = useState(record.marker);
@@ -691,6 +732,8 @@ function EditModal({ record, id, markers, onSave, onDelete, onClose }){
   const [amount, setAmount] = useState(record.amount);
   const [comment, setComment] = useState(record.comment||"");
   const [recordType, setRecordType] = useState(record.recordType || "sale");
+  const [payment, setPayment] = useState(()=>paymentDraft(record));
+  const [paymentError, setPaymentError] = useState("");
   return (
     <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.75)",zIndex:100,display:"flex",alignItems:"flex-end",justifyContent:"center"}}
       onClick={e=>{if(e.target===e.currentTarget)onClose();}}>
@@ -740,10 +783,18 @@ function EditModal({ record, id, markers, onSave, onDelete, onClose }){
         )}
         <label style={s.label}>Сумма, руб {recordType==="refund"&&<span style={{color:C.danger}}>(будет вычтена)</span>}</label>
         <NumInput value={amount} onChange={setAmount} min="0" style={{...s.input,marginBottom:10}}/>
+        <PaymentFields value={payment} onChange={v=>{setPayment(v);setPaymentError("");}} amount={amount}
+          refund={recordType==="refund"} allowUnspecified={!record.payments?.length}/>
+        {paymentError && <div role="alert" style={{color:C.danger,marginBottom:10}}>{paymentError}</div>}
         <label style={s.label}>Комментарий</label>
         <textarea value={comment} onChange={e=>setComment(e.target.value)} rows={2} style={{...s.input,resize:"vertical",marginBottom:16}}/>
         <div style={{display:"flex",gap:8}}>
-          <button onClick={()=>onSave({...record,category:cat,marker:mrk.trim(),qty,defect,amount,comment,recordType})}
+          <button onClick={()=>{
+            const result = buildPayments(payment, amount, !record.payments?.length);
+            if(result.error){setPaymentError(result.error);return;}
+            const paymentUpdate = !record.payments && !result.payments.length ? {} : {payments:result.payments};
+            onSave({...record,category:cat,marker:mrk.trim(),qty,defect,amount,comment,recordType,...paymentUpdate});
+          }}
             style={{...s.btn("accent"),flex:1,padding:"10px 0"}}>Сохранить</button>
           <button onClick={()=>onDelete(record)} style={{...s.btn("danger"),padding:"10px 14px"}}>Удалить</button>
         </div>
@@ -926,6 +977,7 @@ function DayRecordsList({ dayRecs, records, onEditRecord }){
                 </div>
                 <div style={{fontSize:12,color:C.textDim,marginTop:2}}>
                   {r.category}{r.comment&&` · ${r.comment}`}
+                  <div>{paymentLabel(r)}</div>
                 </div>
               </div>
             );
@@ -1062,7 +1114,7 @@ function DayRow({ dateLabel, dayData, workshop, onEditRecord, allRecords }){
                   <span style={{color:isRefund?C.danger:isOnlyDefect?C.warn:C.success}}>
                     {isRefund?"↩":isOnlyDefect?"⚠":"↑"}
                   </span>
-                  <span style={{color:C.text}}>{r.marker}</span>
+                  <span style={{color:C.text}}>{r.marker}<span style={{display:"block",fontSize:10,color:C.textDim}}>{paymentLabel(r)}</span></span>
                   {isRefund && <span style={{...s.tag(C.danger),fontSize:9,padding:"1px 5px"}}>возврат</span>}
                   {isOnlyDefect && <span style={{...s.tag(C.warn),fontSize:9,padding:"1px 5px"}}>брак</span>}
                 </div>
@@ -1963,6 +2015,7 @@ export default function App(){
   const [manualAmount, setManualAmount] = useState(false);
   const [comment, setComment] = useState("");
   const [recordType, setRecordType] = useState("sale");
+  const [payment, setPayment] = useState(()=>paymentDraft());
   const [submitMsg, setSubmitMsg] = useState(null);
   const [markerPhoto, setMarkerPhoto] = useState(null);
   const [photoCache, setPhotoCache] = useState({});
@@ -3333,7 +3386,7 @@ async function refreshStockFromServer() {
     try {
       const wsRecs = records.filter(r => r.workshop === workshop);
       // Заголовки
-      let csv = "Дата;Время;Мастерская;Тип;Категория;Маркировка;Кол-во;Брак;Сумма;Комментарий\n";
+      let csv = "Дата;Время;Мастерская;Тип;Категория;Маркировка;Кол-во;Брак;Сумма;Комментарий;Способ оплаты;Наличные;Карта;QR-код;Не указан\n";
       // Сортируем по дате (новые сверху)
       const sorted = [...wsRecs].sort((a,b) => (b.timestamp||0) - (a.timestamp||0));
       for(const r of sorted){
@@ -3343,11 +3396,13 @@ async function refreshStockFromServer() {
         const type = r.recordType === "refund" ? "Возврат" : "Продажа";
         // Экранируем точку с запятой в полях
         const esc = (s) => String(s||"").replace(/;/g, ",");
-        csv += [dateStr, timeStr, esc(r.workshop), type, esc(r.category), esc(r.marker), r.qty||0, r.defect||0, r.amount||0, esc(r.comment)].join(";") + "\n";
+        const paid = paymentTotals([r]);
+        csv += [dateStr, timeStr, esc(r.workshop), type, esc(r.category), esc(r.marker), r.qty||0, r.defect||0, r.amount||0, esc(r.comment), esc(paymentLabel(r)), paid.cash, paid.card, paid.qr, paid.unspecified].join(";") + "\n";
       }
       // Добавляем итоговую строку
       const totalAmt = wsRecs.reduce((s,r) => s + r.amount * signOf(r), 0);
-      csv += `\n;ИТОГО:;;;;;;${wsRecs.length} записей;;${totalAmt} руб;\n`;
+      const paidTotal = paymentTotals(wsRecs);
+      csv += ["", "ИТОГО:", "", "", "", "", "", "", totalAmt, `${wsRecs.length} записей`, "", paidTotal.cash, paidTotal.card, paidTotal.qr, paidTotal.unspecified].join(";") + "\n";
       
       // BOM для корректного открытия в Excel с кириллицей
       const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" });
@@ -3489,13 +3544,15 @@ async function refreshStockFromServer() {
     }
     if(amount<0){setSubmitMsg({ok:false,text:"Сумма не может быть отрицательной"});return;}
 
+    const paymentResult = buildPayments(payment, amount);
+    if(paymentResult.error){setSubmitMsg({ok:false,text:paymentResult.error});return;}
     const now = Date.now();
     const m = marker.trim();
     const recordId = `rec-${now}-${Math.random().toString(36).slice(2, 8)}`;
     const mutationId = makeRecordMutationId(recordId);
     const rec = {
       id: recordId, workshop, category, marker: m, qty, defect, amount, comment,
-      recordType, timestamp: now, updatedAt: now, revision: 1, lastMutationId: mutationId,
+      recordType, payments:paymentResult.payments, timestamp: now, updatedAt: now, revision: 1, lastMutationId: mutationId,
     };
     const next = [...recordsRef.current, rec];
     let saved;
@@ -3515,7 +3572,7 @@ async function refreshStockFromServer() {
     saved.savePromise.then(result => checkCommittedRecordMutation(result, recordId, mutationId)).catch(()=>{});
 
     setMarker(""); setQty(0); setDefect(0); setAmount(0);
-    setManualAmount(false); setComment(""); setRecordType("sale");
+    setManualAmount(false); setComment(""); setRecordType("sale"); setPayment(paymentDraft());
     setSubmitMsg({ok:true, text: rec.recordType==="refund" ? "Возврат оформлен" : (rec.qty===0&&rec.defect>0 ? `Брак оформлен (${rec.defect} шт)` : "Запись добавлена")});
     setTimeout(()=>setSubmitMsg(null), 2000);
   }
@@ -3543,6 +3600,7 @@ async function refreshStockFromServer() {
     const nextRecord = {
       ...updated, id: recId, timestamp: old.timestamp, updatedAt: now,
       revision, lastMutationId: mutationId,
+      ...(!old.id ? {legacyFingerprint:legacyRecordFingerprint(old)} : {}),
     };
     const next = recordsRef.current.map((record, index) => index === oldIdx ? nextRecord : record);
     let saved;
@@ -4584,6 +4642,7 @@ async function refreshStockFromServer() {
             {totalRefundQty > 0 && <StatCard label={`Возвратов: ${totalRefundQty} шт`} value={"−"+fmt(totalRefundAmt)+" р"} color={C.danger}/>}
             {workshop==="SMART"&&(() => { const e = calcEarnings(data); return <StatCard label="Зарплата" value={fmt(e.total)+" р"} sub={`ключи: ${fmt(e.fromKeys)} · заточка: ${fmt(e.fromSharping)}`} color={C.success}/>; })()}
           </div>
+          <PaymentSummary records={data}/>
           <div style={{fontSize:10,fontWeight:700,color:C.textSub,marginBottom:8,textTransform:"uppercase",letterSpacing:"1px"}}>ПО КАТЕГОРИЯМ</div>
           <StatsBreakdown data={data} totalAmt={totalAmt} totalQty={totalQty}/>
           <div style={{fontSize:10,fontWeight:700,color:C.textSub,marginBottom:8,marginTop:16,textTransform:"uppercase",letterSpacing:"1px"}}>ОТЧЁТ ДНЯ · СКЛАД</div>
@@ -4619,6 +4678,7 @@ async function refreshStockFromServer() {
             {totalRefundQty > 0 && <StatCard label={`Возвратов: ${totalRefundQty} шт`} value={"−"+fmt(totalRefundAmt)+" р"} color={C.danger}/>}
             {workshop==="SMART"&&(() => { const e = calcEarnings(data); return <StatCard label="Зарплата" value={fmt(e.total)+" р"} sub={`ключи: ${fmt(e.fromKeys)} · заточка: ${fmt(e.fromSharping)}`} color={C.success}/>; })()}
           </div>
+          <PaymentSummary records={data}/>
           <div style={{fontSize:10,fontWeight:700,color:C.textSub,marginBottom:8,textTransform:"uppercase",letterSpacing:"1px"}}>ПО КАТЕГОРИЯМ</div>
           <StatsBreakdown data={data} totalAmt={totalAmt} totalQty={totalQty}/>
           <div style={{fontSize:10,fontWeight:700,color:C.textSub,marginBottom:8,marginTop:16,textTransform:"uppercase",letterSpacing:"1px"}}>ПО ДНЯМ</div>
@@ -4680,6 +4740,7 @@ async function refreshStockFromServer() {
                 workshop={workshop} onEditRecord={setEditRec} allRecords={records}/>
             );
           })}
+          <PaymentSummary records={data}/>
           <div style={{fontSize:13,fontWeight:700,color:C.textSub,marginBottom:8,marginTop:16}}>ПО КАТЕГОРИЯМ</div>
           <StatsBreakdown data={data} totalAmt={totalAmt} totalQty={totalQty}/>
         </div>
@@ -5218,6 +5279,7 @@ async function refreshStockFromServer() {
                 ? <div style={{fontSize:11,color:C.danger,marginTop:3}}>Возврат: сумма вводится вручную</div>
                 : prices[marker]&&!manualAmount && <div style={{fontSize:11,color:C.textDim,marginTop:3}}>Цена за ед.: {fmt(prices[marker])} р · авто</div>}
             </div>
+            <PaymentFields value={payment} onChange={v=>{setPayment(v);setSubmitMsg(null);}} amount={amount} refund={recordType==="refund"}/>
             <div style={{marginBottom:16}}>
               <label style={s.label}>Комментарий</label>
               <textarea value={comment} onChange={e=>setComment(e.target.value)} rows={2} placeholder="Необязательно" style={{...s.input,resize:"vertical"}}/>
@@ -5247,7 +5309,7 @@ async function refreshStockFromServer() {
                           <span style={{fontSize:11,color:C.brand}}>✎</span>
                         </div>
                       </div>
-                      <div style={{fontSize:12,color:C.textDim,marginTop:2}}>{r.category}{r.defect>0?` · брак ${r.defect}`:""}{r.comment&&` · ${r.comment}`}</div>
+                      <div style={{fontSize:12,color:C.textDim,marginTop:2}}>{r.category}{r.defect>0?` · брак ${r.defect}`:""}{r.comment&&` · ${r.comment}`}<div>{paymentLabel(r)}</div></div>
                     </div>
                   );
                 })}

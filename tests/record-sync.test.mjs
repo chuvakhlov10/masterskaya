@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import { buildPayments, paymentDraft } from '../src/payments.js';
+import { findRecordIndex, sameRecordVersion, recordRevision, legacyRecordFingerprint } from '../src/sync-core.js';
 import { compactRecordWrite, mergeRecordRefresh, persistPendingWrites, persistRecordMutation } from '../src/record-sync.js';
 
 const record = (id, overrides = {}) => ({ id, marker:'Proxy', workshop:'SMART', qty:1,
@@ -110,6 +112,9 @@ function appHarness(disk) {
     stageRecordEffect:effect => { effects.push(effect); return { ok:true }; },
     scheduleStockSync:() => {}, checkCommittedRecordMutation:() => {},
     recordStorageFailure:() => 'LOCAL_QUEUE_STORAGE_FAILED',
+    findRecordIndex, sameRecordVersion, recordRevision, legacyRecordFingerprint,
+    editRec:null, setEditRec:()=>{}, alert:message=>messages.push({ok:false,text:message}),
+    buildPayments, paymentDraft, payment:{...paymentDraft(),method:"cash"}, setPayment:()=>{},
     marker:'Proxy', recordType:'sale', qty:1, defect:0, amount:250, comment:'',
     workshop:'SMART', category:'Домофонные', makeRecordMutationId:id => `mut-${id}`,
     setRecords:() => {}, setSubmitMsg:value => messages.push(value),
@@ -119,7 +124,8 @@ function appHarness(disk) {
   vm.runInContext(section('function makeQueueId(){', 'async function sGet(')
     + section('  function saveAndSync(', '  // Старое имя')
     + section('  function saveRecordAndStock(', '  function recordStorageFailure(')
-    + section('  async function submitRecord(){', '  // ── сохранение редактируемой записи'), context);
+    + section('  async function submitRecord(){', '  // ── сохранение редактируемой записи')
+    + section('  async function handleEditSave(updated){', '  async function handleEditDelete('), context);
   return { context, timers, effects, messages, delivered, get reset() { return reset; } };
 }
 
@@ -188,4 +194,57 @@ test('offline cached history cannot authorize deleting the legacy recovery copy'
   h.context.mergeRecords = mergeRecordRefresh;
   vm.runInContext(section('      if(Array.isArray(r)){', '      if(p &&'), h.context);
   assert.equal(h.context.localStorage.getItem('records_local'), recovery);
+});
+
+
+test('actual submit rejects unbalanced split before writing a record or stock effect', async () => {
+  const h = appHarness(storage());
+  h.context.payment = {method:'split', cash:'100', card:'100', qr:''};
+  await h.context.submitRecord();
+  assert.equal(h.context.recordsRef.current.length, 1);
+  assert.equal(h.effects.length, 0);
+  assert.equal(h.reset, 0);
+  assert.match(h.messages.at(-1).text, /совпадать/);
+});
+
+test('mixed payment survives durable queue reload and retry without duplicate records', async () => {
+  const disk = storage(), h = appHarness(disk);
+  h.context.payment = {method:'split', cash:'100', card:'', qr:'150'};
+  await h.context.submitRecord();
+  const pending = JSON.parse(disk.getItem('pending_writes'))[0].val;
+  assert.deepEqual(pending[0].payments, [{method:'cash',amount:100},{method:'qr',amount:150}]);
+  const refreshed = mergeRecordRefresh([record('existing')], [], pending);
+  const retried = mergeRecordRefresh(refreshed, refreshed, pending);
+  assert.equal(retried.length, 2);
+  assert.deepEqual(retried.find(r => r.id !== 'existing').payments, pending[0].payments);
+  await h.timers[0]();
+  assert.deepEqual(JSON.parse(JSON.stringify(h.delivered[0][0].payments)), pending[0].payments);
+});
+
+
+test('actual legacy payment edit claims the original record and preserves its stock effect', async () => {
+  const disk = storage(), h = appHarness(disk);
+  const {id, revision, ...legacy} = record('old');
+  h.context.recordsRef.current = [legacy];
+  h.context.editRec = {record:legacy};
+  const payments = [{method:'cash',amount:100},{method:'card',amount:150}];
+  await h.context.handleEditSave({...legacy,payments});
+  const queued = JSON.parse(disk.getItem('pending_writes'))[0].val[0];
+  assert.equal(queued.legacyFingerprint,legacyRecordFingerprint(legacy));
+  assert.equal(queued.timestamp,legacy.timestamp);
+  assert.deepEqual(queued.payments,payments);
+  assert.equal(mergeRecordRefresh([legacy],[],[queued]).length,1);
+  assert.equal(h.effects[0].beforeRecord.qty,h.effects[0].afterRecord.qty);
+  assert.equal(h.effects[0].beforeRecord.marker,h.effects[0].afterRecord.marker);
+  assert.equal(legacy.payments,undefined);
+});
+
+test('actual payment edit rejects an outdated record opened before a concurrent edit', async () => {
+  const h = appHarness(storage());
+  const opened = h.context.recordsRef.current[0];
+  h.context.editRec = {record:opened};
+  h.context.recordsRef.current = [{...opened,revision:2}];
+  await h.context.handleEditSave({...opened,payments:[{method:'qr',amount:250}]});
+  assert.equal(h.effects.length,0);
+  assert.match(h.messages.at(-1).text,/другом устройстве/);
 });
