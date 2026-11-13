@@ -2,7 +2,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
-import { buildPayments, paymentDraft, usesPaymentMethods } from '../src/payments.js';
 import { findRecordIndex, sameRecordVersion, recordRevision, legacyRecordFingerprint } from '../src/sync-core.js';
 import { compactRecordWrite, mergeRecordRefresh, persistPendingWrites, persistRecordMutation } from '../src/record-sync.js';
 
@@ -114,7 +113,6 @@ function appHarness(disk) {
     recordStorageFailure:() => 'LOCAL_QUEUE_STORAGE_FAILED',
     findRecordIndex, sameRecordVersion, recordRevision, legacyRecordFingerprint,
     editRec:null, setEditRec:()=>{}, alert:message=>messages.push({ok:false,text:message}),
-    buildPayments, paymentDraft, usesPaymentMethods, payment:{...paymentDraft(),method:"cash"}, setPayment:()=>{},
     marker:'Proxy', recordType:'sale', qty:1, defect:0, amount:250, comment:'',
     workshop:'SMART', category:'Домофонные', makeRecordMutationId:id => `mut-${id}`,
     setRecords:() => {}, setSubmitMsg:value => messages.push(value),
@@ -197,30 +195,22 @@ test('offline cached history cannot authorize deleting the legacy recovery copy'
 });
 
 
-test('actual submit rejects unbalanced split before writing a record or stock effect', async () => {
-  const h = appHarness(storage());
-  h.context.payment = {method:'split', cash:'100', card:'100', qr:''};
-  await h.context.submitRecord();
-  assert.equal(h.context.recordsRef.current.length, 1);
-  assert.equal(h.effects.length, 0);
-  assert.equal(h.reset, 0);
-  assert.match(h.messages.at(-1).text, /совпадать/);
-});
-
-test('mixed payment survives durable queue reload and retry without duplicate records', async () => {
+test('legacy payment data survives editing, durable queue reload and retry without duplicates', async () => {
   const disk = storage(), h = appHarness(disk);
-  h.context.payment = {method:'split', cash:'100', card:'', qr:'150'};
-  await h.context.submitRecord();
+  const original = {...record('existing'), payments:[{method:'cash',amount:100},{method:'qr',amount:150}]};
+  h.context.recordsRef.current = [original];
+  h.context.editRec = {record:original};
+  await h.context.handleEditSave({...original,amount:300});
   const pending = JSON.parse(disk.getItem('pending_writes'))[0].val;
-  assert.deepEqual(pending[0].payments, [{method:'cash',amount:100},{method:'qr',amount:150}]);
-  const refreshed = mergeRecordRefresh([record('existing')], [], pending);
+  assert.deepEqual(pending[0].payments,original.payments);
+  assert.equal(pending[0].amount,300);
+  const refreshed = mergeRecordRefresh([original], [], pending);
   const retried = mergeRecordRefresh(refreshed, refreshed, pending);
-  assert.equal(retried.length, 2);
-  assert.deepEqual(retried.find(r => r.id !== 'existing').payments, pending[0].payments);
+  assert.equal(retried.length, 1);
+  assert.deepEqual(retried[0].payments,original.payments);
   await h.timers[0]();
-  assert.deepEqual(JSON.parse(JSON.stringify(h.delivered[0][0].payments)), pending[0].payments);
+  assert.deepEqual(JSON.parse(JSON.stringify(h.delivered[0][0].payments)),original.payments);
 });
-
 
 test('actual legacy payment edit claims the original record and preserves its stock effect', async () => {
   const disk = storage(), h = appHarness(disk);
@@ -250,29 +240,19 @@ test('actual payment edit rejects an outdated record opened before a concurrent 
 });
 
 
-test('Begemot sale and refund save without choosing payment or adding payment fields', async () => {
-  for(const type of ['sale','refund']){
-    const disk=storage(), h=appHarness(disk);
-    h.context.workshop='Бегемот';
-    h.context.recordType=type;
-    h.context.payment={...paymentDraft(),method:'split',cash:'1',card:'2'};
-    await h.context.submitRecord();
-    assert.equal(h.messages[0].ok,true);
-    const saved=JSON.parse(disk.getItem('pending_writes'))[0].val[0];
-    assert.equal(saved.workshop,'Бегемот');
-    assert.equal(saved.recordType,type);
-    assert.equal(Object.hasOwn(saved,'payments'),false);
-    assert.equal(h.effects.length,1);
-  }
-});
-
-test('SMART still requires a payment choice for new sales and refunds', async () => {
-  for(const type of ['sale','refund']){
-    const h=appHarness(storage());
-    h.context.recordType=type;
-    h.context.payment=paymentDraft();
-    await h.context.submitRecord();
-    assert.equal(h.effects.length,0);
-    assert.match(h.messages.at(-1).text,/Выберите способ оплаты/);
-  }
-});
+for(const workshop of ['SMART','Бегемот']) {
+  test(`${workshop} sale and refund save durably without payment fields`, async () => {
+    for(const type of ['sale','refund']){
+      const disk=storage(), h=appHarness(disk);
+      h.context.workshop=workshop;
+      h.context.recordType=type;
+      await h.context.submitRecord();
+      assert.equal(h.messages[0].ok,true);
+      const saved=JSON.parse(disk.getItem('pending_writes'))[0].val[0];
+      assert.equal(saved.workshop,workshop);
+      assert.equal(saved.recordType,type);
+      assert.equal(Object.hasOwn(saved,'payments'),false);
+      assert.equal(h.effects.length,1);
+    }
+  });
+}
