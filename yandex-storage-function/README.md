@@ -73,3 +73,8 @@ and access settings from the active version. Do not generate new session secrets
 change session version/epoch, or upload the Ably bundle for this fix. After deploy,
 health must report storage version 1.5.5. An existing paired device must read the
 journal and drain its outbox; health alone does not establish successful sync.
+
+For repeatable deployment without browser login, configure the
+[GitHub Actions deployment workflow](../docs/YANDEX_STORAGE_DEPLOY.md) once.
+Its secret is `YC_SA_JSON_CREDENTIALS` in GitHub Actions, not a device session or
+an application GitHub App key. Production deployment remains explicitly invoked.
