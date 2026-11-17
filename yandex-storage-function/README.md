@@ -21,7 +21,7 @@ Security properties:
 - Memory: 128 MB
 - Timeout: 30 seconds
 - Public function: enabled
-- Upload: generated `dist/yandex-functions/storage/index.js`
+- Upload: generated `dist/yandex/storage/index.js`
 - Do not use `?integration=raw`
 
 Environment variables:
@@ -51,3 +51,25 @@ Authenticated actions use `X-Masterskaya-Session`:
 - `device-rename` and `device-revoke` — manage registered devices.
 
 The function URL is public by design. Authentication is enforced by signed sessions or one-time codes; CORS is an additional browser boundary.
+
+## Large journal responses (gateway 1.5.5)
+
+Successful JSON responses of at least 128 KiB are gzip-compressed when this
+reduces their size, then returned using `isBase64Encoded: true` and
+`Content-Encoding: gzip`. Cloud Functions decodes the outer base64 envelope;
+HTTP clients decompress gzip before parsing the unchanged JSON. Existing PWA
+clients, signed device sessions, protocol 4, epoch and GitHub SHA remain valid.
+Small responses, errors and CORS preflight retain their previous format.
+
+This avoids the 3.5 MiB invocation-response ceiling, including JSON escaping
+of GitHub's base64 line breaks. Request/upload limits are unchanged. Monthly
+archive planning remains necessary as the hot journal continues to grow.
+
+Build with Node.js 22 using `npm run build:functions && npm run verify:functions`.
+Upload **only** `dist/yandex/storage/index.js` (or a ZIP containing just `index.js`)
+as a new version of the existing storage function. Keep Node.js 22,
+`index.handler`, memory, timeout, environment variable bindings, service account
+and access settings from the active version. Do not generate new session secrets,
+change session version/epoch, or upload the Ably bundle for this fix. After deploy,
+health must report storage version 1.5.5. An existing paired device must read the
+journal and drain its outbox; health alone does not establish successful sync.

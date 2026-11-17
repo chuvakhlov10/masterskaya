@@ -2,6 +2,7 @@
 
 const storage = require('../yandex-storage-function/device-index.js');
 const ably = require('../yandex-function/device-aware-index.js');
+const { gunzipSync } = require('node:zlib');
 const { ALLOWED_ORIGIN } = require('../yandex-storage-function/index.js');
 const INTERNAL_STORAGE_URL = 'https://masterskaya-internal.invalid/storage';
 // Leave room below the hosting platform's 4.5 MB request/response ceiling.
@@ -15,7 +16,13 @@ function createReserveHandlers({env=process.env,fetchImpl=globalThis.fetch,now=D
     // Live authorization verifies the device through the local reserve storage
     // handler. It has no runtime dependency on the Yandex function URL.
     const result=await storageHandler({httpMethod:options.method,headers:options.headers,body:options.body});
-    return new Response(result.statusCode===204?null:result.body,{status:result.statusCode,headers:result.headers});
+    let body = result.isBase64Encoded ? Buffer.from(result.body, 'base64') : result.body;
+    const headers = {...result.headers};
+    if (headers['Content-Encoding'] === 'gzip') {
+      body = gunzipSync(body);
+      delete headers['Content-Encoding'];
+    }
+    return new Response(result.statusCode===204?null:body,{status:result.statusCode,headers});
   };
   const withMetadata=handler=>async event=>{
     const result=await handler(event);
@@ -61,7 +68,7 @@ function createNodeAdapter(handler) {
       const result=await handler({httpMethod:req.method,headers:req.headers,body});
       res.statusCode=result.statusCode;
       for(const [key,value] of Object.entries(result.headers||{})) res.setHeader(key,value);
-      res.end(result.statusCode===204?'':result.body);
+      res.end(result.statusCode===204?'':result.isBase64Encoded?Buffer.from(result.body,'base64'):result.body);
     } catch { sendError(res,503,'RESERVE_SERVICE_UNAVAILABLE',origin); }
   };
 }
