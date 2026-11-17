@@ -22,6 +22,12 @@ export function versionRequest(current, archive, commit) {
   assert.equal(current.runtime, 'nodejs22', 'UNEXPECTED_RUNTIME');
   assert.equal(current.entrypoint, 'index.handler', 'UNEXPECTED_ENTRYPOINT');
   assert.ok(current.id && current.resources && current.executionTimeout, 'INCOMPLETE_CURRENT_VERSION');
+  for (const name of ['GITHUB_APP_ID','GITHUB_APP_PRIVATE_KEY_B64','MASTERSKAYA_SESSION_SECRET']) {
+    const value=current.environment?.[name];
+    const readable=typeof value==='string' && value.trim() && !/^(?:\*+|\[?redacted\]?)$/i.test(value.trim());
+    const bound=current.secrets?.some(secret=>secret.environmentVariable===name && secret.id && secret.versionId && secret.key);
+    assert.ok(readable || bound, `CURRENT_CONFIGURATION_UNAVAILABLE_${name}`);
+  }
   // Stop if the API adds configuration we do not yet know how to preserve.
   assert.ok(Object.keys(current).every(key=>CONFIG.includes(key)||METADATA.includes(key)), 'UNKNOWN_VERSION_FIELD');
   const request={functionId:FUNCTION_ID,description:`Storage deployment ${commit}`,content:archive.toString('base64')};

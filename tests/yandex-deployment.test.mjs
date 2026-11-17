@@ -5,7 +5,7 @@ import {deploy,FUNCTION_ID,versionRequest,validateArtifact} from '../scripts/dep
 const commit='c'.repeat(40),archive=Buffer.from('synthetic-test-archive');
 const current={id:'previous-version',functionId:FUNCTION_ID,status:'ACTIVE',runtime:'nodejs22',entrypoint:'index.handler',
   resources:{memory:'134217728'},executionTimeout:'30s',serviceAccountId:'runtime-account',
-  environment:{MASTERSKAYA_SESSION_SECRET:'test-secret-do-not-log',MASTERSKAYA_SESSION_VERSION:'2',MASTERSKAYA_STOCK_EPOCH:'1'},
+  environment:{GITHUB_APP_ID:'12345',GITHUB_APP_PRIVATE_KEY_B64:'test-key-do-not-log',MASTERSKAYA_SESSION_SECRET:'test-secret-do-not-log',MASTERSKAYA_SESSION_VERSION:'2',MASTERSKAYA_STOCK_EPOCH:'1'},
   secrets:[{id:'lockbox-id',versionId:'lockbox-version',key:'key',environmentVariable:'SECRET'}],
   connectivity:{networkId:'network'},namedServiceAccounts:{extra:'other-account'},concurrency:'1',
   logOptions:{folderId:'folder'},storageMounts:[],mounts:[],tmpfsSize:'0',metadataOptions:{awsV1HttpEndpoint:'DISABLED'},
@@ -52,6 +52,17 @@ test('artifact must match both approved commit and manifest checksum',()=>{
   validateArtifact(bundle,manifest,commit);
   assert.throws(()=>validateArtifact(Buffer.from('changed bundle'),manifest,commit));
   assert.throws(()=>validateArtifact(bundle,manifest,'a'.repeat(40)));
+});
+test('unavailable or masked active secrets stop deployment; complete Lockbox bindings are preserved',()=>{
+  for(const value of [undefined,'','***','[REDACTED]']) {
+    const active=structuredClone(current);
+    active.environment.MASTERSKAYA_SESSION_SECRET=value;
+    assert.throws(()=>versionRequest(active,archive,commit),/CURRENT_CONFIGURATION_UNAVAILABLE/);
+  }
+  const lockbox=structuredClone(current);
+  delete lockbox.environment.MASTERSKAYA_SESSION_SECRET;
+  lockbox.secrets.push({id:'session-secret',versionId:'pinned-secret-version',key:'session',environmentVariable:'MASTERSKAYA_SESSION_SECRET'});
+  assert.deepEqual(versionRequest(lockbox,archive,commit).secrets,lockbox.secrets);
 });
 test('successful deployment polls operation, preserves settings and verifies exact live build',async()=>{
   const f=fixture(),result=await deploy(f.options);
