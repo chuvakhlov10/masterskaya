@@ -3,9 +3,10 @@
 const base = require('./index.js');
 const pairing = require('./pairing-index.js');
 const { createDeviceAuthService } = require('./device-auth.js');
+const { compressResponse } = require('./http-response.js');
 
 const FUNCTION_NAME = 'masterskaya-storage-gateway';
-const FUNCTION_VERSION = '1.5.4';
+const FUNCTION_VERSION = '1.5.5';
 const PROTOCOL_VERSION = 4;
 const BUILD_ID = '__MASTERSKAYA_BUILD_ID__';
 const BUILD_DATE = '__MASTERSKAYA_BUILD_DATE__';
@@ -84,7 +85,7 @@ function baseHealth(env, nowMs) {
   };
 }
 
-function createHandler({
+function createUncompressedHandler({
   fetchImpl = globalThis.fetch,
   env = process.env,
   now = () => Date.now(),
@@ -183,6 +184,11 @@ function createHandler({
       return reply(statusCode, { ok: false, error: code }, origin);
     }
   };
+}
+
+function createHandler(options) {
+  const handle = createUncompressedHandler(options);
+  return async event => compressResponse(await handle(event));
 }
 
 const handler = createHandler();
