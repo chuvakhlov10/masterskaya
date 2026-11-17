@@ -1,0 +1,60 @@
+name: Deploy Yandex storage
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_commit:
+        description: 'Exact 40-character SHA of main approved for storage deployment'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-yandex-storage
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.repository == 'chuvakhlov10/masterskaya'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Require the approved main commit
+        run: |
+          set -euo pipefail
+          test "$EXPECTED_COMMIT" = "$(git rev-parse HEAD)"
+          echo "MASTERSKAYA_BUILD_ID=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "MASTERSKAYA_BUILD_DATE=$(git show -s --format=%cI HEAD)" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - name: Package verified storage bundle
+        run: |
+          set -euo pipefail
+          (cd dist/yandex/storage && zip -9 ../storage.zip index.js)
+          test "$(unzip -Z1 dist/yandex/storage.zip)" = index.js
+      - name: Require deployment credentials
+        env:
+          YC_KEY_PRESENT: ${{ secrets.YC_SA_JSON_CREDENTIALS != '' }}
+        run: test "$YC_KEY_PRESENT" = true
+      - name: Issue short-lived Yandex IAM token
+        id: iam
+        uses: yc-actions/yc-iam-token@5966c246d18b1f8bd02e98f7cfeb57f880f6afdc # v1
+        with:
+          yc-sa-json-credentials: ${{ secrets.YC_SA_JSON_CREDENTIALS }}
+          mask-token: 'true'
+      - name: Deploy to existing storage function and verify health
+        env:
+          YC_IAM_TOKEN: ${{ steps.iam.outputs.token }}
+        run: node scripts/deploy-yandex-storage.mjs
