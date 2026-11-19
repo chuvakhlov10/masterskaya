@@ -36,9 +36,11 @@ export function createGatewayFailover({now=Date.now,cooldownMs=60_000}={}) {
     const configured=reserveEndpoint && reserveEndpoint !== endpoint;
     const cooling=configured && (failedUntil.get(endpoint)||0)>now();
     const routes=configured ? (cooling ? [reserveEndpoint,endpoint] : [endpoint,reserveEndpoint]) : [endpoint];
-    let lastError;
-    for(let i=0;i<routes.length;i++) {
-      const route=routes[i], controller=new AbortController();
+    let retryError;
+    for(const route of routes) {
+      const isPrimary=route===endpoint;
+      if(!isPrimary && (failedUntil.get(route)||0)>now()) continue;
+      const controller=new AbortController();
       // A configured reserve may be unavailable. Give each route the caller's
       // full timeout so large reads can finish on a slow primary.
       const timer=setTimeout(()=>controller.abort(),timeoutMs);
@@ -55,12 +57,11 @@ export function createGatewayFailover({now=Date.now,cooldownMs=60_000}={}) {
         catch(cause) { throw error(response.ok?errorPrefix+'_RESPONSE_INVALID':`${errorPrefix}_HTTP_${response.status}`,cause,response.status); }
         if(!response.ok) throw error(String(payload?.error || `${errorPrefix}_HTTP_${response.status}`),undefined,response.status);
         failedUntil.delete(route);
-        lastSuccess.set(endpoint,{route:route===endpoint?'primary':'reserve',at:now()});
-        if(route!==endpoint) { try { onFallback?.(route); } catch {} }
+        lastSuccess.set(endpoint,{route:isPrimary?'primary':'reserve',at:now()});
+        if(!isPrimary) { try { onFallback?.(route); } catch {} }
         return payload;
       } catch(cause) {
-        lastError=cause;
-        const reservePaused=route===reserveEndpoint && Number(cause.status)===402;
+        const reservePaused=!isPrimary && Number(cause.status)===402;
         const transient=reservePaused || RETRYABLE_STATUS.has(Number(cause.status)) ||
           cause.code===errorPrefix+'_REQUEST_TIMEOUT' || cause.code===errorPrefix+'_REQUEST_FAILED' ||
           cause.code===errorPrefix+'_RESPONSE_INVALID';
@@ -68,10 +69,11 @@ export function createGatewayFailover({now=Date.now,cooldownMs=60_000}={}) {
         // code is never replayed against a second server.
         if(!transient) throw cause;
         failedUntil.set(route,now()+cooldownMs);
-        if(!canReplay || i===routes.length-1) throw cause;
+        if(!canReplay) throw cause;
+        if(isPrimary || !retryError) retryError=cause;
       } finally { clearTimeout(timer); }
     }
-    throw lastError || error(errorPrefix+'_REQUEST_FAILED');
+    throw retryError || error(errorPrefix+'_REQUEST_FAILED');
   }
   return {send,lastRoute:endpoint=>lastSuccess.get(endpoint)||null};
 }
