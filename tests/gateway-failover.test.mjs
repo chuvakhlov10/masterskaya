@@ -48,6 +48,36 @@ test('a hosting-disabled reserve falls back to a recovered primary during cooldo
   assert.equal(transport.lastRoute(endpoint).route,'primary');
 });
 
+test('failed reserve is skipped during cooldown and does not mask the primary error',async()=>{
+  const unavailableReserve=[
+    () => new Response('DEPLOYMENT_DISABLED',{status:402}),
+    () => { throw new TypeError('reserve CORS preflight failed'); },
+  ];
+  for(const reserveFailure of unavailableReserve) {
+    let clock=1_000;
+    const calls=[];
+    const transport=createGatewayFailover({now:()=>clock});
+    const options={
+      endpoint,reserveEndpoint,
+      body:{action:'github',method:'GET',path:'data/records.json'},
+      fetchImpl:async url=>{
+        calls.push(url);
+        if(url===reserveEndpoint)return reserveFailure();
+        throw new DOMException('primary request timed out','AbortError');
+      },
+    };
+    const isPrimaryTimeout=error=>error.code==='GATEWAY_REQUEST_TIMEOUT';
+
+    await assert.rejects(transport.send(options),isPrimaryTimeout);
+    await assert.rejects(transport.send(options),isPrimaryTimeout);
+    assert.deepEqual(calls,[endpoint,reserveEndpoint,endpoint]);
+
+    clock+=60_001;
+    await assert.rejects(transport.send(options),isPrimaryTimeout);
+    assert.deepEqual(calls,[endpoint,reserveEndpoint,endpoint,endpoint,reserveEndpoint]);
+  }
+});
+
 test('a slow primary can finish reading the stock journal with a disabled reserve',async t=>{
   t.mock.timers.enable({apis:['setTimeout']});
   const primary='https://functions.yandexcloud.net/d4ep5fmjtp6t09f06tvt';
@@ -173,15 +203,16 @@ test('storage failure on both servers preserves session and local pending record
 
 test('session renewal and a storage write work through reserve without repairing the device',async()=>{
   const storage=storageFixture(),calls=[];
-  const target='https://renew-reserve.example';
+  const target='https://renew-primary.example';
+  const workingReserve='https://renew-reserve.example/api/storage';
   const fetchImpl=async(url,request)=>{
     calls.push({url,body:JSON.parse(request.body),token:request.headers['X-Masterskaya-Session']});
     if(url===target) throw new TypeError('Yandex unavailable');
     return response(calls.at(-1).body.action==='renew'?{ok:true,sessionToken:'new.session.signature',clientId:'device-12345678',expiresAt:Date.now()+864000000}:{content:'e30=',sha:'new-sha'});
   };
-  await renewStorageSession({endpoint:target,reserveEndpoint,storage,fetchImpl});
-  await storageGatewayRequest({endpoint:target,reserveEndpoint,method:'PUT',path:'records.json',body:{sha:'old',content:'e30='},storage,fetchImpl});
-  assert.deepEqual(calls.map(c=>c.url),[target,reserveEndpoint,reserveEndpoint]);
+  await renewStorageSession({endpoint:target,reserveEndpoint:workingReserve,storage,fetchImpl});
+  await storageGatewayRequest({endpoint:target,reserveEndpoint:workingReserve,method:'PUT',path:'records.json',body:{sha:'old',content:'e30='},storage,fetchImpl});
+  assert.deepEqual(calls.map(c=>c.url),[target,workingReserve,workingReserve]);
   assert.equal(calls[1].token,'old.session.signature');
   assert.equal(calls[2].token,'new.session.signature');
   assert.equal(calls[2].body.body.sha,'old');

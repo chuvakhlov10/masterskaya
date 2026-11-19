@@ -48,6 +48,6 @@ test('connected application exposes safe server health and diagnostics', () => {
   assert.match(healthSource, /Безопасный карантин/);
 });
 
-test('payment-free workshops release is version 1.6.10', () => {
-  assert.match(statusSource, /APP_VERSION = "1\.6\.10"/);
+test('diagnostics identify release 1.6.11', () => {
+  assert.match(statusSource, /APP_VERSION = "1\.6\.11"/);
 });
