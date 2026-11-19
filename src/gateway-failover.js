@@ -35,19 +35,13 @@ export function createGatewayFailover({now=Date.now,cooldownMs=60_000}={}) {
     const serialized=JSON.stringify(body);
     const configured=reserveEndpoint && reserveEndpoint !== endpoint;
     const cooling=configured && (failedUntil.get(endpoint)||0)>now();
-    // The primary now accepts the larger journal too. A paused reserve must
-    // never be the only route for stock writes. Large uploads retain their
-    // full timeout, including GitHub's read/merge/write and response transfer.
-    const largeWrite=endpoint===PRIMARY_STORAGE && body?.action==='github' &&
-      body?.method==='PUT' && typeof body?.body?.content==='string' && body.body.content.length>2_900_000;
     const routes=configured ? (cooling ? [reserveEndpoint,endpoint] : [endpoint,reserveEndpoint]) : [endpoint];
     let lastError;
     for(let i=0;i<routes.length;i++) {
       const route=routes[i], controller=new AbortController();
-      // Fail over promptly when a verified reserve is configured; preserve the
-      // original timeout otherwise. Every attempt reuses the identical intent.
-      const duration=configured && canReplay && !largeWrite && route===endpoint ? Math.min(timeoutMs,6000) : timeoutMs;
-      const timer=setTimeout(()=>controller.abort(),duration);
+      // A configured reserve may be unavailable. Give each route the caller's
+      // full timeout so large reads can finish on a slow primary.
+      const timer=setTimeout(()=>controller.abort(),timeoutMs);
       try {
         let response;
         try {
