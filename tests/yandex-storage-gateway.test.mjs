@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
+const { createHandler: createDeviceHandler } = require('../yandex-storage-function/device-index.js');
 const {
   ALLOWED_ORIGIN,
   GITHUB_API_VERSION,
@@ -151,7 +152,38 @@ test('gateway forwards an allowed data GET with an installation token', async ()
   assert.match(calls.at(-1).options.headers.Authorization, /^Bearer ghs_/);
 });
 
-test('gateway hydrates repository files larger than one megabyte through the Git blob API', async () => {
+test('deployed gateway reads the stock journal in one request and returns its exact Git blob SHA', async () => {
+  const session = createSessionToken({ secret: SESSION_SECRET, clientId: 'device-client-123', nowMs: NOW, version: 1 });
+  const journal = Buffer.from('{\r\n  "schemaVersion":4,"epoch":1,"ops":[],"testNote":"Склад"\r\n}\r\n');
+  const calls = [];
+  const handler = createDeviceHandler({
+    env: ENV,
+    now: () => NOW,
+    deviceAuthService: { authorize: async claims => ({ id: claims.clientId }) },
+    fetchImpl: async (url, options) => {
+      if (url.endsWith('/installation')) return jsonResponse({ id: 1 });
+      if (url.includes('/access_tokens')) return jsonResponse({ token: 'ghs_installation_token_abcdefghijklmnopqrstuvwxyz' });
+      calls.push({ url, accept: options.headers.Accept });
+      return new Response(journal, { headers: { 'content-type': 'application/octet-stream' } });
+    },
+  });
+  const response = await handler(event(
+    { action: 'github', method: 'GET', path: 'data/stock-ops.json', storageProtocolVersion: 4 },
+    { 'x-masterskaya-session': session.token },
+  ));
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(calls, [{
+    url: `https://api.github.com/repos/chuvakhlov10/${REPO}/contents/data/stock-ops.json`,
+    accept: 'application/vnd.github.raw+json',
+  }]);
+  const payload = JSON.parse(response.body);
+  assert.equal(payload.sha, gitBlobSha(journal));
+  assert.equal(payload.encoding, 'base64');
+  assert.equal(payload.size, journal.length);
+  assert.deepEqual(Buffer.from(payload.content, 'base64'), journal);
+});
+
+test('gateway hydrates other large repository files through the Git blob API', async () => {
   const session = createSessionToken({ secret: SESSION_SECRET, clientId: 'device-client-123', nowMs: NOW, version: 1 });
   const sha = 'c'.repeat(40);
   const content = encodeRepoJson({ schemaVersion: 4, epoch: 1, ops: [] });
@@ -163,7 +195,7 @@ test('gateway hydrates repository files larger than one megabyte through the Git
       calls.push({ url, options });
       if (url.endsWith('/installation')) return jsonResponse({ id: 1 });
       if (url.includes('/access_tokens')) return jsonResponse({ token: 'ghs_installation_token_abcdefghijklmnopqrstuvwxyz', expires_at: '2026-08-04T21:00:00Z' });
-      if (url.endsWith('/contents/data/stock-ops.json')) {
+      if (url.endsWith('/contents/data/records.json')) {
         return jsonResponse({ type: 'file', sha, size: 1_022_047, encoding: 'none', content: '' });
       }
       if (url.endsWith(`/git/blobs/${sha}`)) {
@@ -174,14 +206,14 @@ test('gateway hydrates repository files larger than one megabyte through the Git
   });
 
   const response = await handler(event(
-    { action: 'github', method: 'GET', path: 'data/stock-ops.json' },
+    { action: 'github', method: 'GET', path: 'data/records.json' },
     { 'x-masterskaya-session': session.token },
   ));
   assert.equal(response.statusCode, 200);
   assert.deepEqual(JSON.parse(response.body), {
     type: 'file', sha, size: 1_022_047, encoding: 'base64', content,
   });
-  assert.equal(calls.filter(call => call.url.includes('/contents/data/stock-ops.json')).length, 1);
+  assert.equal(calls.filter(call => call.url.includes('/contents/data/records.json')).length, 1);
   assert.equal(calls.filter(call => call.url.includes(`/git/blobs/${sha}`)).length, 1);
 });
 
@@ -220,18 +252,29 @@ function stockJournal(ops) {
   return { schemaVersion: 4, epoch: 1, ops };
 }
 
+function gitBlobSha(bytes) {
+  const file = Buffer.concat([Buffer.from(`blob ${bytes.length}\0`), bytes]);
+  return crypto.createHash('sha1').update(file).digest('hex');
+}
+
+function stockJournalBytes(ops) {
+  return Buffer.from(JSON.stringify(stockJournal(ops)));
+}
+
 test('stock append above the old 2.9 MB cap still enforces complete immutable history',async()=>{
   const session=createSessionToken({secret:SESSION_SECRET,clientId:'device-client-123',nowMs:NOW,version:1});
   const currentOps=[{type:'delta',location:'main',marker:'A',delta:1,ts:100,client:'device',opId:'existing',comment:'x'.repeat(2_300_000)}];
   const next=[...currentOps,{type:'delta',location:'main',marker:'A',delta:-1,ts:200,client:'device',opId:'pending'}];
+  const journal=stockJournalBytes(currentOps);
+  const sha=gitBlobSha(journal);
   let puts=0;
   const handler=createHandler({env:ENV,now:()=>NOW,fetchImpl:async(url,options)=>{
     if(url.endsWith('/installation'))return jsonResponse({id:1});
     if(url.includes('/access_tokens'))return jsonResponse({token:'ghs_installation_token_abcdefghijklmnopqrstuvwxyz'});
-    if(options.method==='GET')return jsonResponse({sha:'a'.repeat(40),content:encodeRepoJson(stockJournal(currentOps))});
+    if(options.method==='GET')return new Response(journal);
     puts++;return jsonResponse({content:{sha:'b'.repeat(40)}});
   }});
-  const request=ops=>event({action:'github',method:'PUT',path:'data/stock-ops.json',body:{message:'append pending',content:encodeRepoJson(stockJournal(ops)),sha:'a'.repeat(40)}},{'x-masterskaya-session':session.token});
+  const request=ops=>event({action:'github',method:'PUT',path:'data/stock-ops.json',body:{message:'append pending',content:encodeRepoJson(stockJournal(ops)),sha}},{'x-masterskaya-session':session.token});
   assert.ok(request(next).body.length>3_000_000);
   assert.equal((await handler(request(next))).statusCode,200);
   const changed=await handler(request([{...currentOps[0],delta:2},next[1]]));
@@ -248,7 +291,8 @@ test('stock gateway allows append-only deltas while preserving existing migratio
     ...currentOps,
     { type: 'delta', location: 'main', marker: 'A', delta: -1, ts: 200, client: 'device', opId: 'new-delta' },
   ];
-  const sha = 'a'.repeat(40);
+  const journal = stockJournalBytes(currentOps);
+  const sha = gitBlobSha(journal);
   let stockGets = 0;
   let stockPuts = 0;
   const handler = createHandler({
@@ -259,7 +303,7 @@ test('stock gateway allows append-only deltas while preserving existing migratio
       if (url.includes('/access_tokens')) return jsonResponse({ token: 'ghs_installation_token_abcdefghijklmnopqrstuvwxyz', expires_at: '2026-08-04T21:00:00Z' });
       if (url.endsWith('/contents/data/stock-ops.json') && options.method === 'GET') {
         stockGets++;
-        return jsonResponse({ sha, content: encodeRepoJson(stockJournal(currentOps)) });
+        return new Response(journal);
       }
       if (url.endsWith('/contents/data/stock-ops.json') && options.method === 'PUT') {
         stockPuts++;
@@ -277,7 +321,7 @@ test('stock gateway allows append-only deltas while preserving existing migratio
   assert.equal(stockPuts, 1);
 });
 
-test('stock gateway validates an append against a large journal loaded through the Git blob API', async () => {
+test('stock gateway rejects a stale append using the SHA of the raw journal', async () => {
   const session = createSessionToken({ secret: SESSION_SECRET, clientId: 'device-client-123', nowMs: NOW, version: 1 });
   const currentOps = [
     { type: 'delta', location: 'main', marker: 'A', delta: 1, ts: 100, client: 'device', opId: 'existing-delta' },
@@ -286,8 +330,9 @@ test('stock gateway validates an append against a large journal loaded through t
     ...currentOps,
     { type: 'delta', location: 'main', marker: 'A', delta: 2, ts: 200, client: 'device', opId: 'pending-delta' },
   ];
-  const sha = 'd'.repeat(40);
-  let blobGets = 0;
+  const journal = stockJournalBytes(currentOps);
+  const staleSha = gitBlobSha(stockJournalBytes([]));
+  let stockGets = 0;
   let stockPuts = 0;
   const handler = createHandler({
     env: ENV,
@@ -296,11 +341,8 @@ test('stock gateway validates an append against a large journal loaded through t
       if (url.endsWith('/installation')) return jsonResponse({ id: 1 });
       if (url.includes('/access_tokens')) return jsonResponse({ token: 'ghs_installation_token_abcdefghijklmnopqrstuvwxyz', expires_at: '2026-08-04T21:00:00Z' });
       if (url.endsWith('/contents/data/stock-ops.json') && options.method === 'GET') {
-        return jsonResponse({ type: 'file', sha, size: 1_022_047, encoding: 'none', content: '' });
-      }
-      if (url.endsWith(`/git/blobs/${sha}`)) {
-        blobGets++;
-        return jsonResponse({ sha, size: 1_022_047, encoding: 'base64', content: encodeRepoJson(stockJournal(currentOps)) });
+        stockGets++;
+        return new Response(journal);
       }
       if (url.endsWith('/contents/data/stock-ops.json') && options.method === 'PUT') {
         stockPuts++;
@@ -312,12 +354,13 @@ test('stock gateway validates an append against a large journal loaded through t
 
   const response = await handler(event({
     action: 'github', method: 'PUT', path: 'data/stock-ops.json',
-    body: { message: 'append pending delta', content: encodeRepoJson(stockJournal(nextOps)), sha },
+    body: { message: 'append pending delta', content: encodeRepoJson(stockJournal(nextOps)), sha: staleSha },
   }, { 'x-masterskaya-session': session.token }));
 
-  assert.equal(response.statusCode, 200);
-  assert.equal(blobGets, 1);
-  assert.equal(stockPuts, 1);
+  assert.equal(response.statusCode, 409);
+  assert.equal(JSON.parse(response.body).error, 'STOCK_JOURNAL_STALE');
+  assert.equal(stockGets, 1);
+  assert.equal(stockPuts, 0);
 });
 
 test('stock gateway rejects a new init batch and any deletion from the journal', async () => {
@@ -325,7 +368,8 @@ test('stock gateway rejects a new init batch and any deletion from the journal',
   const currentOps = [
     { type: 'delta', location: 'main', marker: 'A', delta: 1, ts: 100, client: 'device', opId: 'existing-delta' },
   ];
-  const sha = 'a'.repeat(40);
+  const journal = stockJournalBytes(currentOps);
+  const sha = gitBlobSha(journal);
   let stockPuts = 0;
   const handler = createHandler({
     env: ENV,
@@ -334,7 +378,7 @@ test('stock gateway rejects a new init batch and any deletion from the journal',
       if (url.endsWith('/installation')) return jsonResponse({ id: 1 });
       if (url.includes('/access_tokens')) return jsonResponse({ token: 'ghs_installation_token_abcdefghijklmnopqrstuvwxyz', expires_at: '2026-08-04T21:00:00Z' });
       if (url.endsWith('/contents/data/stock-ops.json') && options.method === 'GET') {
-        return jsonResponse({ sha, content: encodeRepoJson(stockJournal(currentOps)) });
+        return new Response(journal);
       }
       if (url.endsWith('/contents/data/stock-ops.json') && options.method === 'PUT') {
         stockPuts++;

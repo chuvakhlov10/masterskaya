@@ -413,6 +413,7 @@ function createGitHubAppClient({ fetchImpl = globalThis.fetch, env = process.env
     const normalized = normalizeRepoRequest(repoRequest);
     const suffix = normalized.ref ? `?ref=${encodeURIComponent(normalized.ref)}` : '';
     const url = `${GITHUB_API}/repos/${OWNER}/${REPO}/contents/${encodeRepoPath(normalized.path)}${suffix}`;
+    const readStockJournal = normalized.method === 'GET' && normalized.path === 'data/stock-ops.json';
 
     for (let attempt = 0; attempt < 2; attempt++) {
       const token = await installationToken(attempt > 0);
@@ -420,6 +421,7 @@ function createGitHubAppClient({ fetchImpl = globalThis.fetch, env = process.env
         method: normalized.method,
         headers: githubHeaders(token),
       };
+      if (readStockJournal) options.headers.Accept = 'application/vnd.github.raw+json';
       if (normalized.body !== undefined) {
         options.headers['Content-Type'] = 'application/json';
         options.body = JSON.stringify(normalized.body);
@@ -429,6 +431,21 @@ function createGitHubAppClient({ fetchImpl = globalThis.fetch, env = process.env
         cachedToken = null;
         cachedTokenExpiresAt = 0;
         continue;
+      }
+      if (readStockJournal && response.ok && response.status !== 204) {
+        let bytes;
+        try {
+          bytes = Buffer.from(await response.arrayBuffer());
+        } catch (cause) {
+          throw makeError('GITHUB_REQUEST_FAILED', 503, cause);
+        }
+        // Raw contents skip the metadata/blob round trip. Hash these exact
+        // bytes as a Git blob so the next PUT keeps its version precondition.
+        const sha = crypto.createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
+        return { status: response.status, ok: true, payload: {
+          type: 'file', name: 'stock-ops.json', path: normalized.path,
+          sha, size: bytes.length, encoding: 'base64', content: bytes.toString('base64'),
+        } };
       }
       let payload = response.status === 204 ? null : await readJsonSafe(response);
       if (response.ok && normalized.method === 'GET' && needsBlobContent(payload)) {
