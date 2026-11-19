@@ -48,6 +48,34 @@ test('a hosting-disabled reserve falls back to a recovered primary during cooldo
   assert.equal(transport.lastRoute(endpoint).route,'primary');
 });
 
+test('a slow primary can finish reading the stock journal with a disabled reserve',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const primary='https://functions.yandexcloud.net/d4ep5fmjtp6t09f06tvt';
+  const calls=[];
+  const journal={content:'e30=',sha:'a'.repeat(40)};
+  const pending=createGatewayFailover().send({
+    endpoint:primary,
+    reserveEndpoint,
+    timeoutMs:20_000,
+    body:{action:'github',method:'GET',path:'data/stock-ops.json'},
+    fetchImpl:async(url,{signal})=>{
+      calls.push(url);
+      if(url===reserveEndpoint)return new Response('DEPLOYMENT_DISABLED',{status:402});
+      return new Promise((resolve,reject)=>{
+        const delay=setTimeout(()=>resolve(response(journal)),8_000);
+        signal.addEventListener('abort',()=>{
+          clearTimeout(delay);
+          reject(new DOMException('timeout','AbortError'));
+        },{once:true});
+      });
+    },
+  });
+
+  t.mock.timers.tick(8_000);
+  assert.deepEqual(await pending,journal);
+  assert.deepEqual(calls,[primary]);
+});
+
 test('a 402 from the primary remains a terminal refusal',async()=>{
   const calls=[];
   await assert.rejects(createGatewayFailover().send({endpoint,reserveEndpoint,body:{action:'github'},fetchImpl:async url=>{
