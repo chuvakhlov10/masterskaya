@@ -62,12 +62,25 @@ clients, signed device sessions, protocol 4, epoch and GitHub SHA remain valid.
 Small responses, errors and CORS preflight retain their previous format.
 
 This avoids the 3.5 MiB invocation-response ceiling, including JSON escaping
-of GitHub's base64 line breaks. Request/upload limits are unchanged. Monthly
-archive planning remains necessary as the hot journal continues to grow.
+of GitHub's base64 line breaks. Monthly archive planning remains necessary as
+the hot journal continues to grow.
 
 Gateway 1.5.6 reads the active journal from the raw GitHub Contents endpoint.
 The response retains the same base64 format. The gateway computes the Git blob
 SHA from the exact file bytes so clients can still use it for conditional writes.
+
+## Compressed stock journal uploads (gateway 1.5.7)
+
+Cloud Functions also limits the incoming and outgoing JSON request structure to
+3.5 MB. The browser therefore gzip-compresses the raw UTF-8 bytes of large
+`data/stock-ops.json` candidates and sends them as `contentGzip` (base64) inside
+the authenticated request. The gateway decompresses the bytes, restores the
+GitHub Contents API base64 representation, then runs the same append-only,
+epoch and SHA checks as for an ordinary upload. The GitHub repository file
+format, Git blob SHA, client protocol 4 and durable device outbox are unchanged.
+Compressed uploads are accepted only for `data/stock-ops.json`; other writes
+continue using the existing content field. The ingress JSON budget is set to
+3.2 MB to leave room below the platform's 3.5 MB request limit.
 
 Build with Node.js 22 using `npm run build:functions && npm run verify:functions`.
 Upload **only** `dist/yandex/storage/index.js` (or a ZIP containing just `index.js`)
@@ -75,7 +88,7 @@ as a new version of the existing storage function. Keep Node.js 22,
 `index.handler`, memory, timeout, environment variable bindings, service account
 and access settings from the active version. Do not generate new session secrets,
 change session version/epoch, or upload the Ably bundle for this fix. After deploy,
-health must report storage version 1.5.6. An existing paired device must read the
+health must report storage version 1.5.7. An existing paired device must read the
 journal and drain its outbox; health alone does not establish successful sync.
 
 For repeatable deployment without browser login, configure the

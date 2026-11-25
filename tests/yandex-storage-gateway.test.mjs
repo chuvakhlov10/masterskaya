@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import { gzipSync } from 'node:zlib';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
@@ -280,6 +281,64 @@ test('stock append above the old 2.9 MB cap still enforces complete immutable hi
   const changed=await handler(request([{...currentOps[0],delta:2},next[1]]));
   assert.equal(changed.statusCode,409);assert.equal(JSON.parse(changed.body).error,'STOCK_JOURNAL_OPERATION_CHANGED');
   assert.equal(puts,1);
+});
+
+test('gateway accepts a compressed stock journal whose uncompressed upload exceeds the Cloud Functions JSON limit', async () => {
+  const session = createSessionToken({ secret: SESSION_SECRET, clientId: 'device-client-123', nowMs: NOW, version: 1 });
+  const currentOps = [{
+    type: 'delta', location: 'main', marker: 'A', delta: 1, ts: 100,
+    client: 'device', opId: 'existing-large', comment: 'repeatable-journal-content-'.repeat(100_000),
+  }];
+  const nextOps = [
+    ...currentOps,
+    { type: 'delta', location: 'main', marker: 'A', delta: -1, ts: 200, client: 'device', opId: 'pending-large' },
+  ];
+  const currentJournal = stockJournalBytes(currentOps);
+  const candidateJournal = stockJournalBytes(nextOps);
+  const sha = gitBlobSha(currentJournal);
+  const compressed = gzipSync(candidateJournal).toString('base64');
+  const request = event({
+    action: 'github',
+    method: 'PUT',
+    path: 'data/stock-ops.json',
+    body: { message: 'append compressed stock journal', contentGzip: compressed, sha },
+  }, { 'x-masterskaya-session': session.token });
+  assert.ok(Buffer.byteLength(request.body, 'utf8') < 3_200_000);
+  assert.ok(Buffer.byteLength(JSON.stringify({
+    action: 'github',
+    method: 'PUT',
+    path: 'data/stock-ops.json',
+    body: { message: 'append compressed stock journal', content: candidateJournal.toString('base64'), sha },
+  }), 'utf8') > 3_500_000);
+
+  let uploaded = null;
+  const handler = createHandler({
+    env: ENV,
+    now: () => NOW,
+    fetchImpl: async (url, options) => {
+      if (url.endsWith('/installation')) return jsonResponse({ id: 1 });
+      if (url.includes('/access_tokens')) return jsonResponse({ token: 'ghs_installation_token_abcdefghijklmnopqrstuvwxyz' });
+      if (url.endsWith('/contents/data/stock-ops.json') && options.method === 'GET') return new Response(currentJournal);
+      if (url.endsWith('/contents/data/stock-ops.json') && options.method === 'PUT') {
+        uploaded = JSON.parse(options.body);
+        return jsonResponse({ content: { sha: 'f'.repeat(40) } });
+      }
+      assert.fail(`unexpected ${url}`);
+    },
+  });
+
+  const response = await handler(request);
+  assert.equal(response.statusCode, 200);
+  assert.equal(Buffer.from(uploaded.content, 'base64').compare(candidateJournal), 0);
+  assert.equal(uploaded.sha, sha);
+});
+
+test('compressed journal content is rejected for other repository files', () => {
+  assert.throws(() => normalizeRepoRequest({
+    method: 'PUT',
+    path: 'data/records.json',
+    body: { message: 'invalid compressed write', contentGzip: gzipSync(Buffer.from('[]')).toString('base64') },
+  }), /GITHUB_BODY_INVALID/);
 });
 
 test('stock gateway allows append-only deltas while preserving existing migration history', async () => {
