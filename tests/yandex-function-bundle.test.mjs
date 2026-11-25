@@ -13,8 +13,8 @@ const ROOT = path.resolve(new URL('..', import.meta.url).pathname);
 const packageWorkflow = fs.readFileSync(path.join(ROOT, '.github/workflows/package-yandex-functions.yml'), 'utf8');
 
 test('deployment archive label matches the storage function version', () => {
-  assert.match(packageWorkflow, /masterskaya-storage-gateway-1\.5\.7\.zip/);
-  assert.match(packageWorkflow, /name: yandex-functions-1\.5\.7/);
+  assert.match(packageWorkflow, //masterskaya-storage-gateway-1\\.5\\.8\\.zip//);
+  assert.match(packageWorkflow, //name: yandex-functions-1\\.5\\.8//);
   assert.doesNotMatch(packageWorkflow, /masterskaya-storage-gateway-1\.5\.3\.zip/);
 });
 
