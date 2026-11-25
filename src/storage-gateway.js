@@ -47,6 +47,67 @@ function makeError(code, cause, status) {
   return error;
 }
 
+const MAX_GATEWAY_REQUEST_BYTES = 3_200_000;
+
+function decodeBase64Bytes(value) {
+  const binary = atob(String(value || "").replace(/\\s/g, ""));
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
+
+function encodeBase64Bytes(bytes) {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
+async function gzipBase64Content(content) {
+  if (typeof CompressionStream !== "function" || typeof Blob !== "function" || typeof Response !== "function") {
+    throw makeError("GATEWAY_COMPRESSION_UNAVAILABLE", null, 413);
+  }
+  try {
+    const input = decodeBase64Bytes(content);
+    const stream = new Blob([input]).stream().pipeThrough(new CompressionStream("gzip"));
+    const compressed = new Uint8Array(await new Response(stream).arrayBuffer());
+    return encodeBase64Bytes(compressed);
+  } catch (cause) {
+    throw makeError("GATEWAY_COMPRESSION_FAILED", cause, 413);
+  }
+}
+
+async function prepareGatewayRequest({ method, path, ref, body }) {
+  const request = {
+    action: "github",
+    storageProtocolVersion: 4,
+    method,
+    path,
+    ...(ref ? { ref } : {}),
+    ...(body !== undefined ? { body } : {}),
+  };
+  const byteLength = value => new TextEncoder().encode(JSON.stringify(value)).byteLength;
+
+  if (byteLength(request) > MAX_GATEWAY_REQUEST_BYTES &&
+      String(method || "").toUpperCase() === "PUT" &&
+      path === "data/stock-ops.json" &&
+      typeof body?.content === "string") {
+    const compressedBody = {
+      message: body.message,
+      ...(body.sha ? { sha: body.sha } : {}),
+      contentGzip: await gzipBase64Content(body.content),
+    };
+    request.body = compressedBody;
+  }
+
+  if (byteLength(request) > MAX_GATEWAY_REQUEST_BYTES) {
+    throw makeError("GATEWAY_REQUEST_TOO_LARGE", null, 413);
+  }
+  return request;
+}
+
 function errorCode(error) {
   return String(error?.code || error?.message || "GATEWAY_REQUEST_FAILED");
 }
@@ -293,20 +354,14 @@ export async function storageGatewayRequest({
   const operation = `${String(method || "REQUEST").toUpperCase()} ${String(path || "gateway")}`;
 
   try {
+    const requestBody = await prepareGatewayRequest({ method, path, ref, body });
     const session = await ensureStorageSession({ endpoint, reserveEndpoint, fetchImpl, storage, eventTarget, waitImpl, random, onRetry });
     const payload = await postGateway({
       endpoint,
       reserveEndpoint,
       fetchImpl,
       headers: { "X-Masterskaya-Session": session.token },
-      body: {
-        action: "github",
-        storageProtocolVersion: 4,
-        method,
-        path,
-        ...(ref ? { ref } : {}),
-        ...(body !== undefined ? { body } : {}),
-      },
+      body: requestBody,
       maxAttempts,
       waitImpl,
       random,
