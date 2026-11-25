@@ -29,7 +29,7 @@ test('function builder creates executable single-file bundles with injected meta
     });
 
     const expected = {
-      storage: { version: '1.5.7', protocol: 4 },
+      storage: { version: '1.5.8', protocol: 4 },
       ably: { version: '1.4.1', protocol: 3 },
     };
     for (const targetName of ['storage', 'ably']) {
