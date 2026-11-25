@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import { gzipSync } from 'node:zlib';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
@@ -408,6 +409,18 @@ test('cutover lock accepts only the configured stock epoch envelope', async () =
   const current = await write(Buffer.from(JSON.stringify({schemaVersion:4,epoch:1,ops:[]})).toString('base64'));
   assert.equal(current.statusCode, 200);
   assert.equal(requests, 1);
+
+  const compressedJournal = gzipSync(Buffer.from(JSON.stringify({
+    schemaVersion: 4,
+    epoch: 1,
+    ops: [{ opId: 'compressed-epoch-op', type: 'delta', ts: NOW }],
+  }))).toString('base64');
+  const compressed = await handler(event({
+    action:'github', storageProtocolVersion:4, method:'PUT', path:'data/stock-ops.json',
+    body:{message:'compressed stock write',contentGzip:compressedJournal},
+  }, headers));
+  assert.equal(compressed.statusCode, 200);
+  assert.equal(requests, 2);
 });
 
 test('revoked device is denied before a GitHub data request', async () => {

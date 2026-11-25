@@ -1,5 +1,6 @@
 'use strict';
 
+const { gunzipSync } = require('node:zlib');
 const base = require('./index.js');
 const { createDeviceAuthService, normalizeDeviceName } = require('./device-auth.js');
 
@@ -136,8 +137,20 @@ function requiredStockEpoch(env) {
 
 function readStockJournalEnvelope(body) {
   try {
-    const encoded = String(body?.body?.content || '').replace(/\s+/g, '');
-    const value = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'));
+    let bytes;
+    if (body?.body?.contentGzip !== undefined) {
+      const encoded = String(body.body.contentGzip || '');
+      if (!encoded || encoded.length > 4_300_000 || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) return null;
+      const compressed = Buffer.from(encoded, 'base64');
+      if (!compressed.length || compressed.length > 3_200_000) return null;
+      bytes = gunzipSync(compressed, { maxOutputLength: 3_000_000 });
+    } else {
+      const encoded = String(body?.body?.content || '').replace(/\s+/g, '');
+      if (!encoded || encoded.length > 4_000_000 || !/^[A-Za-z0-9+/=]+$/.test(encoded)) return null;
+      bytes = Buffer.from(encoded, 'base64');
+      if (!bytes.length || bytes.length > 3_000_000) return null;
+    }
+    const value = JSON.parse(bytes.toString('utf8'));
     return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
   } catch {
     return null;

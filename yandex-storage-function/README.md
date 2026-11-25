@@ -69,7 +69,7 @@ Gateway 1.5.6 reads the active journal from the raw GitHub Contents endpoint.
 The response retains the same base64 format. The gateway computes the Git blob
 SHA from the exact file bytes so clients can still use it for conditional writes.
 
-## Compressed stock journal uploads (gateway 1.5.7)
+## Compressed stock journal uploads (gateway 1.5.7–1.5.8)
 
 Cloud Functions also limits the incoming and outgoing JSON request structure to
 3.5 MB. The browser therefore gzip-compresses the raw UTF-8 bytes of large
@@ -82,13 +82,19 @@ Compressed uploads are accepted only for `data/stock-ops.json`; other writes
 continue using the existing content field. The ingress JSON budget is set to
 3.2 MB to leave room below the platform's 3.5 MB request limit.
 
+Gateway 1.5.8 also decompresses this field in the device-pairing layer before
+checking the required schemaVersion 4 and stock epoch. The subsequent data
+gateway independently validates and decompresses the same bounded payload
+before the append-only and Git SHA checks. This keeps the archive epoch lock
+active for compressed and uncompressed writes alike.
+
 Build with Node.js 22 using `npm run build:functions && npm run verify:functions`.
 Upload **only** `dist/yandex/storage/index.js` (or a ZIP containing just `index.js`)
 as a new version of the existing storage function. Keep Node.js 22,
 `index.handler`, memory, timeout, environment variable bindings, service account
 and access settings from the active version. Do not generate new session secrets,
 change session version/epoch, or upload the Ably bundle for this fix. After deploy,
-health must report storage version 1.5.7. An existing paired device must read the
+health must report storage version 1.5.8. An existing paired device must read the
 journal and drain its outbox; health alone does not establish successful sync.
 
 For repeatable deployment without browser login, configure the
