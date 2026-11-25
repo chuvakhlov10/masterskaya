@@ -2481,7 +2481,18 @@ export default function App(){
         }
       } else {
         syncRetriesRef.current++;
-        scheduleStockRetry();
+        const status = Number(result?.status);
+        const permanentClientError = status >= 400 && status < 500 && ![408, 409, 425, 429].includes(status);
+        if (permanentClientError) {
+          if (stockRetryTimerRef.current) {
+            clearTimeout(stockRetryTimerRef.current);
+            stockRetryTimerRef.current = null;
+          }
+          setLastSyncError(result.error || `Ошибка отправки склада: HTTP ${status}`);
+          setSyncStatus("idle");
+        } else {
+          scheduleStockRetry();
+        }
       }
       return finalResult;
     } catch (error) {
