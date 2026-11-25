@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { gunzipSync } from "node:zlib";
 
 import {
   ensureStorageSession,
@@ -63,6 +64,72 @@ test("gateway read uses the stored device session", async () => {
   assert.equal(payload.sha, "a".repeat(40));
   assert.equal(calls[0].headers["X-Masterskaya-Session"], SESSION_TOKEN);
   assert.equal(JSON.parse(calls[0].body).storageProtocolVersion, 4);
+});
+
+test("large stock journal PUT is gzip-compressed below the Cloud Functions request limit", async () => {
+  const storage = makeStorage({ masterskaya_storage_session_v1: storedSession() });
+  const journal = Buffer.from(JSON.stringify({
+    schemaVersion: 4,
+    epoch: 1,
+    ops: [{
+      type: "delta",
+      location: "main",
+      marker: "LARGE",
+      delta: 1,
+      ts: 1_800_000_000_000,
+      client: "device",
+      opId: "large-journal-op",
+      comment: "x".repeat(2_500_000),
+    }],
+  }), "utf8");
+  const content = journal.toString("base64");
+  const body = { message: "update stock-ops", content, sha: "a".repeat(40) };
+  const uncompressedRequest = {
+    action: "github",
+    storageProtocolVersion: 4,
+    method: "PUT",
+    path: "data/stock-ops.json",
+    body,
+  };
+  assert.ok(Buffer.byteLength(JSON.stringify(uncompressedRequest), "utf8") > 3_200_000);
+
+  let sentOptions;
+  const result = await storageGatewayRequest({
+    method: "PUT",
+    path: "data/stock-ops.json",
+    body,
+    storage,
+    fetchImpl: async (_url, options) => {
+      sentOptions = options;
+      return response({ accepted: true });
+    },
+  });
+
+  assert.equal(result.accepted, true);
+  const sent = JSON.parse(sentOptions.body);
+  assert.equal(sent.body.content, undefined);
+  assert.equal(sent.body.sha, body.sha);
+  assert.equal(typeof sent.body.contentGzip, "string");
+  assert.ok(Buffer.byteLength(sentOptions.body, "utf8") < 3_200_000);
+  assert.deepEqual(gunzipSync(Buffer.from(sent.body.contentGzip, "base64")), journal);
+});
+
+test("small stock journal PUT keeps the original content field", async () => {
+  const storage = makeStorage({ masterskaya_storage_session_v1: storedSession() });
+  let sentOptions;
+  await storageGatewayRequest({
+    method: "PUT",
+    path: "data/stock-ops.json",
+    body: { message: "update stock-ops", content: Buffer.from("{}", "utf8").toString("base64") },
+    storage,
+    fetchImpl: async (_url, options) => {
+      sentOptions = options;
+      return response({ accepted: true });
+    },
+  });
+  const sent = JSON.parse(sentOptions.body);
+  assert.equal(sent.body.content, Buffer.from("{}", "utf8").toString("base64"));
+  assert.equal(sent.body.contentGzip, undefined);
 });
 
 test("renew replaces a near-expiry session", async () => {
