@@ -50,7 +50,7 @@ function makeError(code, cause, status) {
 const MAX_GATEWAY_REQUEST_BYTES = 3_200_000;
 
 function decodeBase64Bytes(value) {
-  const binary = atob(String(value || "").replace(/\\s/g, ""));
+  const binary = atob(String(value || "").replace(/\s/g, ""));
   const bytes = new Uint8Array(binary.length);
   for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
   return bytes;
