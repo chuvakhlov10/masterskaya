@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const { gunzipSync } = require('node:zlib');
 
 const ALLOWED_ORIGIN = 'https://chuvakhlov10.github.io';
 const GITHUB_API = 'https://api.github.com';
@@ -10,7 +11,8 @@ const REPO = 'masterskaya-data';
 const SESSION_ISSUER = 'masterskaya-storage-gateway';
 const SESSION_AUDIENCE = 'masterskaya-web';
 const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
-const MAX_BODY_BYTES = 4_100_000;
+const MAX_BODY_BYTES = 3_200_000;
+const MAX_STOCK_JOURNAL_BYTES = 3_000_000;
 const GITHUB_TIMEOUT_MS = 20_000;
 const SESSION_HEADER = 'x-masterskaya-session';
 
@@ -264,8 +266,14 @@ function normalizeRepoRequest(input = {}) {
     body = input.body;
     if (!body || typeof body !== 'object' || Array.isArray(body)) throw makeError('GITHUB_BODY_INVALID', 400);
     const message = String(body.message || '');
-    const content = String(body.content || '');
     const sha = body.sha === undefined ? null : String(body.sha || '');
+    const hasCompressedContent = body.contentGzip !== undefined;
+    if (hasCompressedContent && (path !== 'data/stock-ops.json' || body.content !== undefined)) {
+      throw makeError('GITHUB_BODY_INVALID', 400);
+    }
+    const content = hasCompressedContent
+      ? decodeCompressedStockContent(body.contentGzip)
+      : String(body.content || '');
     if (!message.trim() || message.length > 240) throw makeError('GITHUB_BODY_INVALID', 400);
     if (!content || content.length > 4_000_000 || !/^[A-Za-z0-9+/=\r\n]+$/.test(content)) {
       throw makeError('GITHUB_BODY_INVALID', 400);
@@ -304,6 +312,22 @@ function decodeRepositoryJson(content, errorCode) {
     return JSON.parse(Buffer.from(String(content || '').replace(/\s/g, ''), 'base64').toString('utf8'));
   } catch (cause) {
     throw makeError(errorCode, 422, cause);
+  }
+}
+
+function decodeCompressedStockContent(value) {
+  const encoded = String(value || '');
+  if (!encoded || encoded.length > MAX_BODY_BYTES * 2 || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) {
+    throw makeError('GITHUB_BODY_INVALID', 400);
+  }
+  const compressed = Buffer.from(encoded, 'base64');
+  if (!compressed.length || compressed.length > MAX_BODY_BYTES) throw makeError('GITHUB_BODY_INVALID', 400);
+  try {
+    const bytes = gunzipSync(compressed, { maxOutputLength: MAX_STOCK_JOURNAL_BYTES });
+    if (!bytes.length || bytes.length > MAX_STOCK_JOURNAL_BYTES) throw new Error('STOCK_JOURNAL_TOO_LARGE');
+    return bytes.toString('base64');
+  } catch (cause) {
+    throw makeError('GITHUB_BODY_INVALID', 400, cause);
   }
 }
 
